@@ -1,0 +1,11 @@
+[package]
+name = "fm-core"
+description = "领域模型：与平台和 UI 均无关的纯数据类型"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true

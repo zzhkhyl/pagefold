@@ -1,0 +1,19 @@
+[package]
+name = "fm-shell"
+description = "外壳层：工具栏、标签条、侧边栏、状态栏与整体布局"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tracing.workspace = true
+
+gpui.workspace = true
+gpui-component.workspace = true
+gpui-kit-assets.workspace = true
+fm-core.workspace = true
+fm-platform.workspace = true
+fm-services.workspace = true
+fm-views.workspace = true

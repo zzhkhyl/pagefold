@@ -1,0 +1,46 @@
+# Files（GPUI 版）workspace 根。
+#
+# 构建方式：Windows 原生 MSVC，不加 --target，不使用任何 MinGW/gcc linker。
+# 因此本文件与 .cargo/config.toml 中都不允许出现 [target.x86_64-pc-windows-gnu] 之类的配置
+# ——PLAN.md 中记录的交叉编译方案已废弃，详见 README.md 的「构建与运行」章节。
+
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# GPUI 家族：crates.io 上 gpui 官方包停在 0.2.x，0.3.x 由 gpui-pre-* 家族提供。
+# 上游包（gpui-component / gpui-base）自身已在 Cargo.toml 内完成
+# `gpui = { package = "gpui-pre" }` 形式的改名，因此这里只需做同样的改名，
+# 不需要任何 [patch.crates-io] 做包重映射。
+# 版本显式钉住 0.3.5：0.3.6 于 2026-09-21 发布，升级时机延后到骨架稳定之后。
+gpui = { package = "gpui-pre", version = "=0.3.5" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.5" }
+gpui-component = { version = "=0.6.4", default-features = false }
+gpui-kit-assets = { version = "=0.6.4", default-features = false }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+fm-core = { path = "crates/core" }
+fm-platform = { path = "crates/platform" }
+fm-services = { path = "crates/services" }
+fm-shell = { path = "crates/shell" }
+fm-views = { path = "crates/views" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+strip = true

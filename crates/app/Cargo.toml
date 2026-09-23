@@ -1,0 +1,28 @@
+[package]
+name = "fm-app"
+description = "Files（GPUI 版）应用入口：窗口引导、全局状态与键位绑定"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "files-gpui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui-component.workspace = true
+gpui-kit-assets.workspace = true
+
+fm-core.workspace = true
+fm-platform.workspace = true
+fm-services.workspace = true
+fm-shell.workspace = true
+fm-views.workspace = true

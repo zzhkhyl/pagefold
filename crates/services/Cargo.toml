@@ -1,0 +1,16 @@
+[package]
+name = "fm-services"
+description = "服务层：目录流式扫描、图标缓存、配置持久化与目录监听占位"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+fm-core.workspace = true
+fm-platform.workspace = true
