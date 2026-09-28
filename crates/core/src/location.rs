@@ -15,6 +15,11 @@ use std::path::{Path, PathBuf};
 pub enum Location {
     /// 虚拟位置：本机（驱动器总览）。
     Computer,
+    /// 虚拟位置：回收站。
+    ///
+    /// **只读浏览**：列出被删除的项目（原路径、大小、删除时间），
+    /// 不提供还原与清空——那两条是写操作，属后续阶段。
+    RecycleBin,
     /// 真实文件系统目录。
     Directory(PathBuf),
 }
@@ -27,7 +32,7 @@ impl Location {
     pub fn as_dir(&self) -> Option<&Path> {
         match self {
             Self::Directory(path) => Some(path),
-            Self::Computer => None,
+            Self::Computer | Self::RecycleBin => None,
         }
     }
 
@@ -36,6 +41,7 @@ impl Location {
         match self {
             // 虚拟位置没有文件名，直接用固定文案。
             Self::Computer => String::from("此电脑"),
+            Self::RecycleBin => String::from("回收站"),
             // 根目录（如 `C:\`）没有最后一段，退回完整路径，
             // 否则标签标题会变成空串，用户看到的是一个没有文字的标签。
             Self::Directory(path) => path
@@ -59,6 +65,8 @@ impl Location {
     pub fn from_shell_argument(argument: &str) -> Self {
         // 「此电脑」的 CLSID。桌面上双击「此电脑」图标时传过来的就是它。
         const COMPUTER_CLSID: &str = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
+        // 「回收站」的 CLSID。桌面上的回收站图标被双击时传过来的是它。
+        const RECYCLE_BIN_CLSID: &str = "::{645FF040-5081-101B-9F08-00AA002F954E}";
 
         let trimmed = argument.trim();
         if trimmed.is_empty() {
@@ -67,11 +75,17 @@ impl Location {
         if trimmed.eq_ignore_ascii_case("computer") || trimmed == "此电脑" {
             return Self::Computer;
         }
+        if trimmed.eq_ignore_ascii_case(RECYCLE_BIN_CLSID)
+            || trimmed.eq_ignore_ascii_case("recyclebin")
+            || trimmed == "回收站"
+        {
+            return Self::RecycleBin;
+        }
         if trimmed.eq_ignore_ascii_case(COMPUTER_CLSID) {
             return Self::Computer;
         }
-        // 其余 `::{...}`（回收站、网络、控制面板…）与 `shell:` 伪协议都是我们无法表示的
-        // 虚拟位置。退回「此电脑」而不是报错：用户点桌面图标时期待的是「开一个文件管理器」，
+        // 其余 `::{...}`（网络、控制面板…）与 `shell:` 伪协议仍是我们无法表示的虚拟位置。
+        // 退回「此电脑」而不是报错：用户点桌面图标时期待的是「开一个文件管理器」，
         // 给一个能用的起点比弹一条错误更有意义。
         if trimmed.starts_with("::{") || trimmed.starts_with("shell:") {
             return Self::Computer;
@@ -197,11 +211,29 @@ mod tests {
     }
 
     #[test]
+    fn shell_argument_recognises_the_recycle_bin() {
+        // 回收站现在有自己的虚拟位置，不能再像以前那样退回「此电脑」。
+        for argument in [
+            "::{645FF040-5081-101B-9F08-00AA002F954E}",
+            "::{645ff040-5081-101b-9f08-00aa002f954e}",
+            "recyclebin",
+            "RecycleBin",
+            "回收站",
+        ] {
+            assert_eq!(
+                Location::from_shell_argument(argument),
+                Location::RecycleBin,
+                "参数 {argument:?} 应映射到「回收站」"
+            );
+        }
+    }
+
+    #[test]
     fn shell_argument_falls_back_instead_of_failing_on_other_virtual_items() {
         // 这些是无法用 `PathBuf` 表示的虚拟项，退回「此电脑」而不是产出一个假路径 ——
         // 否则用户点桌面上的图标会看到空列表加一条「路径不存在」。
+        // 注意「回收站」不在这一列：它有对应的 `Location` 变体，见上一个测试。
         for argument in [
-            "::{645FF040-5081-101B-9F08-00AA002F954E}", // 回收站
             "::{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}", // 网络
             "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\foo", // 虚拟项下的子路径
             "shell:Downloads",

@@ -29,7 +29,9 @@ const INITIAL_HEIGHT: f32 = 820.0;
 /// 必须显式设置：GPUI 在 `titlebar.title` 为 `None` 时会用**空字符串**创建窗口，
 /// 后果是任务栏没有名字，且单实例激活时 `FindWindowW` 找不到窗口。
 /// 隐藏系统边框后这个文本仍然生效：任务栏与 Alt+Tab 读的都是窗口文本。
-const WINDOW_TITLE: &str = "叠页";
+///
+/// 这就是**任务栏上显示的名字**，也是应用的中文名。
+const WINDOW_TITLE: &str = "文件夹管理器";
 
 /// 单实例互斥体名。
 ///

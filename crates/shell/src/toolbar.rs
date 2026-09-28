@@ -243,13 +243,15 @@ impl ShellView {
 
         let body = match &location {
             // 虚拟位置没有层级可拆，直接给一个静态标签。
-            fm_core::Location::Computer => div()
+            // 文案不在这里硬编码：`Location::title()` 是「位置叫什么」的唯一来源，
+            // 标签页标题与面包屑因此不会各写一份而慢慢分叉。
+            fm_core::Location::Computer | fm_core::Location::RecycleBin => div()
                 .flex_grow(1.0)
                 .min_w(px(0.0))
                 .px(px(2.0))
                 .text_size(px(12.5))
                 .text_color(tokens.fg)
-                .child("此电脑")
+                .child(location.title())
                 .into_any_element(),
             fm_core::Location::Directory(path) => {
                 let crumbs = breadcrumb::fold(

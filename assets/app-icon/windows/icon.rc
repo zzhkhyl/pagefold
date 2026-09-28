@@ -1,4 +1,4 @@
-// 叠页 · 应用图标资源脚本
+// 文件夹管理器 · 应用图标资源脚本
 //
 // 已接入 `fm-app` 的构建：由 crates/app/build.rs 交给 embed-resource 编译，
 // 产物的链接参数以 `cargo:rustc-link-arg-bins` 交给链接器。

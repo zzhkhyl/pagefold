@@ -31,6 +31,19 @@ pub fn error(message: SharedString, tokens: &Tokens) -> AnyElement {
     centered(IconName::CircleAlert, message, None, tokens)
 }
 
+/// 回收站为空。
+///
+/// 与 [`empty_folder`] 分开：两者的后续动作完全相反——空文件夹在提示用户
+/// 往里放东西，空回收站则什么也不用做。
+pub fn recycle_bin_empty(tokens: &Tokens) -> AnyElement {
+    centered(
+        IconName::Trash,
+        "回收站是空的",
+        Some("删除的项目会先放进这里，之后可以还原"),
+        tokens,
+    )
+}
+
 /// 筛选（搜索框）无结果。
 pub fn no_results(query: &str, tokens: &Tokens) -> AnyElement {
     centered(

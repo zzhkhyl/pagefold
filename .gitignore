@@ -6,5 +6,7 @@
 *.lib
 .codebuddy/
 design/
+# 安装包产物（由 installer/files.iss 编译得到，见 README「打包安装程序」）
+/dist
 # 图标生成器是独立 workspace（见 tools/icon-gen/Cargo.toml），构建产物单独忽略
 /tools/icon-gen/target

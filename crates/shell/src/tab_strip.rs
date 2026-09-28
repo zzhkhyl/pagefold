@@ -1,4 +1,8 @@
-//! 标签条：图标 + 标题 + 关闭按钮，最右侧常驻「+」新建按钮。
+//! 标签条：标签（图标 + 标题 + 关闭按钮）+ 紧随其后的「+」新建按钮，
+//! 右端是窗口动作组（主题切换 + 最小化 / 最大化 / 关闭）。
+//!
+//! 这一栏现在也是**窗口顶部唯一的栏**：品牌栏整条删掉之后，
+//! 窗口的拖动区域落在标签与动作组之间的空白段上（见 [`render_tab_strip`] 末尾的说明）。
 //!
 //! 形态照搬设计稿的 `.tab`：32px 高、顶部 8px 圆角、激活标签用 surface 底色
 //! 与 2px 强调色顶边「连」到下方的命令条，未激活标签是次级文字色。
@@ -11,7 +15,8 @@
 
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, px, prelude::FluentBuilder as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, WindowControlArea, div, px,
+    prelude::FluentBuilder as _,
 };
 use gpui_component::{Icon, Sizable as _};
 use gpui_kit_assets::IconName;
@@ -29,7 +34,9 @@ impl ShellView {
         let foreground = tokens.fg;
         let active_id = self.tabs.active().id();
 
-        let tabs = self.tabs.tabs().iter().map(|tab| {
+        // 收集成 `Vec` 而不是留着惰性迭代器：下面的 `render_window_actions` 需要
+        // 可变借用 `cx`，而迭代器里的 `cx.listener(..)` 会一直持有 `cx` 的不可变借用。
+        let tabs: Vec<AnyElement> = self.tabs.tabs().iter().map(|tab| {
             let id = tab.id();
             let is_active = id == active_id;
             let title: SharedString = tab.state().title().into();
@@ -138,7 +145,11 @@ impl ShellView {
                         .child(close),
                 )
                 .into_any_element()
-        });
+        }).collect();
+
+        // 右端动作组：主题切换 + 三个窗口按钮。它们原先在标题栏（第一栏），
+        // 随第一栏精简为「只剩品牌标志」一起下移到本栏——这也是本次唯一一处布局性调整。
+        let window_actions = self.render_window_actions(cx);
 
         div()
             .relative()
@@ -148,8 +159,9 @@ impl ShellView {
             .items_end()
             .gap(px(8.0))
             .h(px(metrics::TABSTRIP_HEIGHT))
-            .px(px(8.0))
-            .pt(px(metrics::TABSTRIP_PADDING_TOP))
+            // 只留左边距：右端是关闭按钮，要贴到窗口右边缘（Windows 惯例），
+            // 所以这一栏不再有右内边距。
+            .pl(px(8.0))
             .bg(tokens.panel)
             // 底部分隔线做成「绝对定位的第一个子元素」，而不是父级的 border：
             // 设计稿把它画在 `.tabstrip::after`（z-index 0）上，激活标签（z-index 2）
@@ -165,28 +177,58 @@ impl ShellView {
                     .bg(tokens.border),
             )
             .child(
+                // 标签区：标签 + 紧跟其后的「＋」。这一组**可压缩**（`flex_shrink`）
+                // 而不是占满整栏——剩下的宽度留给右边的拖拽段，
+                // 「＋」才会紧挨着最后一个标签，而不是被推到最右端。
+                //
+                // 顶部内衬挂在这里而不是整栏上：窗口按钮要占满 38px 整栏高度，
+                // 整栏带内衬会把它们压缩 6px、向上溢出。
                 div()
-                    .id("tab-list")
                     .flex()
                     .flex_row()
                     .items_end()
-                    .gap(px(2.0))
-                    .flex_grow(1.0)
+                    .gap(px(6.0))
+                    .flex_shrink(1.0)
                     .min_w(px(0.0))
-                    .h(px(metrics::TAB_HEIGHT))
-                    .overflow_hidden()
-                    .children(tabs),
+                    .pt(px(metrics::TABSTRIP_PADDING_TOP))
+                    .child(
+                        div()
+                            .id("tab-list")
+                            .flex()
+                            .flex_row()
+                            .items_end()
+                            .gap(px(2.0))
+                            .flex_shrink(1.0)
+                            .min_w(px(0.0))
+                            .h(px(metrics::TAB_HEIGHT))
+                            .overflow_hidden()
+                            .children(tabs),
+                    )
+                    .child(fm_views::widgets::plain_icon_button(
+                        "tab-new",
+                        IconName::Plus,
+                        16.0,
+                        "新建标签页",
+                        tokens,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.open_tab(cx);
+                        }),
+                    )),
             )
-            .child(fm_views::widgets::plain_icon_button(
-                "tab-new",
-                IconName::Plus,
-                16.0,
-                "新建标签页",
-                tokens,
-                cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.open_tab(cx);
-                }),
-            ))
+            // 拖拽段：品牌栏删掉之后，这是窗口**唯一**的拖动区域。
+            // 只能挂在这一段空白上——挂在整栏会抢在标签与窗口按钮之前命中
+            // （命中区按注册顺序匹配，父元素先于子元素，原因见 `titlebar` 的说明）。
+            //
+            // 留 32px 最小宽度：标签多到铺满时其余项都会被压到底，
+            // 这一段不能再被挤没，否则整扇窗口就抓不动了。
+            .child(
+                div()
+                    .flex_grow(1.0)
+                    .min_w(px(32.0))
+                    .h_full()
+                    .window_control_area(WindowControlArea::Drag),
+            )
+            .child(window_actions)
             .into_any_element()
     }
 }

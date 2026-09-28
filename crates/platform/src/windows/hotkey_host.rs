@@ -33,9 +33,10 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, IDI_APPLICATION, IsWindowVisible,
-    KBDLLHOOKSTRUCT, LoadIconW, MB_ICONERROR, MB_OK, MF_CHECKED, MF_SEPARATOR, MF_STRING,
-    MessageBoxW, MSG, PostMessageW, PostQuitMessage, RegisterClassW, SW_SHOW, SetForegroundWindow,
+    DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, HICON,
+    IDI_APPLICATION, IMAGE_ICON, IsWindowVisible, KBDLLHOOKSTRUCT, LoadIconW, LoadImageW,
+    LR_SHARED, MB_ICONERROR, MB_OK, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW,
+    PostMessageW, PostQuitMessage, RegisterClassW, SM_CXSMICON, SW_SHOW, SetForegroundWindow,
     SetWindowsHookExW, ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
     UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_COMMAND, WM_DESTROY, WM_KEYDOWN, WM_KEYUP,
     WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WINDOW_EX_STYLE,
@@ -416,9 +417,7 @@ unsafe fn add_tray_icon(window: HWND) -> anyhow::Result<()> {
     data.uID = TRAY_ICON_ID;
     data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     data.uCallbackMessage = WM_TRAYICON;
-    // 暂用系统自带图标：托盘图标属于品牌资产，需要 .ico 与资源脚本，
-    // 留到界面定型后再替换。
-    data.hIcon = unsafe { LoadIconW(None, IDI_APPLICATION) }.context("加载托盘图标失败")?;
+    data.hIcon = unsafe { load_tray_icon() }.context("加载托盘图标失败")?;
     copy_wide(&state.app_title, &mut data.szTip);
 
     if !unsafe { Shell_NotifyIconW(NIM_ADD, &data) }.as_bool() {
@@ -426,6 +425,38 @@ unsafe fn add_tray_icon(window: HWND) -> anyhow::Result<()> {
     }
     TRAY_ADDED.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+/// 托盘图标。
+///
+/// 优先用**应用自己的图标**：它与任务栏按钮、开始菜单读的是同一份 exe 资源
+/// （资源 ID 1），GPUI 注册窗口类时也是从那里取的。不用它的话托盘会显示成一个
+/// 通用系统图标，与任务栏上那枚对不上——用户会以为那是另一个程序。
+///
+/// 尺寸取 `SM_CXSMICON`（托盘图标的标准尺寸），不用 `LR_DEFAULTSIZE`：
+/// 后者拿的是 32px 大图标，被系统缩到 16px 后发虚。
+///
+/// 取不到时退回系统通用图标——**绝不能返回空句柄**：托盘没有图标，
+/// 比图标不好看严重得多（用户根本找不到这个常驻进程）。
+unsafe fn load_tray_icon() -> anyhow::Result<HICON> {
+    if let Ok(module) = unsafe { GetModuleHandleW(None) } {
+        let size = unsafe { GetSystemMetrics(SM_CXSMICON) };
+        if let Ok(handle) = unsafe {
+            LoadImageW(
+                Some(module.into()),
+                PCWSTR(1 as _),
+                IMAGE_ICON,
+                size,
+                size,
+                LR_SHARED,
+            )
+        } {
+            // SAFETY: `LoadImageW` 在 `IMAGE_ICON` 下返回的句柄就是 `HICON`。
+            return Ok(HICON(handle.0));
+        }
+    }
+
+    unsafe { LoadIconW(None, IDI_APPLICATION) }.context("加载系统默认图标也失败")
 }
 
 /// 移除托盘图标。未添加过时是空操作。

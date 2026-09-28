@@ -80,4 +80,14 @@ pub trait FileSystem: Send + Sync + 'static {
 
     /// 读取单个路径的元信息，用于状态栏与后续的预览面板。
     fn stat(&self, path: &Path) -> anyhow::Result<Entry>;
+
+    /// 枚举回收站条目（**只读**）。
+    ///
+    /// 只列不改：还原与清空都是写操作，属后续阶段。
+    /// 条目里的 `modified` 是**删除时间**（原修改时间没有存在 `$I` 里），
+    /// `path` 指向回收站内的实际存放位置（`$R` 项）。
+    ///
+    /// 单个卷读不到、单个条目损坏都只跳过，不返回错误：
+    /// 回收站里混着损坏项是常态，不该让整个视图报错。
+    fn recycle_bin(&self) -> anyhow::Result<Vec<Entry>>;
 }

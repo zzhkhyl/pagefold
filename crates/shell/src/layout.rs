@@ -143,6 +143,10 @@ impl ShellView {
                 empty_state::no_results(self.query.trim(), tokens)
             } else if self.loading {
                 empty_state::loading(empty_state::SKELETON_ROWS, tokens)
+            } else if self.in_recycle_bin() {
+                // 「回收站是空的」与「这个文件夹是空的」不是一回事：
+                // 后者在暗示用户往里放东西，而空回收站什么也不用做。
+                empty_state::recycle_bin_empty(tokens)
             } else {
                 empty_state::empty_folder(tokens)
             }
@@ -442,7 +446,13 @@ impl ShellView {
             let view = cx.entity().downgrade();
             Rc::new(move |path: PathBuf, _window: &mut Window, cx: &mut App| {
                 if view
-                    .update(cx, |view, cx| view.navigate_to(path, cx))
+                    .update(cx, |view, cx| {
+                        // 与双击同一道闸：回收站里的位置不能按路径进入。
+                        if view.in_recycle_bin() {
+                            return;
+                        }
+                        view.navigate_to(path, cx);
+                    })
                     .is_err()
                 {
                     tracing::debug!("预览面板打开目录时视图已销毁，本次操作被忽略");
@@ -507,7 +517,14 @@ pub(crate) fn open_handler(cx: &Context<ShellView>) -> fm_views::OpenHandler {
         }
         let path = entry.path.as_ref().clone();
         if view
-            .update(cx, |view, cx| view.navigate_to(path, cx))
+            .update(cx, |view, cx| {
+                // 回收站里的条目不能按路径进入：它的 `path` 指向 `$Recycle.Bin` 内部
+                // （受保护的系统目录），按普通目录去扫只会得到「拒绝访问」。
+                if view.in_recycle_bin() {
+                    return;
+                }
+                view.navigate_to(path, cx);
+            })
             .is_err()
         {
             // 与表头排序一致：不静默吞错，留一条可定位的 debug 日志。

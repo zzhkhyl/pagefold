@@ -202,10 +202,28 @@ pub(crate) fn entry_menu_spec(
     nodes
 }
 
+/// 回收站里条目的右键菜单。
+///
+/// 只有「看」是有意义的。复制 / 剪切 / 重命名 / 移到回收站对回收站里的条目
+/// 全都谈不是；真正该有的是**还原**与**彻底删除**，而那是写操作，
+/// 不在本次范围内（方案 B 只做只读浏览）。
+///
+/// 因此这里**只给「属性」**，而不是把一排永远禁用的项摆上去：
+/// 禁用意味着「以后会有」，而这两项并不在计划内。
+pub(crate) fn recycle_bin_menu_spec() -> Vec<MenuNode> {
+    vec![MenuNode::Item(MenuItemSpec::new(
+        "属性",
+        IconName::Info,
+        MenuAction::ShowPreview,
+    ))]
+}
+
 /// 内容区空白处右键菜单的节点清单。
 ///
 /// 对齐设计稿 `#files` 右键处理里「没有命中行」的那条分支。
-/// 设计稿末尾那段「回收站 / 清空回收站」没有对应实现——本版本还没有回收站这个虚拟位置。
+///
+/// 设计稿末尾那段「回收站 / 清空回收站」仍没有对应实现：回收站这个虚拟位置
+/// 现在已经有了（侧边栏可进入、只读浏览），但**清空回收站是写操作**，不在本次范围。
 ///
 /// 视图模式两项的措辞取自命令条的 tooltip（「详细信息视图」/「图标视图」），
 /// 而不是设计稿空白菜单里的「列表视图 / 网格视图」：同一个动作在应用内应该只有一个名字。
@@ -368,19 +386,27 @@ fn dispatch(
 pub(crate) fn entry_menu_builder(cx: &Context<ShellView>) -> fm_views::EntryMenuBuilder {
     let shell = cx.entity().downgrade();
     Rc::new(move |menu, entry, _index, window, cx| {
-        let Ok((selected, current_dir)) = shell.read_with(&**cx, |view: &ShellView, _| {
-            let current_dir = view
-                .tabs
-                .active_state()
-                .location()
-                .as_dir()
-                .map(Path::to_path_buf);
-            (view.selection.len(), current_dir)
-        }) else {
+        let Ok((selected, current_dir, in_recycle_bin)) =
+            shell.read_with(&**cx, |view: &ShellView, _| {
+                let current_dir = view
+                    .tabs
+                    .active_state()
+                    .location()
+                    .as_dir()
+                    .map(Path::to_path_buf);
+                (view.selection.len(), current_dir, view.in_recycle_bin())
+            })
+        else {
             return menu;
         };
 
-        let nodes = entry_menu_spec(entry, selected, current_dir.as_deref());
+        // 回收站里的条目走另一份清单：导航类的项在那里没有意义，见
+        // [`recycle_bin_menu_spec`]。
+        let nodes = if in_recycle_bin {
+            recycle_bin_menu_spec()
+        } else {
+            entry_menu_spec(entry, selected, current_dir.as_deref())
+        };
         build_menu(menu, &nodes, Some(entry), &shell, window, cx)
     })
 }
@@ -545,6 +571,22 @@ mod tests {
         assert!(find(&many, "剪切 3 项").is_some());
         assert!(find(&many, "批量重命名").is_some());
         assert!(find(&many, "重命名").is_none(), "多选不该再显示单项重命名");
+    }
+
+    #[test]
+    fn recycle_bin_menu_offers_only_what_actually_works() {
+        let nodes = recycle_bin_menu_spec();
+
+        // 只有一项，而且是可用的「属性」——不是一排禁用项。
+        assert_eq!(nodes.len(), 1);
+        let spec = find(&nodes, "属性").expect("应当有「属性」");
+        assert!(!spec.disabled, "「属性」（显示预览面板）是已实现能力");
+        assert_eq!(spec.action, MenuAction::ShowPreview);
+
+        // 明确不该出现的几项：它们对回收站里的条目没有意义。
+        for label in ["打开", "在新标签页中打开", "重命名", "移到回收站"] {
+            assert!(find(&nodes, label).is_none(), "{label} 不该出现在回收站菜单里");
+        }
     }
 
     #[test]

@@ -83,6 +83,23 @@ impl ShellView {
             ));
         }
 
+        // —— 回收站 ——
+        //
+        // 放在「访问位置」列表的最下面。它是虚拟位置而不是真实目录，
+        // 因此不走 `quick_access`（那份数据来自系统的已知文件夹枚举），单独一行。
+        rows.push(nav_row(
+            "recycle-bin",
+            String::from("回收站"),
+            IconName::Trash,
+            collapsed,
+            false,
+            matches!(location, Location::RecycleBin),
+            tokens,
+            cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.go_to_recycle_bin(cx);
+            }),
+        ));
+
         // —— 此电脑（含驱动器子项）——
         //
         // 放在「快速访问」之后：它是「向上」的终点，也是后续 `Win+E` 接管的默认落点。

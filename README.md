@@ -1,6 +1,7 @@
 # Files（GPUI 版）
 
-面向 Windows 的现代桌面文件资源管理器，界面按 `design/` 下的设计稿（「叠页」）实现，
+面向 Windows 的现代桌面文件资源管理器，中文名「文件夹管理器」，
+界面按 `design/` 下的设计稿实现（设计稿里用的代号是「叠页」，指同一件东西），
 Fluent Design / Windows 11 原生观感，参考 Files 项目。
 需求基线见 [`.codebuddy/plans/PLAN.md`](./.codebuddy/plans/PLAN.md)。
 
@@ -27,13 +28,15 @@ Fluent Design / Windows 11 原生观感，参考 Files 项目。
 
 ## 已实现能力
 
-- **主窗口五区块**：自绘标题栏（品牌 + 状态 + 主题 + 最小化/最大化/关闭）、标签条、命令条、
-  内容区（侧边栏 / 主区 / 预览面板三栏）、底部状态栏。
-  窗口以 `appears_transparent: true` 创建，系统边框隐藏，窗口控制按钮由 shell 提供，
-  动作交回系统（`WindowControlArea`），不自己实现窗口缩放逻辑。
+- **主窗口四区块**：标签条、命令条、内容区（侧边栏 / 主区 / 预览面板三栏）、底部状态栏。
+  窗口以 `appears_transparent: true` 创建，系统边框隐藏；主题切换与最小化 / 最大化 / 关闭
+  都在标签条右端，动作交回系统（`WindowControlArea`），不自己实现窗口缩放逻辑。
+  标签与这组按钮之间那段空白是**窗口唯一的拖动区域**——原来承担拖拽的品牌栏已整条删除，
+  所以那一段留了 32px 最小宽度，保证标签铺满时窗口仍抓得住。
 - **多标签页**：新建 / 关闭 / 切换，每个标签独立维护路径、前进后退历史、视图状态与扫描代数。
   关闭当前标签时优先落到右侧邻居，关闭最后一个标签时重置为新标签。
 - **左侧导航栏**：快速访问（由 `SHGetKnownFolderPath` 定位，正确处理被重定向过的文件夹）、
+  **回收站**（虚拟位置，只读浏览，见下）、
   「此电脑」分组（可折叠，子项为驱动器）、底部磁盘容量档位（名称 + 百分比 + 容量条 + 剩余/总量）。
   选中项为强调色浅底 + 强调色图标；展开 238px、折叠 48px，切换带 180ms 缓动。
 - **地址栏**：面包屑逐级可点击跳转，层数过多时保留首段与尾部、中间折叠为省略号；
@@ -47,6 +50,10 @@ Fluent Design / Windows 11 原生观感，参考 Files 项目。
 - **选中与预览**：单击选中、`Ctrl` 切换、`Shift` 区间、表头勾选框全选；
   选中后出现选中条（数量 / 合计大小 / 动作）与右侧预览面板
   （单项显示名称、类型、大小、修改时间、位置；多项显示清单与合计）。
+- **右键上下文菜单**：详情行、图标单元格、内容区空白处各有一套。条目菜单按类型动态生成
+  （驱动器隐藏「重命名 / 移到回收站」、多选时文案带数量与「批量」、回收站里只给「属性」）；
+  尚未接入的写操作保留设计稿位置但为禁用态。定位与边缘吸附、`Esc` 与点击外部关闭、
+  上下键切换与回车确认由组件库的 `PopupMenu` 提供，没有自己造弹出层。
 - **深浅色主题与外观档位**：命令条一键切换主题；状态栏三档缩略图缩放；
   界面密度（紧凑 / 标准 / 宽松）与「显示扩展名」由配置提供。
   全部持久化到 `%APPDATA%\files-gpui\config.json`。
@@ -58,6 +65,13 @@ Fluent Design / Windows 11 原生观感，参考 Files 项目。
 - **「此电脑」驱动器总览**：侧边栏顶部可进入，以卡片形式列出全部驱动器
   （图标 + 类型 + 剩余容量 / 总容量 + 占用条）。虚拟位置由 `Location` 枚举表达，
   从类型上就不可能被当成目录送去扫描。
+- **回收站（只读浏览）**：侧边栏「访问位置」的最下面进入。直接读各卷
+  `$Recycle.Bin\<SID>\` 里成对的 `$I`（元数据）/ `$R`（内容）——**不走** Shell 命名空间那套 COM，
+  因为这里需要的只是「删了什么、多大、什么时候删的」。列表显示**原文件名**、大小与**删除时间**，
+  可排序、可搜索；读不到的卷与损坏的 `$I` 一律跳过，不让整个视图报错。
+  **不做还原与清空**：那两条是写操作。回收站里的条目也不能按路径导航
+  （`path` 指向受保护的 `$Recycle.Bin` 内部），双击、右键「打开」与预览面板的「打开」
+  三处都做了拦截。
 - **`Win+E` 接管**：由独立的热键宿主进程（`files-gpui.exe --hotkey-host`）用低层键盘钩子
   （`WH_KEYBOARD_LL`）拦截 `Win+E`，激活已有窗口或拉起一个新窗口，
   初始位置为「此电脑」——与资源管理器 `Win+E` 的语义一致。
@@ -81,16 +95,26 @@ Fluent Design / Windows 11 原生观感，参考 Files 项目。
 界面部分（按设计稿对照）：
 
 - **文件写操作全部未接入**：复制 / 剪切 / 粘贴 / 重命名 / 删除 / 新建文件与文件夹。
-  设计稿里这些控件（选中条的动作组、命令条的「新建」）**按原位渲染**，
-  但处于设计稿自带的禁用态（`opacity: .4`）并带「尚未接入」的 tooltip——
-  刻意不做成「点了没反应」的样子。
+  设计稿里这些控件（选中条的动作组、命令条的「新建」、右键菜单里的对应项）**按原位渲染**，
+  但一律是禁用态并带「尚未接入」的 tooltip——刻意不做成「点了没反应」的样子。
+- **回收站只支持浏览**：侧边栏可进入，能列出被删项目（原文件名 / 大小 / 删除时间）、
+  可排序、可搜索；但**还原**与**清空回收站**未实现（都是写操作，与上一批同类）。
+  另外回收站里的条目不能按路径导航——它们的 `path` 指向受保护的 `$Recycle.Bin` 内部，
+  双击、右键「打开」、预览面板的「打开」三处都做了拦截。
+  回收站里的右键菜单因此只有「属性」一项（见 `fm-shell` 的 `recycle_bin_menu_spec`）。
 - **设置页未实现**：`design/file-manager-settings.html` 是一个独立页面，
   本次只交付主界面。因此「界面密度」与「显示扩展名」目前只能改配置文件
   （`%APPDATA%\files-gpui\config.json` 的 `density` / `show_ext`），
   界面上没有开关；`ShellView::set_density` 作为预留入口保留。
-- **标题栏的「设置」「帮助」入口未接入**（设计稿右侧有三个按钮，当前只有主题切换）。
+- **「设置 / 帮助」入口未实现**：设计稿的标题栏右侧除了主题切换还有这两个按钮，
+  而标题栏本身已按反馈**整条删除**（主题切换与三个窗口按钮移到了标签条右端），
+  两个入口目前无处安放；设置页本身的情况见上一条。
 - **标签条的「更多」按钮未实现**（设计稿里有，用于标签页操作菜单）。
-- **右键上下文菜单、拖放、目录变更实时监听**未实现（`platform` 层的 trait 边界已就绪）。
+- **拖放（drag & drop）未实现**：既不能把条目拖出去（拖到资源管理器 / 其它程序），
+  也不能把外部文件拖进来。`platform` 层的 trait 边界已留好
+  （见 `crates/platform/src/lib.rs` 的模块说明）。
+- **目录变更没有实时监听**：外部程序增删文件后本程序不会自动刷新，需要手动刷新
+  （命令条按钮，或内容区空白处右键 →「刷新」），或切走再切回来。
 - **键盘快捷键未绑定**：设计稿的 `Ctrl+T` / `Ctrl+W` / `Ctrl+L` / `F2` / `Delete`
   等尚未接入；目前所有操作都需要鼠标。
 - **缩略图与文件内容预览未实现**：预览面板展示的是元信息（名称 / 类型 / 大小 / 修改时间 / 位置），
@@ -98,7 +122,14 @@ Fluent Design / Windows 11 原生观感，参考 Files 项目。
 - 预览面板的「在列表中定位」按钮未实现（需要滚动句柄配合）。
 - 双击文件不会打开——需要用默认程序打开，走 `ShellExecute`，属 `fm-platform` 的后续工作；
   在那之前刻意不做任何事，避免把文件当目录去扫描。
+- **框选（橡皮筋）未实现**：单击 / `Ctrl` 点选 / `Shift` 区间 / 表头全选都已可用，
+  但按住左键拖出一块矩形来批量选中还没有。底层选择模型当初就是按区间选择设计的
+  （`anchor` 锚点 + 有序集合），扩展时不需要改调用方。
+- **搜索只过滤当前目录，不递归**：匹配的是**当前目录已加载条目**的名称
+  （大小写不敏感的子串匹配），不会下钻子目录，也没有「搜索整个磁盘」这类索引。
+  优点是边扫边筛、大目录下即时出结果；代价是找不到子目录里的东西。
 - 列宽拖拽、标签过多时的横向滚动与左右箭头未实现。
+- 标签不能拖拽排序，也没有「标签页右键菜单」。
 - 图标视图的滚动位置按**行号**锚定：调整窗口宽度改变列数后，「第 N 行」对应的条目整批换掉，
   表现为视图跳位（虚拟化网格的固有取舍）。
 - 图标网格的列数按推算宽度计算（GPUI 未暴露子元素实测宽度），
@@ -115,7 +146,8 @@ Fluent Design / Windows 11 原生观感，参考 Files 项目。
   `windows/icon.rc` 交给 `embed-resource` 编译，产物经 `cargo:rustc-link-arg-bins` 给链接器：
   **图标烘焙进 PE 资源段，产物仍是单文件、运行期无新增依赖**。构建机上找不到 `rc.exe`
   （未装 Windows SDK）时只输出一条 warning 并跳过嵌入，不中断构建。
-  仍未做的：`icon.icns` 没有 `.app` 打包流程接入，托盘图标也仍是系统默认图标。
+  仍未做的：`icon.icns` 没有 `.app` 打包流程接入。
+  托盘图标与任务栏按钮现在读的是**同一份 exe 资源**（资源 ID 1），不再是系统默认图标。
 - `Win+E` 接管对**提权窗口**无效：低层键盘钩子在安全桌面上收不到按键。
 - 常驻的只有热键宿主，主窗口仍是关闭即退出；因此 `Win+E` 的响应时间取决于主程序冷启动耗时，
   标签页与浏览位置不跨重启保留（会话持久化尚未实现）。
@@ -148,13 +180,35 @@ Fluent Design / Windows 11 原生观感，参考 Files 项目。
 
 ## 构建与运行
 
+### 先选命令，再动手
+
+**改完代码不需要每次都编译。** 按目的选命令，耗时差两个数量级（下表为本机实测墙钟时间）：
+
+| 目的 | 命令 | 本机实测 |
+| --- | --- | --- |
+| 只确认类型 / 借用 / 命名有没有写错 | `cargo check -p fm-shell` | **3–8 s** |
+| 看界面效果 | `cargo run`（或 `cargo build -p fm-app` 后运行产物） | 20–30 s |
+| 跑单元测试 | `cargo test -p fm-shell` | 秒级 |
+| 静态检查 | `cargo clippy -p fm-views -p fm-shell` | 6–10 s |
+| **出可分发的产物** | `cargo build --release -p fm-app` | **3 分 07 秒 – 3 分 26 秒** |
+
+release 之所以慢，是因为 `[profile.release]` 开了 `lto = "thin"` + `strip = true` + `opt-level = 3`。
+因此**不要用 release 来「确认没写错」**——那是 `cargo check` 的活。release 只留给三件事：
+验证 LTO / strip 下的真实产物、改过着色器、打安装包。
+
+另外优先用 `-p <crate>` 而不是裸 `cargo build`：后者会连带编译整个 workspace。
+
+### 常用命令
+
 ```bash
-cargo run                 # debug：保留控制台，便于直接看 tracing 日志
-cargo run -- D:\some\dir  # 第一个位置参数指定初始目录，缺省为用户主目录
-cargo run -- computer     # 以「此电脑」（驱动器总览）为初始位置
-cargo run -- --hotkey-host # 只跑热键宿主（托盘 + Win+E），不启动界面
-cargo build --release     # release：GUI 子系统，不弹黑窗
-cargo test --workspace    # 单元测试
+cargo check -p fm-shell        # 最快的「编译一下看看」
+cargo run                      # debug：保留控制台，便于直接看 tracing 日志
+cargo run -- D:\some\dir       # `--` 之后的第一个位置参数指定初始目录，缺省为用户主目录
+cargo run -- computer          # 以「此电脑」（驱动器总览）为初始位置
+cargo run -- 回收站             # 直接进入回收站（只读浏览）
+cargo run -- --hotkey-host     # 只跑热键宿主（托盘 + Win+E），不启动界面
+cargo build --release -p fm-app  # 可分发的单文件产物
+cargo test --workspace         # 单元测试
 ```
 
 文件夹接管的三个命令行入口（执行完即退出，不启动界面，适合脚本调用）：
@@ -167,6 +221,93 @@ files-gpui.exe --folder-integration-status   # 打印当前状态（退出码 0�
 
 **原生构建，不加 `--target`。** 不需要 VS Developer Prompt，也不需要手动把 SDK 的 bin 注入 `PATH`（原因见下节）。
 可通过 `RUST_LOG` 覆盖日志级别，例如 `RUST_LOG=debug cargo run`。
+
+### 构建前必须知道的三件事
+
+**① 运行中的实例会锁住 exe——这是最常见的构建失败。**
+
+Windows 不允许覆盖正在运行的映像，报错形如：
+
+```
+error: failed to remove file `...\target\debug\files-gpui.exe`
+Caused by: 拒绝访问。 (os error 5)
+```
+
+先结束进程再构建。注意**热键宿主是无窗口的后台进程**，在任务管理器里很容易漏掉：
+
+```bash
+taskkill /IM files-gpui.exe /F        # 主窗口与热键宿主一起结束
+```
+
+宿主不需要手动重启：主程序每次启动都会 `ensure_hotkey_host()`（见 `bootstrap.rs`）。
+
+**② 动过 `assets/app-icon/windows/icon.rc`、或补装了 Windows SDK，可能需要 `cargo clean -p fm-app`。**
+
+Cargo 会缓存构建脚本的输出。若先在没装 SDK 的机器上构建过（只输出 warning、跳过图标嵌入），
+之后补装 SDK 再 `cargo build` **不会**重新嵌入图标——因为 `build.rs` 登记的
+`rerun-if-changed` 文件没变，脚本不重跑。只想验证图标时：
+
+```bash
+cargo clean -p fm-app && cargo build -p fm-app
+```
+
+**③ 改着色器必须用 release 验证。**
+
+- **debug**：不编译着色器，运行期直接从 cargo registry cache 里读 `src/shaders.hlsl`。
+  好处是改 HLSL 不必重编译，代价是**产物依赖 registry cache 不被清空**。
+- **release**：构建期由 `fxc.exe` 编译成字节码并内嵌，产物自包含。
+
+### 两个 workspace
+
+`cargo test --workspace` 只覆盖根 workspace（`crates/*`）。图标生成器是**独立** workspace：
+
+```bash
+cargo test --manifest-path tools/icon-gen/Cargo.toml
+```
+
+安装包的构建方式见下一节。
+
+## 打包安装程序
+
+安装包由 [Inno Setup](https://jrsoftware.org/isinfo.php) 定义，脚本是 [`installer/files.iss`](./installer/files.iss)。
+
+```bat
+cargo build --release -p fm-app                 REM 1. 先出载荷
+target\innosetup\ISCC.exe installer\files.iss  REM 2. 编译安装包
+REM 产物：dist\Files-<版本>-x64-setup.exe
+```
+
+**Inno Setup 本体不需要安装。** 官方安装器支持免管理员的 portable 解包，解到 `target\innosetup`
+即可（`target/` 与 `dist/` 都不入库）：
+
+```bat
+curl -L -o target\innosetup-6.7.3.exe https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe
+target\innosetup-6.7.3.exe /PORTABLE=1 /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="C:\path\to\file-manager\target\innosetup"
+```
+
+> 该文件的 SHA-256 是 `9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732`，
+> 与 winget 清单里 Inno Setup 6.7.3 记录的哈希一致，可据此校验。
+> 中文界面文件 `installer/languages/ChineseSimplified.isl` 取自官方源码仓库
+> （Inno Setup 官方发行版只带英文等 29 种语言，中文在「非官方翻译」之列），已固化入库，
+> 构建不依赖网络。
+
+安装包的行为约定：
+
+| 项 | 取值 | 理由 |
+|---|---|---|
+| 安装范围 | 当前用户，`%LOCALAPPDATA%\Programs\Files` | 单文件程序不写任何共享位置，装到 Program Files 只会平白要求管理员权限 |
+| 提权 | 全程不弹 UAC | `PrivilegesRequired=lowest` |
+| 界面语言 | 简体中文 | 见上 |
+| 桌面 / 开始菜单快捷方式 | 默认创建 | |
+| 开机自启（热键宿主） | **默认不创建** | 会常驻一个后台进程，应由用户显式选择 |
+| 接管文件夹 | **默认不接管** | 会改变「双击文件夹」的系统行为，应由用户显式选择 |
+| 安装 / 升级前 | 结束正在运行的实例 | 热键宿主是无窗口进程，Windows 重启管理器看不见它，不主动结束会让覆盖 exe 失败在「文件被占用」 |
+| 卸载 | 先还原文件夹接管，再删文件 | 顺序反了会留下指向已删文件的 shell 关联 |
+| 用户偏好 `%APPDATA%\files-gpui` | **默认保留**，卸载结束时询问 | 静默卸载会按默认按钮自动回答，所以默认项必须是「否」 |
+
+安装包并没有绕开原先那套机制，只是把「装文件 + 建快捷方式 + 调命令」串了起来：
+`--install-folder-integration` / `--restore-folder-integration` 仍是唯一的还原通道
+（见「文件夹接管的设计与安全性质」）。
 
 ## 依赖获取
 

@@ -138,7 +138,65 @@ impl DirectoryService {
             "目录扫描完成"
         );
 
-        // 空目录也要回传一个空批次：否则 UI 无法区分「扫完了，是空的」与「还在扫」，
+        self.emit_entries(entries, generation, batch, sink);
+        Ok(())
+    }
+
+    /// 加载回收站条目，排序后分批回调。
+    ///
+    /// 与 [`DirectoryService::scan`] 的差别只在前半段（IO 来源）：一个扫目录，
+    /// 一个读回收站。后面的分批回传完全共用 [`DirectoryService::emit_entries`]，
+    /// 包括「结果为空也要回传一个空批次」这一点。
+    ///
+    /// **本方法同样会阻塞**，必须在 `BackgroundExecutor` 上调用。
+    pub fn recycle_bin(
+        &self,
+        generation: u64,
+        sort: SortSpec,
+        batch: usize,
+        sink: &mut dyn FnMut(ScanBatch) -> bool,
+    ) -> anyhow::Result<()> {
+        let started = std::time::Instant::now();
+
+        let mut entries = self.file_system.recycle_bin()?;
+        // 扩展名句柄在这一层统一补：类型图标与「类型」列都依赖它，
+        // 回收站条目也不例外（`$I` 里没有扩展名信息）。
+        for entry in &mut entries {
+            attach_extension(&self.interner, entry);
+        }
+
+        // 与目录扫描一致：代数失效就整批丢弃，连排序都省掉。
+        if !self.is_current(generation) {
+            return Ok(());
+        }
+
+        sort_entries(&mut entries, sort);
+
+        tracing::info!(
+            entries = entries.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "回收站加载完成"
+        );
+
+        self.emit_entries(entries, generation, batch, sink);
+        Ok(())
+    }
+
+    /// 把已经就绪的条目分批回传，直到 `sink` 喊停或回传完毕。
+    ///
+    /// 真实目录扫描与回收站加载共用这段收尾逻辑，两者只在前半段不同。
+    /// **排序由调用方完成**——它还要拿排序后的条目数写日志。
+    fn emit_entries(
+        &self,
+        mut entries: Vec<Entry>,
+        generation: u64,
+        batch: usize,
+        sink: &mut dyn FnMut(ScanBatch) -> bool,
+    ) {
+        // batch 为 0 会让下面的 `batch.min(len)` 恒为 0，退化成死循环。
+        let batch = batch.max(1);
+
+        // 空结果也要回传一个空批次：否则 UI 无法区分「读完了，是空的」与「还在读」，
         // 会一直停在骨架屏上。
         if entries.is_empty() {
             sink(ScanBatch {
@@ -146,13 +204,13 @@ impl DirectoryService {
                 entries: Vec::new(),
                 is_last: true,
             });
-            return Ok(());
+            return;
         }
 
-        // 回传前逐批再查一次代数：用户可能在排序期间又切了目录。
+        // 逐批再查一次代数：用户可能在排序期间、或上一批的间隙里切走了。
         while !entries.is_empty() {
             if !self.is_current(generation) {
-                return Ok(());
+                return;
             }
 
             let take = batch.min(entries.len());
@@ -165,11 +223,9 @@ impl DirectoryService {
                 is_last,
             }) || is_last
             {
-                return Ok(());
+                return;
             }
         }
-
-        Ok(())
     }
 }
 

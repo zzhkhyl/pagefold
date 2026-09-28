@@ -10,6 +10,7 @@ pub mod folder_association;
 pub mod hotkey_host;
 pub mod icon;
 pub mod known_folders;
+pub mod recycle_bin;
 pub mod shell_menu;
 pub mod single_instance;
 pub mod time;
@@ -85,6 +86,11 @@ impl FileSystem for WindowsFileSystem {
         // 用 symlink_metadata：对符号链接本身做 stat，而不是跟随到目标。
         let metadata = fs::symlink_metadata(path)?;
         Ok(entry_from_metadata(path.to_path_buf(), &metadata))
+    }
+
+    fn recycle_bin(&self) -> anyhow::Result<Vec<Entry>> {
+        // 枚举本身不返回错误：读不到的卷与损坏的 `$I` 都在内部跳过。
+        Ok(recycle_bin::enumerate())
     }
 }
 

@@ -116,6 +116,11 @@ impl FileSystem for MockFileSystem {
             icon: IconId(0),
         })
     }
+
+    fn recycle_bin(&self) -> anyhow::Result<Vec<Entry>> {
+        // 桩实现没有回收站：返回空表，上层会走「回收站为空」的空态。
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]

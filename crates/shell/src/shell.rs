@@ -262,21 +262,44 @@ impl ShellView {
 
         match location {
             Location::Computer => self.begin_drives_load(cx),
+            Location::RecycleBin => {
+                self.begin_recycle_bin_load(sort, cx);
+            }
             Location::Directory(dir) => {
                 self.begin_scan(dir, sort, cx);
             }
         }
     }
 
-    /// 发起一次扫描，返回本次扫描的代数。
-    ///
-    /// 副作用上，它会立刻让所有在途扫描失效——这是「快速连续切换目录时旧结果不错乱」的保障。
+    /// 发起一次目录扫描，返回本次加载的代数。
     pub(crate) fn begin_scan(
         &mut self,
         dir: PathBuf,
         sort: SortSpec,
         cx: &mut Context<Self>,
     ) -> u64 {
+        self.begin_load(LoadSource::Directory(dir), sort, cx)
+    }
+
+    /// 加载回收站条目，返回本次加载的代数。
+    fn begin_recycle_bin_load(&mut self, sort: SortSpec, cx: &mut Context<Self>) -> u64 {
+        self.begin_load(LoadSource::RecycleBin, sort, cx)
+    }
+
+    /// 发起一次内容加载，返回本次加载的代数。
+    ///
+    /// 副作用上，它会立刻让所有在途加载失效——这是「快速连续切换位置时旧结果不错乱」的保障。
+    ///
+    /// 真实目录与回收站共用这一个函数：两者的收尾（分批并入、代数校验、错误处理、
+    /// 兜底收尾）完全一样，差别只在「从哪儿取条目」。
+    fn begin_load(
+        &mut self,
+        source: LoadSource,
+        sort: SortSpec,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        // 错误文案需要它，而此刻 `source` 还没被移进下面的异步块。
+        let error_label = source.error_label();
         let generation = self.service.begin_scan();
 
         self.entries.clear();
@@ -293,18 +316,27 @@ impl ShellView {
                 .background_executor()
                 .spawn(async move {
                     let mut collected: Vec<ScanBatch> = Vec::new();
-                    let failure = service
-                        .scan(&dir, generation, sort, batch, &mut |batch| {
-                            collected.push(batch);
-                            true
-                        })
-                        .err();
+                    // 只建一个 sink 给两个来源共用：分别内联两个闭包会让
+                    // `collected` 在两个分支里各被可变借一次，也更容易写错。
+                    let mut sink = |batch: ScanBatch| {
+                        collected.push(batch);
+                        true
+                    };
+                    let failure = match &source {
+                        LoadSource::Directory(dir) => {
+                            service.scan(dir, generation, sort, batch, &mut sink)
+                        }
+                        LoadSource::RecycleBin => {
+                            service.recycle_bin(generation, sort, batch, &mut sink)
+                        }
+                    }
+                    .err();
                     (collected, failure)
                 })
                 .await;
 
             if let Some(failure) = failure {
-                let message: SharedString = format!("无法打开该目录：{failure}").into();
+                let message: SharedString = format!("{error_label}：{failure}").into();
                 let _ = this.update(cx, move |view, cx| {
                     // 只有这次扫描仍是最新时才写错误，否则会覆盖掉新扫描的状态。
                     if view.service.is_current(generation) {
@@ -509,8 +541,18 @@ impl ShellView {
     pub(crate) fn location_label(&self) -> String {
         match self.tabs.active_state().location() {
             Location::Computer => String::from("此电脑"),
+            Location::RecycleBin => String::from("回收站"),
             Location::Directory(path) => path.display().to_string(),
         }
+    }
+
+    /// 当前标签是否停在「回收站」。
+    ///
+    /// 回收站里的条目**不能**按路径导航：它们的 `path` 指向 `$Recycle.Bin` 内部
+    /// （受保护的系统目录），按普通条目去 `scan` 只会得到一条「拒绝访问」。
+    /// 双击、右键「打开」、预览面板的「打开」三处都过这个判断。
+    pub(crate) fn in_recycle_bin(&self) -> bool {
+        matches!(self.tabs.active_state().location(), Location::RecycleBin)
     }
 }
 
@@ -562,6 +604,14 @@ impl ShellView {
     /// 在当前标签内进入「此电脑」（驱动器总览）。
     pub(crate) fn go_to_computer(&mut self, cx: &mut Context<Self>) {
         self.tabs.active_state_mut().navigate_to(Location::Computer);
+        self.reload(cx);
+    }
+
+    /// 在当前标签内进入「回收站」。
+    pub(crate) fn go_to_recycle_bin(&mut self, cx: &mut Context<Self>) {
+        self.tabs
+            .active_state_mut()
+            .navigate_to(Location::RecycleBin);
         self.reload(cx);
     }
 
@@ -954,7 +1004,10 @@ impl Render for ShellView {
 
         // 先把各区块各自渲染成 `AnyElement` 再拼装，
         // 避免在同一个表达式里交替借用 `self` 与 `cx`。
-        let titlebar = self.render_titlebar(viewport, cx);
+        //
+        // 顶部曾经有两栏（品牌栏 + 标签条），品牌栏按反馈整条删掉了：
+        // 它剩下的内容只有品牌标志，为一行图标占 38px 不划算。
+        // 窗口拖拽区因此移到了标签条那一栏的空白段上（见 `tab_strip`）。
         let tab_strip = self.render_tab_strip(cx);
         let toolbar = self.render_toolbar(viewport, cx);
         let sidebar = self.render_sidebar(viewport, cx);
@@ -967,7 +1020,7 @@ impl Render for ShellView {
 
         let mut body = div()
             // `relative` 是浮层（预览面板 / 侧边栏 / 遮罩）的定位基准：
-            // 少了它，绝对定位会一路上溯到窗口根，浮层就会盖住标题栏。
+            // 少了它，绝对定位会一路上溯到窗口根，浮层就会盖住标签条。
             .relative()
             .flex()
             .flex_row()
@@ -992,11 +1045,32 @@ impl Render for ShellView {
             .bg(self.tokens.surface)
             .text_color(self.tokens.fg)
             .font_family(self.tokens.font_family.clone())
-            .child(titlebar)
             .child(tab_strip)
             .child(toolbar)
             .child(body)
             .child(status_bar)
+    }
+}
+
+/// 一次内容加载的数据来源。
+///
+/// 真实目录与回收站的收尾（分批回传、代数校验、错误处理）完全一样，
+/// 差别只在「从哪儿取条目」。因此共用一个 [`ShellView::begin_load`] + 这个枚举，
+/// 而不是把整段 spawn 逻辑抄两遍。
+enum LoadSource {
+    /// 真实目录：走 `DirectoryService::scan`。
+    Directory(PathBuf),
+    /// 回收站：走 `DirectoryService::recycle_bin`。
+    RecycleBin,
+}
+
+impl LoadSource {
+    /// 加载失败时给用户看的前缀。
+    fn error_label(&self) -> &'static str {
+        match self {
+            Self::Directory(_) => "无法打开该目录",
+            Self::RecycleBin => "无法读取回收站",
+        }
     }
 }
 
