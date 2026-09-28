@@ -1,0 +1,14 @@
+// 叠页 · 应用图标资源脚本
+//
+// 已接入 `fm-app` 的构建：由 crates/app/build.rs 交给 embed-resource 编译，
+// 产物的链接参数以 `cargo:rustc-link-arg-bins` 交给链接器。
+//
+// 手工验证时注意 `/I` 不能省：这里写的是相对路径，而 rc.exe 的搜索基准是
+// **调用者的工作目录**（Cargo 跑 build.rs 时是 crate 根），不是本文件所在目录。
+//   rc.exe /nologo /I assets/app-icon/windows /fo icon.res assets/app-icon/windows/icon.rc
+//
+// 资源 ID 用数值 `1`（Windows 的通行约定），不要改回符号名：`IDI_APPICON` 并不是
+// rc.exe 的预定义符号（SDK 里只有 IDI_APPLICATION / IDI_ERROR 等），未定义的标识符
+// 会被当成**字符串名**资源，而 PE 资源目录里命名项排在数值项之前 ——
+// 目前只有一个图标组，所以命名也照样生效，但这是「以后多出一个图标组才炸」的隐患。
+1 ICON "icon.ico"

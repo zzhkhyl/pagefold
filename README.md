@@ -108,8 +108,14 @@ Fluent Design / Windows 11 原生观感，参考 Files 项目。
 - 单实例只做「激活已有窗口」，**尚未转发命令行路径**：已有实例在运行时，
   用 `files-gpui.exe D:\x` 启动第二个进程不会让已有窗口跳到 `D:\x`。
   需要一条命名管道之类的 IPC 通道，属后续增量。
-- 托盘图标暂用系统默认图标（`IDI_APPLICATION`）。自有品牌图标需要 `.ico` 与资源脚本；
-  设计稿里的应用图标（`app-icons.html` 推荐「B · 页签 · 实底」）尚未落地成 `.ico`。
+- **Windows 的 exe 图标已嵌入；macOS / Linux 未打包**：设计稿 C 方案（层叠文件夹）的
+  全平台图标集在 [`assets/app-icon/`](./assets/app-icon/README.md)，含 75 个文件
+  （SVG 源、16…1024 位图、`.ico`、`.icns`、Android / iOS / Web 适配集、深浅色与透明背景变体），
+  由 `tools/icon-gen` 生成并自检。Windows 侧由 `crates/app/build.rs` 在构建期把
+  `windows/icon.rc` 交给 `embed-resource` 编译，产物经 `cargo:rustc-link-arg-bins` 给链接器：
+  **图标烘焙进 PE 资源段，产物仍是单文件、运行期无新增依赖**。构建机上找不到 `rc.exe`
+  （未装 Windows SDK）时只输出一条 warning 并跳过嵌入，不中断构建。
+  仍未做的：`icon.icns` 没有 `.app` 打包流程接入，托盘图标也仍是系统默认图标。
 - `Win+E` 接管对**提权窗口**无效：低层键盘钩子在安全桌面上收不到按键。
 - 常驻的只有热键宿主，主窗口仍是关闭即退出；因此 `Win+E` 的响应时间取决于主程序冷启动耗时，
   标签页与浏览位置不跨重启保留（会话持久化尚未实现）。
@@ -357,6 +363,8 @@ RUST_LOG=info cargo run --release -- "$(pwd)/$BENCH"
 file-manager/
 ├── .codebuddy/plans/PLAN.md  # 需求基线与阶段记录
 ├── design/              # 设计稿（主界面 / 设置页 / 应用图标），界面取值的唯一依据
+├── assets/app-icon/     # 应用图标交付物（75 个文件，见该目录 README）
+├── tools/icon-gen/      # 图标生成器：设计参数 → SVG / PNG / ICO / ICNS（独立 workspace）
 ├── Cargo.toml           # workspace 根：成员、共同依赖、release profile
 ├── rust-toolchain.toml  # 钉 stable 通道
 ├── .cargo/config.toml   # USTC 镜像（禁止写入 linker/ar）
@@ -369,7 +377,7 @@ file-manager/
     └── platform/  # FileSystem trait 及 windows / mock 实现
 ```
 
-界面相关的关键字：
+界面与图标的关键字：
 
 | 想改什么                     | 改哪里                                                                 |
 | ---------------------------- | ---------------------------------------------------------------------- |
@@ -377,6 +385,7 @@ file-manager/
 | 区块尺寸与响应式判定         | `crates/shell/src/layout.rs` 的 `Viewport`                             |
 | 某个控件的形态               | `crates/views/src/widgets.rs`（图标按钮 / 分段控件 / 勾选框 / 容量条） |
 | 主题与组件库色值同步         | `crates/shell/src/shell.rs` 的 `apply_component_theme`                 |
+| 应用图标的几何与配色         | `tools/icon-gen/src/design.rs`，改完重新生成（见 `assets/app-icon/README.md`） |
 
 分层约束：UI 层完全不感知平台差异，所有原生能力经 `platform` 层注入；
 `core` 只描述数据与状态流转，不依赖 gpui、Windows API 或文件系统实现。

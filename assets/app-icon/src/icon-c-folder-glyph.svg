@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="叠页 · 层叠文件夹 · 透明背景 · 蓝标">
+  <title>叠页 · 层叠文件夹 · 透明背景 · 蓝标</title>
+  <mask id="seam" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+    <rect width="1024" height="1024" fill="#000"/>
+    <g transform="translate(512 512) scale(1.08) translate(-512 -512)" stroke-width="20" fill="#fff" stroke="#000">
+      <path d="M346 302H454L510 362H614A44 44 0 0 1 658 406V614A44 44 0 0 1 614 658H346A44 44 0 0 1 302 614V346A44 44 0 0 1 346 302Z"/>
+      <path d="M410 366H518L574 426H678A44 44 0 0 1 722 470V678A44 44 0 0 1 678 722H410A44 44 0 0 1 366 678V410A44 44 0 0 1 410 366Z"/>
+    </g>
+  </mask>
+  <rect width="1024" height="1024" fill="#076be3" mask="url(#seam)"/>
+</svg>

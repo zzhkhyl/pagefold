@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="叠页 · 层叠文件夹 · 满幅方形">
+  <title>叠页 · 层叠文件夹 · 满幅方形</title>
+  <rect width="1024" height="1024" fill="#076be3"/>
+  <g transform="translate(512 512) scale(1.2164) translate(-512 -512)" stroke-width="17.7576" fill="#ffffff" stroke="#076be3">
+    <path d="M346 302H454L510 362H614A44 44 0 0 1 658 406V614A44 44 0 0 1 614 658H346A44 44 0 0 1 302 614V346A44 44 0 0 1 346 302Z"/>
+    <path d="M410 366H518L574 426H678A44 44 0 0 1 722 470V678A44 44 0 0 1 678 722H410A44 44 0 0 1 366 678V410A44 44 0 0 1 410 366Z"/>
+  </g>
+</svg>

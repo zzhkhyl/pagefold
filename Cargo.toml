@@ -33,6 +33,11 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# 构建期资源编译器（把 assets/app-icon/windows/icon.rc 嵌进 exe 的 PE 资源段）。
+# 版本与 gpui-pre 内部的 build-dependency 一致，因此解析结果就是 Cargo.lock 里已有的
+# embed-resource 3.0.11 —— 不引入新下载、新版本，也不改变锁文件。
+embed-resource = "3.0"
+
 fm-core = { path = "crates/core" }
 fm-platform = { path = "crates/platform" }
 fm-services = { path = "crates/services" }

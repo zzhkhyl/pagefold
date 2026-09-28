@@ -6,3 +6,5 @@
 *.lib
 .codebuddy/
 design/
+# 图标生成器是独立 workspace（见 tools/icon-gen/Cargo.toml），构建产物单独忽略
+/tools/icon-gen/target

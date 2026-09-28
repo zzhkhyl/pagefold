@@ -1,0 +1,23 @@
+[package]
+name = "icon-gen"
+description = "由 design/app-icons.html 的 C 方案生成全平台应用图标（SVG 源 + PNG + ICO + ICNS）"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# 独立 workspace：本工具不属于产品构建，只在需要重新生成图标时手动运行。
+# 声明成自己的 workspace 根之后，仓库根的 `cargo build --workspace` 不会碰它，
+# 也不必为此往根 Cargo.toml 里写 exclude。
+[workspace]
+
+[dependencies]
+# 只做 SVG 解析与栅格化。关掉默认 feature：图标里没有文字、没有位图，
+# 不需要 fontdb / rustybuzz / gif / webp / jpeg 这一整套依赖。
+resvg = { version = "0.46.0", default-features = false }
+# 直写 PNG：iOS 的 AppIcon 不能带 alpha 通道，需要 color type 2（RGB）输出，
+# 而 tiny-skia 的 `encode_png` 只会写 RGBA。
+png = "0.18.1"
+anyhow = "1"
+
+[profile.release]
+opt-level = 2

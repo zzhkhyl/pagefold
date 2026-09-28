@@ -26,3 +26,8 @@ fm-platform.workspace = true
 fm-services.workspace = true
 fm-shell.workspace = true
 fm-views.workspace = true
+
+# 仅构建期使用：把应用图标写进可执行文件的 PE 资源段（见 build.rs）。
+# 它是 build-dependency 而非 runtime dependency，因此不进最终产物的依赖图。
+[build-dependencies]
+embed-resource.workspace = true

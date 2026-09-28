@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 叠页 · 层叠文件夹 · 实底底板色 oklch(55% 0.2 258) -->
+    <color name="ic_launcher_background">#076be3</color>
+</resources>
