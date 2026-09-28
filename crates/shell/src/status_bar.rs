@@ -1,140 +1,147 @@
-//! 底部状态栏：左（条目数 / 合计大小）、中（扫描进度与已加载数）、右（视图与缩放）。
+//! 底部状态栏：左（条目数 / 合计大小 / 当前位置）、右（视图名 / 缩略图缩放）。
+//!
+//! 形态照搬设计稿的 `.statusbar`：26px 高、panel 底色、1px 顶边，
+//! 全部文本走等宽字体——这一行是数字密度最高的地方，等宽才能让数值不跳动。
 
-use fm_core::{Entry, Location, ViewMode, format_size};
+use std::rc::Rc;
+
+use fm_core::{Entry, IconZoom, Location, ViewMode, format_size};
+use fm_views::metrics;
 use gpui::{
-    AnyElement, ClickEvent, Context, IntoElement, ParentElement as _, Styled as _, Window, div, px,
+    AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px, prelude::FluentBuilder as _,
 };
-use gpui_component::ActiveTheme as _;
-use gpui_kit_assets::IconName;
 
+use crate::layout::Viewport;
 use crate::shell::ShellView;
-use crate::toolbar::toggle_button;
 
-/// 状态栏高度。
-const STATUS_BAR_HEIGHT: f32 = 28.0;
-
-/// 进度细条的宽度与高度。
-const PROGRESS_WIDTH: f32 = 96.0;
-const PROGRESS_HEIGHT: f32 = 3.0;
+/// 点击某一档缩略图缩放时的回调。
+type ZoomHandler = Rc<dyn Fn(IconZoom, &mut Window, &mut App)>;
 
 impl ShellView {
     /// 渲染底部状态栏。
-    pub(crate) fn render_status_bar(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme();
-        let border = theme.border;
-        let muted_foreground = theme.muted_foreground;
-        let accent = theme.accent;
-        let accent_foreground = theme.accent_foreground;
-        let track = theme.muted;
+    pub(crate) fn render_status_bar(&self, viewport: Viewport, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = &self.tokens;
+        let icons_view = self.tabs.active_state().view_mode() == ViewMode::Icons;
 
         // 「此电脑」展示的是驱动器而不是文件条目，统计口径完全不同。
         // 不分开算的话会显示成「共 0 项 · 0 字节」，看起来像出了故障。
-        let (left, middle) = if matches!(
-            self.tabs.active_state().location(),
-            Location::Computer
-        ) {
-            let left = format!("{} 个驱动器", self.drives.len());
-            let middle = if self.loading {
-                String::from("正在枚举驱动器…")
-            } else {
-                String::from("驱动器已就绪")
-            };
-            (left, middle)
+        let left: String = if matches!(self.tabs.active_state().location(), Location::Computer) {
+            format!("{} 个驱动器 · 此电脑", self.drives.len())
         } else {
-            let (count, total_bytes) = summarize(&self.entries);
-            let loaded = self.entries.len();
-            let middle = if self.loading {
-                format!("正在读取… 已加载 {loaded} 项")
-            } else {
-                format!("已加载 {loaded} 项")
-            };
-            (format!("共 {count} 项 · {}", format_size(total_bytes)), middle)
+            let (count, total_bytes) = summarize(self.visible());
+            let mut text = format!("{count} 个项目 · 共 {}", format_size(total_bytes));
+            if self.loading {
+                // 扫描期间给出「已到达多少」比一个转圈更有信息量。
+                text.push_str(&format!(" · 正在读取（已加载 {count} 项）"));
+            }
+            if !self.selection.is_empty() {
+                text.push_str(&format!(
+                    " · 已选 {} 项 · {}",
+                    self.selection.len(),
+                    format_size(self.selection_size())
+                ));
+            }
+            text.push_str(" · ");
+            text.push_str(&self.location_label());
+            text
         };
 
-        let icons_view = self.tabs.active_state().view_mode() == ViewMode::Icons;
-
-        let progress = div()
+        let mut bar = div()
             .flex_none()
-            .w(px(PROGRESS_WIDTH))
-            .h(px(PROGRESS_HEIGHT))
-            .rounded(px(2.0))
-            .bg(track)
-            .child(
-                div()
-                    .h_full()
-                    .rounded(px(2.0))
-                    .bg(accent)
-                    // 扫描期间用一条固定宽度的前景条表达「在动」；
-                    // 由于目录总数事先未知，这里刻意不做百分比，避免给出错误信息。
-                    .w(px(if self.loading { PROGRESS_WIDTH * 0.35 } else { 0.0 })),
-            );
-
-        let view_icons = toggle_button(
-            "status-view-icons",
-            IconName::LayoutGrid,
-            "图标视图",
-            icons_view,
-            accent,
-            accent_foreground,
-            muted_foreground,
-            cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                this.set_view_mode(ViewMode::Icons, cx);
-            }),
-        );
-        let view_details = toggle_button(
-            "status-view-details",
-            IconName::List,
-            "详细信息视图",
-            !icons_view,
-            accent,
-            accent_foreground,
-            muted_foreground,
-            cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                this.set_view_mode(ViewMode::Details, cx);
-            }),
-        );
-
-        div()
             .flex()
             .flex_row()
             .items_center()
-            .justify_between()
-            .gap_2()
-            .flex_none()
+            .gap(px(10.0))
             .w_full()
-            .h(px(STATUS_BAR_HEIGHT))
-            .px_3()
+            .h(px(metrics::STATUS_BAR_HEIGHT))
+            .px(px(metrics::ROW_PADDING_X))
+            .bg(tokens.panel)
             .border_t_1()
-            .border_color(border)
-            .text_xs()
-            .text_color(muted_foreground)
-            .child(div().flex_none().child(left))
+            .border_color(tokens.border)
+            .font_family(tokens.mono_font.clone())
+            .text_size(px(metrics::FONT_XS))
+            .text_color(tokens.muted_fg)
             .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(progress)
-                    .child(middle),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .child(view_icons)
-                    .child(view_details)
-                    // 图标缩放滑块待动效任务接入，先如实标注当前档位。
-                    .child(div().flex_none().child("缩放 100%")),
-            )
-            .into_any_element()
+                    .flex_grow(1.0)
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .truncate()
+                    .child(left),
+            );
+
+        // 窄窗下这两组控件先让位：条目数与当前位置比它们重要。
+        if !viewport.hide_status_extras {
+            let on_zoom: ZoomHandler = {
+                let view = cx.entity().downgrade();
+                Rc::new(move |zoom: IconZoom, _window: &mut Window, cx: &mut App| {
+                    if view.update(cx, |view, cx| view.set_zoom(zoom, cx)).is_err() {
+                        tracing::debug!("调整缩放时视图已销毁，本次操作被忽略");
+                    }
+                })
+            };
+
+            bar = bar
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(tokens.muted_fg)
+                        .child(if icons_view {
+                            "图标视图"
+                        } else {
+                            "详细信息视图"
+                        }),
+                )
+                .child(zoom_control(self.config.zoom, tokens, on_zoom));
+        }
+
+        bar.into_any_element()
     }
+}
+
+/// 缩略图缩放控件。
+///
+/// 设计稿用的是一个三档 `input[type=range]`。这里改成三个可点的小格：
+/// 三档是离散值，用滑块既表达不出「只能停在三档」，也要额外维护拖动状态；
+/// 点选小格同样是三档调节，命中更准，也不需要一套拖动状态。
+fn zoom_control(
+    current: IconZoom,
+    tokens: &fm_views::Tokens,
+    on_pick: ZoomHandler,
+) -> AnyElement {
+    let hover = tokens.hover;
+    let accent = tokens.accent;
+    let border = tokens.border;
+
+    let steps = IconZoom::ALL.iter().map(|zoom| {
+        let zoom = *zoom;
+        let active = zoom == current;
+        let pick = Rc::clone(&on_pick);
+        div()
+            .id(("zoom-step", zoom.index()))
+            .flex_none()
+            .w(px(16.0))
+            .h(px(14.0))
+            .rounded(px(3.0))
+            .border_1()
+            .border_color(if active { accent } else { border })
+            .when(active, |element| element.bg(accent))
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .on_click(move |_event: &ClickEvent, window, cx| pick(zoom, window, cx))
+            .into_any_element()
+    });
+
+    div()
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .child(div().flex_none().child("缩放"))
+        .children(steps)
+        .into_any_element()
 }
 
 /// 统计条目数与文件总大小。

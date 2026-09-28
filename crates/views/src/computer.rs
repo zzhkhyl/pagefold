@@ -1,8 +1,11 @@
 //! 「此电脑」视图：驱动器总览。
 //!
+//! 设计稿没有为「此电脑」单独出稿（它的示例数据把驱动器也当成文件夹列在表里），
+//! 因此这里沿用设计稿的卡片语言重新组织：表面色底 + 1px 描边 + 10px 圆角，
+//! 悬停时描边转为强调色，容量条与侧边栏的磁盘档位保持同一套形态。
+//!
 //! 这里刻意**不做虚拟化**：驱动器数量是个位数，为一个不到十几个元素的列表
-//! 引入虚拟化只会增加复杂度，还得像图标网格那样去推算可用宽度。
-//! 用 flex 自动换行即可。
+//! 引入虚拟化只会增加复杂度，还得像图标网格那样去推算可用宽度。用 flex 自动换行即可。
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -11,47 +14,81 @@ use fm_core::format_size;
 use fm_platform::{Drive, DriveKind};
 use gpui::{
     AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px, prelude::FluentBuilder as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    prelude::FluentBuilder as _,
 };
 use gpui_component::{Icon, Sizable as _};
 use gpui_kit_assets::IconName;
 
-use crate::Colors;
+use crate::tokens::{Tokens, metrics};
+use crate::widgets;
 
 /// 卡片尺寸。
 const CARD_WIDTH: f32 = 240.0;
 const CARD_HEIGHT: f32 = 92.0;
-
-/// 容量条的尺寸。
-const METER_HEIGHT: f32 = 4.0;
+/// 卡片内边距。
+const CARD_PADDING: f32 = 12.0;
 
 /// 渲染驱动器总览。
 ///
 /// `on_open` 在点击某张卡片时被调用，参数是该驱动器的挂载点（例如 `C:\`）。
-pub fn drives_overview<F>(drives: &[Drive], colors: Colors, on_open: F) -> AnyElement
+pub fn drives_overview<F>(drives: &[Drive], tokens: &Tokens, on_open: F) -> AnyElement
 where
     F: Fn(PathBuf, &mut Window, &mut App) + 'static,
 {
     // 与面包屑同样的手法：每张卡片都需要独立的 'static 闭包，
     // 用 Rc 共享回调，避免要求 F: Clone。
     let on_open = Rc::new(on_open);
+    let accent = tokens.accent;
+    let border = tokens.border;
+    let muted_foreground = tokens.muted_fg;
+    let foreground = tokens.fg;
+    let surface = tokens.surface;
+    let hover = tokens.hover;
 
     let cards = drives.iter().enumerate().map(|(index, drive)| {
         let callback = Rc::clone(&on_open);
         let target = drive.mount_point.clone();
-        card(drive, index, colors).on_click(move |_event: &ClickEvent, window, cx| {
-            (*callback)(target.clone(), window, cx);
-        })
+        card(drive, index, tokens, accent, border, foreground)
+            .hover(move |style| style.bg(hover).border_color(accent))
+            .on_click(move |_event: &ClickEvent, window, cx| {
+                (*callback)(target.clone(), window, cx);
+            })
     });
 
     div()
+        .id("computer-overview")
         .flex()
-        .flex_row()
-        .flex_wrap()
-        .gap_3()
-        .p_3()
-        .w_full()
-        .children(cards)
+        .flex_col()
+        .flex_grow(1.0)
+        .min_h(px(0.0))
+        .overflow_y_scroll()
+        .child(
+            // 分区标题：与详情视图的表头同一套等宽小字，让「此电脑」看起来仍是一个列表页。
+            div()
+                .flex_none()
+                .h(px(metrics::LIST_HEAD_HEIGHT))
+                .px(px(metrics::ROW_PADDING_X))
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(border)
+                .bg(surface)
+                .font_family(tokens.mono_font.clone())
+                .text_size(px(metrics::FONT_XS))
+                .text_color(muted_foreground)
+                .child("设备与驱动器"),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(12.0))
+                .p(px(metrics::ROW_PADDING_X))
+                .w_full()
+                .children(cards),
+        )
         .into_any_element()
 }
 
@@ -59,17 +96,24 @@ where
 ///
 /// `index` 用作元素 id。**不要**用挂载点长度之类的属性当 id：
 /// `C:\` 与 `D:\` 长度相同，会撞成同一个 id，命中测试随即错乱。
-fn card(drive: &Drive, index: usize, colors: Colors) -> gpui::Stateful<gpui::Div> {
+fn card(
+    drive: &Drive,
+    index: usize,
+    tokens: &Tokens,
+    accent: gpui::Hsla,
+    border: gpui::Hsla,
+    foreground: gpui::Hsla,
+) -> gpui::Stateful<gpui::Div> {
     // 容量为 0 的设备（空光驱、未插卡的读卡器）不画容量条：
     // 一条恒为空的进度条比没有进度条更容易让人误判。
     let has_capacity = drive.total_bytes > 0;
     let used_ratio = drive.used_ratio();
-    let caption: gpui::SharedString = if has_capacity {
+    let percent = (used_ratio * 100.0).round();
+    let caption: SharedString = if has_capacity {
         format!(
-            "剩余 {} / 共 {} ({:.0}%)",
+            "剩余 {} / 共 {}",
             format_size(drive.free_bytes),
-            format_size(drive.total_bytes),
-            used_ratio * 100.0
+            format_size(drive.total_bytes)
         )
         .into()
     } else {
@@ -83,62 +127,69 @@ fn card(drive: &Drive, index: usize, colors: Colors) -> gpui::Stateful<gpui::Div
         .flex_none()
         .w(px(CARD_WIDTH))
         .h(px(CARD_HEIGHT))
-        .p_2()
-        .gap_1()
-        .rounded(px(8.0))
-        .bg(colors.accent)
+        .p(px(CARD_PADDING))
+        .gap(px(6.0))
+        .rounded(px(metrics::RADIUS_LG))
+        .bg(tokens.surface)
         .border_1()
-        .border_color(colors.border)
+        .border_color(border)
         .cursor_pointer()
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap_2()
-                .child(Icon::new(kind_icon(drive.kind)).large())
+                .gap(px(8.0))
+                .child(
+                    Icon::new(kind_icon(drive.kind))
+                        .with_size(px(20.0))
+                        .text_color(accent),
+                )
                 .child(
                     div()
-                        .flex()
-                        .flex_col()
                         .flex_grow(1.0)
                         .min_w(px(0.0))
-                        .text_sm()
+                        .overflow_hidden()
+                        .truncate()
+                        .text_size(px(12.5))
+                        .text_color(foreground)
                         .child(labels(drive)),
-                ),
+                )
+                .when(has_capacity, |element| {
+                    element.child(widgets::mono(
+                        format!("{percent:.0}%"),
+                        metrics::FONT_XS,
+                        tokens.muted_fg,
+                        tokens,
+                    ))
+                }),
         )
         .child(
             div()
                 .flex()
                 .flex_col()
-                .gap_1()
+                .gap(px(6.0))
                 .when(has_capacity, |element| {
-                    element.child(
-                        div()
-                            .w_full()
-                            .h(px(METER_HEIGHT))
-                            .rounded(px(2.0))
-                            .bg(colors.muted)
-                            .child(
-                                div()
-                                    .h_full()
-                                    .rounded(px(2.0))
-                                    .bg(colors.accent_foreground)
-                                    .w(px(CARD_WIDTH * used_ratio)),
-                            ),
-                    )
+                    element.child(widgets::capacity_bar(
+                        used_ratio,
+                        CARD_WIDTH - CARD_PADDING * 2.0,
+                        metrics::DISK_METER_HEIGHT,
+                        tokens,
+                        tokens.hover,
+                    ))
                 })
                 .child(
                     div()
-                        .text_xs()
-                        .text_color(colors.muted_foreground)
+                        .font_family(tokens.mono_font.clone())
+                        .text_size(px(metrics::FONT_XS))
+                        .text_color(tokens.muted_fg)
                         .child(caption),
                 ),
         )
 }
 
 /// 驱动器展示名，例如「本地磁盘 (C:)」。
-fn labels(drive: &Drive) -> gpui::SharedString {
+fn labels(drive: &Drive) -> SharedString {
     format!("{} ({})", kind_label(drive.kind), drive.name).into()
 }
 

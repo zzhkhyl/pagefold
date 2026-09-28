@@ -1,33 +1,61 @@
 //! 图标网格视图（虚拟化）。
 //!
 //! 网格的虚拟化单位是**行**而不是单元格：`uniform_list` 要求每项高度一致，
-//! 而一行图标的高度天然固定（[`CELL_HEIGHT`]），宽度则随窗口变化。
+//! 而一行图标的高度天然固定（见 [`row_height`]），宽度则随窗口变化。
 //! 因此行数由「当前列数」决定，窗口尺寸变化会改变行数——
 //! 这也是滚动位置必须按行而不是按条目保存的原因。
+//!
+//! 单元格形态照搬设计稿的 `.cell`：1:1 缩略图底板 + 两行名称 + 等宽小字元信息；
+//! 悬停浅灰底、选中强调色浅底加描边，与详情视图共用同一套语义。
 
-use std::rc::Rc;
-
-use fm_core::Entry;
 use gpui::{
     AnyElement, ClickEvent, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, div, px, prelude::FluentBuilder as _,
 };
 use gpui_component::{Icon, Sizable as _};
-use gpui_kit_assets::IconName;
 
-use crate::{Colors, OpenHandler};
+use fm_core::Entry;
 
-/// 单元格宽度（PLAN.md：每项 120x120）。
-pub const CELL_WIDTH: f32 = 120.0;
-/// 单元格高度，同时也是 `uniform_list` 的行高。
-pub const CELL_HEIGHT: f32 = 120.0;
+use crate::tokens::{Tokens, metrics};
+use crate::{OpenHandler, SelectHandler};
+
+/// 单元格内名称区的高度：两行 12px / 1.35 行高。
+///
+/// 定死而不是让它随内容伸缩：网格行高必须全表一致，一旦某行名称只有一行，
+/// `uniform_list` 的滚动定位就会整体偏移。
+const NAME_HEIGHT: f32 = 33.0;
+/// 元信息行（大小）高度。
+const META_HEIGHT: f32 = 15.0;
+/// 缩略图与名称之间的间距。
+const NAME_GAP: f32 = 8.0;
+/// 名称与元信息之间的间距。
+const META_GAP: f32 = 6.0;
 
 /// 根据可用宽度算出每行能放几个图标。
 ///
+/// 与设计稿的 `repeat(auto-fill, minmax(var(--cell), 1fr))` 等价：
+/// 先按「单元格 + 间距」整除去重，再把剩余宽度摊到各列。
+///
 /// 至少返回 1：窗口极窄时若算出 0 列，行数会变成无穷大，
 /// 下游按行取模时会直接除零崩溃。
-pub fn columns_for_width(available_width: f32) -> usize {
-    ((available_width / CELL_WIDTH).floor() as usize).max(1)
+pub fn columns_for_width(available_width: f32, cell: f32) -> usize {
+    let step = cell + metrics::GRID_GAP;
+    (((available_width + metrics::GRID_GAP) / step).floor() as usize).max(1)
+}
+
+/// 把剩余宽度摊到各列后，单个单元格的实际宽度。
+///
+/// 设计稿用的是 `1fr`，因此单元格会等比拉伸填满整行（而不是在右侧留一条空白）。
+pub fn cell_width(available_width: f32, columns: usize, cell: f32) -> f32 {
+    let columns = columns.max(1);
+    let gaps = metrics::GRID_GAP * (columns as f32 - 1.0);
+    let width = (available_width - gaps) / columns as f32;
+    // 极端窄窗下可能算出小于 0 的宽度，兜到设计稿的最小档位。
+    if width.is_finite() {
+        width.max(cell * 0.5)
+    } else {
+        cell
+    }
 }
 
 /// 图标网格的总行数。
@@ -36,26 +64,56 @@ pub fn row_count(entry_count: usize, columns: usize) -> usize {
     entry_count.div_ceil(columns)
 }
 
+/// 单元格高度（含内边距、缩略图与两行文字）。
+pub fn cell_height(cell_width: f32) -> f32 {
+    let thumb = (cell_width - metrics::CELL_PADDING * 2.0).max(16.0);
+    metrics::CELL_PADDING * 2.0 + thumb + NAME_GAP + NAME_HEIGHT + META_GAP + META_HEIGHT
+}
+
+/// 一行的高度。纵向间距折进行高，这样滚动容器不需要额外的 `gap` 支持。
+pub fn row_height(cell_width: f32) -> f32 {
+    cell_height(cell_width) + metrics::GRID_GAP
+}
+
 /// 渲染一行图标。
 ///
-/// `extensions` 由调用方经扩展名驻留表解析后传入，用于挑选文件类型图标。
+/// `extensions` 由调用方经扩展名驻留表解析后传入，用于挑选文件类型图标；
+/// `selected` 让调用方按当前选中集判断每个单元格的状态，避免视图层持有选中模型。
+#[allow(clippy::too_many_arguments)]
 pub fn row(
     entries: &[Entry],
     start: usize,
     columns: usize,
+    cell_width: f32,
     extensions: impl Fn(usize) -> Option<String>,
-    colors: Colors,
+    selected: impl Fn(usize) -> bool,
+    cursor: Option<usize>,
+    tokens: &Tokens,
     open: &OpenHandler,
+    select: &SelectHandler,
 ) -> AnyElement {
+    let height = cell_height(cell_width);
+
     let cells = (0..columns).map(|offset| {
         let index = start + offset;
         match entries.get(index) {
-            Some(entry) => cell(entry, extensions(index).as_deref(), colors, index, open),
+            Some(entry) => cell(
+                entry,
+                extensions(index).as_deref(),
+                cell_width,
+                height,
+                selected(index),
+                cursor == Some(index),
+                index,
+                tokens,
+                open,
+                select,
+            ),
             // 末行不足时补等高空占位：行高不一致会让 uniform_list 的滚动计算失准。
             None => div()
                 .flex_none()
-                .w(px(CELL_WIDTH))
-                .h(px(CELL_HEIGHT))
+                .w(px(cell_width))
+                .h(px(height))
                 .into_any_element(),
         }
     });
@@ -63,9 +121,10 @@ pub fn row(
     div()
         .flex()
         .flex_row()
-        .items_center()
+        .gap(px(metrics::GRID_GAP))
         .flex_none()
-        .h(px(CELL_HEIGHT))
+        .w_full()
+        .h(px(row_height(cell_width)))
         .children(cells)
         .into_any_element()
 }
@@ -74,103 +133,166 @@ pub fn row(
 ///
 /// `index` 用作元素 id：虚拟化列表每帧重建整行，id 必须在帧间保持稳定，
 /// 否则点击命中会错位到别的条目上。
+#[allow(clippy::too_many_arguments)]
 fn cell(
     entry: &Entry,
     extension: Option<&str>,
-    colors: Colors,
+    cell_width: f32,
+    height: f32,
+    selected: bool,
+    current: bool,
     index: usize,
+    tokens: &Tokens,
     open: &OpenHandler,
+    select: &SelectHandler,
 ) -> AnyElement {
-    let opened = Rc::clone(open);
+    let icon = crate::widgets::entry_icon(entry, extension);
+    let thumb_size = (cell_width - metrics::CELL_PADDING * 2.0).max(16.0);
+    let hover = tokens.hover;
+    let accent_soft = tokens.accent_soft;
+    let accent_line = tokens.accent_line;
+    let border = tokens.border;
+
+    let opened = std::rc::Rc::clone(open);
     let target = entry.clone();
+    let selecting = std::rc::Rc::clone(select);
+    let selected_hover = crate::tokens::with_alpha(tokens.fg, 0.1);
 
     div()
         .id(("icon-cell", index))
         .flex()
         .flex_col()
-        .items_center()
+        .gap(px(NAME_GAP))
         .flex_none()
-        .w(px(CELL_WIDTH))
-        .h(px(CELL_HEIGHT))
-        .p_1()
-        .rounded(px(6.0))
-        .when(entry.is_dir(), |element| element.cursor_pointer())
+        .w(px(cell_width))
+        .h(px(height))
+        .p(px(metrics::CELL_PADDING))
+        .rounded(px(metrics::RADIUS_LG))
+        .border_1()
+        .border_color(tokens.surface)
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover).border_color(border))
+        .when(selected, |element| {
+            element
+                .bg(accent_soft)
+                .border_color(accent_line)
+                .hover(move |style| style.bg(selected_hover))
+        })
+        .when(current, |element| {
+            element.border_color(accent_line)
+        })
         .on_click(move |event: &ClickEvent, window, cx| {
-            // 单击与双击共用同一个处理器，必须用 click_count 区分：
-            // 只有双击才是「打开」。单击留给后续的选中实现。
+            // 单击与双击共用同一个处理器，必须用 click_count 区分。
             if event.click_count() == 2 {
                 (*opened)(target.clone(), window, cx);
+                return;
             }
+            (*selecting)(index, crate::select_mode(event), window, cx);
         })
         .child(
-            // 图标区占满剩余高度并居中；文字区高度固定，避免长短文件名导致排版跳动。
+            // 缩略图底板：与设计稿一致地使用 panel 底色，让文件图标在两种主题下
+            // 都有稳定的对比度；比内容区略深/略浅正是它要的「凹槽」效果。
             div()
+                .flex_none()
                 .flex()
-                .flex_grow(1.0)
                 .items_center()
                 .justify_center()
-                .child(Icon::new(icon_for(entry, extension)).large()),
+                .w(px(thumb_size))
+                .h(px(thumb_size))
+                .rounded(px(metrics::RADIUS))
+                .bg(tokens.panel)
+                .border_1()
+                .border_color(border)
+                .overflow_hidden()
+                .child(
+                    Icon::new(icon)
+                        .with_size(px(thumb_size * 0.44))
+                        .text_color(if entry.is_dir() { tokens.accent } else { tokens.muted_fg }),
+                ),
         )
         .child(
             div()
                 .flex_none()
                 .w_full()
-                .h(px(32.0))
+                .h(px(NAME_HEIGHT))
                 .overflow_hidden()
-                .text_xs()
-                .text_color(colors.foreground)
+                .line_clamp(2)
+                .text_size(px(metrics::FONT_SM))
+                .text_color(tokens.fg)
                 .child(entry.name.to_string()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .w_full()
+                .h(px(META_HEIGHT))
+                .overflow_hidden()
+                .font_family(tokens.mono_font.clone())
+                .text_size(px(metrics::FONT_XS))
+                .text_color(tokens.muted_fg)
+                .child(meta_label(entry)),
         )
         .into_any_element()
 }
 
-/// 按扩展名挑选图标。
+/// 单元格下方的元信息。
 ///
-/// 这里只做粗分类（图片/音频/视频/文本），并不追求与系统图标完全一致：
-/// 真正的系统图标需要 `SHGetFileInfoW`，属于平台层的后续工作。
-fn icon_for(entry: &Entry, extension: Option<&str>) -> IconName {
+/// 设计稿里这里放的是大小；文件夹没有有意义的大小，因此改显示「文件夹」，
+/// 比显示一个破折号多给出一点信息量。
+fn meta_label(entry: &Entry) -> String {
     if entry.is_dir() {
-        return IconName::Folder;
+        return String::from("文件夹");
     }
-
-    match extension {
-        Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" | "ico") => IconName::Image,
-        Some("mp3" | "wav" | "flac" | "m4a" | "ogg" | "wma") => IconName::Music,
-        Some("mp4" | "mkv" | "avi" | "mov" | "wmv" | "webm") => IconName::Video,
-        _ => IconName::FileText,
-    }
+    fm_core::format_size(entry.size)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const CELL: f32 = 152.0;
+
     #[test]
     fn columns_never_drop_to_zero() {
-        assert_eq!(columns_for_width(0.0), 1);
-        assert_eq!(columns_for_width(50.0), 1);
-        assert_eq!(columns_for_width(-10.0), 1);
+        assert_eq!(columns_for_width(0.0, CELL), 1);
+        assert_eq!(columns_for_width(50.0, CELL), 1);
+        assert_eq!(columns_for_width(-10.0, CELL), 1);
     }
 
     #[test]
-    fn columns_scale_with_available_width() {
-        assert_eq!(columns_for_width(120.0), 1);
-        assert_eq!(columns_for_width(960.0), 8);
-        // 不足一整列时向下取整，避免最后一列被裁掉一半。
-        assert_eq!(columns_for_width(1000.0), 8);
+    fn columns_match_the_design_auto_fill_rule() {
+        // 单元格 152、间距 10：宽 152 恰好一列，宽 314 恰好两列。
+        assert_eq!(columns_for_width(152.0, CELL), 1);
+        assert_eq!(columns_for_width(314.0, CELL), 2);
+        assert_eq!(columns_for_width(313.0, CELL), 1);
     }
 
     #[test]
-    fn row_count_rounds_up() {
+    fn cells_stretch_to_fill_the_row() {
+        // 两列时可用宽度全部被吃掉：152*2 + 10 = 314。
+        let width = cell_width(314.0, 2, CELL);
+        assert!((width - 152.0).abs() < 0.01);
+        // 多余宽度按列均分，右侧不会留下空白。
+        let width = cell_width(400.0, 2, CELL);
+        assert!((width - 195.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn row_count_rounds_up_and_tolerates_zero_columns() {
         assert_eq!(row_count(0, 8), 0);
         assert_eq!(row_count(1, 8), 1);
         assert_eq!(row_count(8, 8), 1);
         assert_eq!(row_count(9, 8), 2);
+        // 防御性：即便调用方误传 0，也不能除零。
+        assert_eq!(row_count(5, 0), 5);
     }
 
     #[test]
-    fn row_count_tolerates_zero_columns() {
-        // 防御性：即便调用方误传 0，也不能除零。
-        assert_eq!(row_count(5, 0), 5);
+    fn row_height_is_derived_from_the_cell_width() {
+        // 行高必须随单元格宽度增长，否则大缩略图会被裁掉。
+        assert!(row_height(192.0) > row_height(152.0));
+        assert!(row_height(152.0) > row_height(122.0));
+        // 行高必须严格大于单元格高度，否则相邻两行会贴在一起。
+        assert!(row_height(152.0) > cell_height(152.0));
     }
 }

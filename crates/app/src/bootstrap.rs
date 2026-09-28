@@ -13,10 +13,14 @@ use fm_platform::{FileSystem, SingleInstance, activate_window, platform_file_sys
 use fm_services::config::Config;
 use fm_services::directory::DirectoryService;
 use fm_shell::ShellView;
+use fm_views::metrics;
 use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
 
 /// 主窗口的初始尺寸。
+///
+/// 1280×820 是设计稿三栏布局（侧边栏 238 + 内容区 + 预览面板 306）的下限，
+/// 再窄一点预览面板就会按断点变成浮层。
 const INITIAL_WIDTH: f32 = 1280.0;
 const INITIAL_HEIGHT: f32 = 820.0;
 
@@ -24,7 +28,8 @@ const INITIAL_HEIGHT: f32 = 820.0;
 ///
 /// 必须显式设置：GPUI 在 `titlebar.title` 为 `None` 时会用**空字符串**创建窗口，
 /// 后果是任务栏没有名字，且单实例激活时 `FindWindowW` 找不到窗口。
-const WINDOW_TITLE: &str = "Files";
+/// 隐藏系统边框后这个文本仍然生效：任务栏与 Alt+Tab 读的都是窗口文本。
+const WINDOW_TITLE: &str = "叠页";
 
 /// 单实例互斥体名。
 ///
@@ -97,8 +102,17 @@ pub fn run() {
             );
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(
+                    px(metrics::WINDOW_MIN_WIDTH),
+                    px(metrics::WINDOW_MIN_HEIGHT),
+                )),
                 titlebar: Some(TitlebarOptions {
                     title: Some(WINDOW_TITLE.into()),
+                    // 自绘标题栏：设计稿的第一行是品牌 + 状态 + 窗口级动作，
+                    // 系统标题栏放不下这些，也套不上设计稿的底色与分隔线。
+                    // 代价是最小化 / 最大化 / 关闭必须自己提供——见 `fm-shell::titlebar`，
+                    // 那里的按钮把动作交回系统（`WindowControlArea`），不自实现窗口逻辑。
+                    appears_transparent: true,
                     ..Default::default()
                 }),
                 ..Default::default()

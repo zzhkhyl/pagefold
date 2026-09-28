@@ -429,13 +429,15 @@ fn restore_value(
     backup_type: &str,
     mode: RestoreMode,
 ) -> anyhow::Result<()> {
-    if let Some(own) = own {
-        if let Some((_, previous)) = own.read_string(Some(backup)) {
-            // 类型必须照原样写回：把 `REG_EXPAND_SZ` 还原成 `REG_SZ`
-            // 会让原值里的 `%SystemRoot%` 不再展开。
-            let kind = own.read_dword(Some(backup_type)).map_or(REG_SZ, REG_VALUE_TYPE);
-            return Key::open(key_path, true)?.write_string(None, &previous, kind);
-        }
+    if let Some(own) = own
+        && let Some((_, previous)) = own.read_string(Some(backup))
+    {
+        // 类型必须照原样写回：把 `REG_EXPAND_SZ` 还原成 `REG_SZ`
+        // 会让原值里的 `%SystemRoot%` 不再展开。
+        let kind = own
+            .read_dword(Some(backup_type))
+            .map_or(REG_SZ, REG_VALUE_TYPE);
+        return Key::open(key_path, true)?.write_string(None, &previous, kind);
     }
 
     match mode {

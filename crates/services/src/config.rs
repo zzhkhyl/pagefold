@@ -5,36 +5,50 @@
 //! 容错原则：配置是「锦上添花」而不是启动前提。
 //! 文件缺失、内容损坏、字段新增/删除、写盘失败，都只记 WARN 日志并回退到默认值——
 //! 一个坏掉的配置文件不应该让文件管理器打不开。
+//!
+//! 字段全部是**外观与偏好**：主题、密度、视图模式、面板开关。
+//! 刻意不把「上次浏览到哪个目录」这类会话状态写进来：
+//! 那属于标签页恢复，需要连同历史一起建模，否则恢复出来的位置没有任何上下文。
 
 use std::fs;
 use std::path::PathBuf;
 
-use fm_core::ViewMode;
+use fm_core::{Density, IconZoom, ViewMode};
 use serde::{Deserialize, Serialize};
 
 /// 应用配置。
 ///
-/// `#[serde(default)]` 保证旧版本配置文件缺少新字段时仍能反序列化成功。
+/// `#[serde(default)]` 保证旧版本配置文件缺少新字段时仍能反序列化成功
+/// （未知字段会被忽略，因此删除字段也是安全的）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// 是否使用深色主题。
     pub dark: bool,
-    /// 内容区视图模式。
+    /// 内容区视图模式。设计稿默认落在详细信息视图。
     pub view_mode: ViewMode,
-    /// 左侧导航栏是否折叠。
+    /// 左侧导航栏是否折叠（宽屏下持久化；窄屏浮层是临时状态，不入配置）。
     pub sidebar_collapsed: bool,
-    /// 图标视图的缩放级别，取值 `0.0..=1.0`（映射到 UI 上的滑块）。
-    pub icon_scale: f32,
+    /// 右侧预览面板是否显示。
+    pub show_preview: bool,
+    /// 界面密度：紧凑 / 标准 / 宽松。
+    pub density: Density,
+    /// 图标视图的缩略图档位：小 / 中 / 大。
+    pub zoom: IconZoom,
+    /// 是否显示文件扩展名。
+    pub show_ext: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             dark: false,
-            view_mode: ViewMode::Icons,
+            view_mode: ViewMode::Details,
             sidebar_collapsed: false,
-            icon_scale: 0.5,
+            show_preview: true,
+            density: Density::Normal,
+            zoom: IconZoom::Medium,
+            show_ext: true,
         }
     }
 }
@@ -104,10 +118,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_is_light_theme_and_icons_view() {
+    fn default_config_matches_the_design_defaults() {
         let config = Config::default();
-        assert!(!config.dark);
-        assert_eq!(config.view_mode, ViewMode::Icons);
+        assert!(!config.dark, "设计稿的默认主题是浅色");
+        assert_eq!(config.view_mode, ViewMode::Details, "设计稿默认列表视图");
+        assert_eq!(config.density, Density::Normal);
+        assert_eq!(config.zoom, IconZoom::Medium);
+        assert!(config.show_preview);
+        assert!(config.show_ext);
         assert!(!config.sidebar_collapsed);
     }
 
@@ -116,17 +134,30 @@ mod tests {
         // 模拟旧版本写下的配置：只有 dark 一个字段。
         let config: Config = serde_json::from_str(r#"{"dark":true}"#).expect("应能容忍缺字段");
         assert!(config.dark);
-        assert_eq!(config.view_mode, ViewMode::Icons);
-        assert_eq!(config.icon_scale, 0.5);
+        assert_eq!(config.view_mode, ViewMode::Details);
+        assert_eq!(config.zoom, IconZoom::Medium);
+    }
+
+    #[test]
+    fn unknown_fields_are_ignored() {
+        // 上一版存的是 `icon_scale`（浮点档位）。删掉它之后旧文件仍必须读得进来，
+        // 否则用户升级后所有偏好会被静默重置。
+        let config: Config =
+            serde_json::from_str(r#"{"icon_scale":0.75,"dark":true}"#).expect("应能容忍旧字段");
+        assert!(config.dark);
+        assert_eq!(config.zoom, IconZoom::Medium);
     }
 
     #[test]
     fn round_trip_preserves_values() {
         let config = Config {
             dark: true,
-            view_mode: ViewMode::Details,
+            view_mode: ViewMode::Icons,
             sidebar_collapsed: true,
-            icon_scale: 0.75,
+            show_preview: false,
+            density: Density::Cozy,
+            zoom: IconZoom::Large,
+            show_ext: false,
         };
         let text = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&text).unwrap();

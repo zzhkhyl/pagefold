@@ -1,23 +1,26 @@
-//! 整体布局：工具栏的组合，以及主内容区。
+//! 整体布局：响应式断点、内容区（选中条 / 表头 / 虚拟列表 / 空状态）与预览面板的定位。
 //!
-//! 响应式断点（PLAN.md「响应式」章节）在本阶段先落地了「侧边栏可折叠」这一条：
-//! 折叠状态由用户控制并持久化。按窗口宽度自动折叠、命令条随宽度压缩等，
-//! 需等虚拟化视图稳定后再统一接入，避免同时改动布局与性能敏感代码。
+//! 断点数值与设计稿的 `@media` 一一对应（见 [`fm_views::breakpoints`]）：
+//! ≤1240 隐藏「类型」列、≤1100 预览改浮层、≤980 隐藏「修改日期」、
+//! ≤920 侧边栏改浮层、≤720 隐藏同步状态与状态栏的视图控件、≤560 隐藏品牌文字。
+//!
+//! 本文件的职责边界：**只决定「放什么、放在哪」**，具体控件形态由 `fm_views` 提供。
 
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use fm_core::{Entry, Location, ViewMode};
 use fm_views::{
-    Colors, OpenHandler, computer, details_table, empty_state, icon_grid, virtual_rows,
+    SelectHandler, breakpoints, computer, details_table, empty_state, icon_grid, metrics,
+    preview_panel, virtual_rows, widgets,
 };
 use gpui::{
-    AnyElement, App, Context, IntoElement, ParentElement as _, Styled as _, Window, div, px,
+    AnyElement, App, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
-use gpui_component::ActiveTheme as _;
 use gpui_kit_assets::IconName;
 
-use crate::shell::{ShellView, palette};
+use crate::shell::ShellView;
 use crate::sidebar::{SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_WIDTH};
 
 /// 内容区右侧需要为滚动条预留的宽度。
@@ -27,137 +30,325 @@ use crate::sidebar::{SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_WIDTH};
 /// 取 16px 对齐 Windows 11 Fluent 滚动条的默认宽度。
 const SCROLLBAR_RESERVE: f32 = 16.0;
 
-impl ShellView {
-    /// 顶部工具栏：标签条（上）+ 命令条（下）。
-    ///
-    /// 这里的窗口参数只能是 `&mut Window`：它转交的两个子渲染函数
-    /// （`render_tab_strip` / `render_command_bar`）签名要求可变借用，
-    /// 单独把这里收窄成 `&Window` 会直接编译不过。
-    /// 渲染路径其实全程只读窗口，等那两个签名一并收窄后，这里也应同步收窄。
-    pub(crate) fn render_toolbar(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let tab_strip = self.render_tab_strip(window, cx);
-        let command_bar = self.render_command_bar(window, cx);
-        let border = cx.theme().border;
+/// 当前视口的响应式状态。
+///
+/// 一次性算好所有断点判断，而不是在各个渲染函数里反复比对视口宽度：
+/// 「哪些控件在当前宽度下存在」是同一个决策，分散判断必然会出现两处不一致。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Viewport {
+    /// 视口宽度。
+    pub width: f32,
+    /// 侧边栏以浮层呈现（≤920）。
+    pub sidebar_overlay: bool,
+    /// 命令条压缩：隐藏同步状态、搜索框收窄（≤720）。
+    pub compact: bool,
+    /// 极窄：隐藏品牌文字（≤560）。
+    pub narrow: bool,
+    /// 预览面板以浮层呈现（≤1100）。
+    pub preview_overlay: bool,
+    /// 面包屑只显示首段与末段（≤720）。
+    pub compact_crumbs: bool,
+    /// 隐藏状态栏的视图 / 缩放控件（≤720）。
+    pub hide_status_extras: bool,
+}
 
-        div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .border_b_1()
-            .border_color(border)
-            .child(tab_strip)
-            .child(command_bar)
-            .into_any_element()
+impl Viewport {
+    pub fn for_width(width: f32) -> Self {
+        Self {
+            width,
+            sidebar_overlay: width <= breakpoints::SIDEBAR_OVERLAY,
+            compact: width <= breakpoints::COMPACT,
+            narrow: width <= breakpoints::NARROW,
+            preview_overlay: width <= breakpoints::PREVIEW_OVERLAY,
+            compact_crumbs: width <= breakpoints::COMPACT,
+            hide_status_extras: width <= breakpoints::COMPACT,
+        }
     }
 
-    /// 主内容区：自适应剩余空间。
+    /// 侧边栏当前占用的横向像素。
     ///
-    /// 状态优先级由 `if / else if` 的顺序表达：错误 → 加载骨架 → 空目录 → 双视图之一。
+    /// 浮层模式下侧边栏不占位（它压在内容之上），因此这里返回 0——
+    /// 否则窄屏的内容区会凭空少掉 238px。
+    pub fn sidebar_width(&self, collapsed: bool) -> f32 {
+        if self.sidebar_overlay {
+            return 0.0;
+        }
+        if collapsed {
+            SIDEBAR_COLLAPSED_WIDTH
+        } else {
+            SIDEBAR_WIDTH
+        }
+    }
+
+    /// 预览面板当前占用的横向像素（浮层模式不占位）。
+    pub fn preview_width(&self, open: bool) -> f32 {
+        if !open {
+            return 0.0;
+        }
+        if self.preview_overlay {
+            0.0
+        } else {
+            metrics::PREVIEW_WIDTH
+        }
+    }
+}
+
+impl ShellView {
+    /// 内容区可用的横向像素（**推算值**，非实测值）。
     ///
-    /// 本函数只决定「放什么」，容器装配统一交给末尾那一次 [`content_surface`]。
+    /// 已知局限：GPUI 未向上层暴露子元素的实测宽度，因此这里只能用推算。
+    /// 代价是侧边栏 180ms 折叠动画期间会出现最多一列的瞬时误差 ——
+    /// 折叠时内容区在**变宽**，而这里已按最终宽度算好了列数，落在动画前中段的
+    /// 最后一列会被裁掉一部分。要彻底消除需要把侧边栏的动画进度暴露给内容区，
+    /// 属虚拟化网格的固有取舍，此处先以注释记录。
+    pub(crate) fn content_width(&self, viewport: Viewport) -> f32 {
+        let sidebar = viewport.sidebar_width(self.config.sidebar_collapsed);
+        let preview = viewport.preview_width(self.preview_open);
+        (viewport.width - sidebar - preview - SCROLLBAR_RESERVE).max(0.0)
+    }
+
+    /// 主内容区。
+    ///
+    /// 状态优先级由 `if / else if` 的顺序表达：
+    /// 错误 → 「此电脑」→ 筛选无结果 → 空目录 / 骨架 → 双视图之一。
+    ///
+    /// 本函数只决定「放什么」，容器装配统一交给末尾那一次 [`content_column`]。
     /// 这样任何新增视图分支都不可能漏掉容器样式 ——
     /// 漏装的表现是内容把状态栏顶出窗口，且不会有任何编译期提示。
-    ///
-    /// 只接收 `&Window`：本函数与其调用的 `render_icon_grid` 都只读窗口，
-    /// 声明可变借用是多余的。调用方持有的 `&mut Window` 会自动降级成 `&Window`。
     pub(crate) fn render_content(
         &self,
+        viewport: Viewport,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let colors = palette(cx);
+        let tokens = &self.tokens;
 
-        let children: Vec<AnyElement> = if let Some(error) = self.error.clone() {
+        let mut children: Vec<AnyElement> = Vec::new();
+
+        if let Some(batch) = self.render_batch_bar(cx) {
+            children.push(batch);
+        }
+
+        let body = if let Some(error) = self.error.clone() {
             // 错误优先展示：出错时列表本来就是空的，先显示骨架会误导。
-            vec![empty_state::error(error, colors)]
+            empty_state::error(error, tokens)
         } else if matches!(self.tabs.active_state().location(), Location::Computer) {
             // 「此电脑」不是目录，没有条目可扫，它的内容是驱动器总览。
             // 这一分支必须排在 `entries.is_empty()` 之前：虚拟位置的 `entries` 恒为空，
             // 否则会被误判成「空文件夹」而显示错误的提示。
-            vec![self.render_computer(colors, cx)]
-        } else if self.entries.is_empty() {
-            vec![if self.loading {
-                empty_state::loading(empty_state::SKELETON_ROWS, colors)
+            self.render_computer(cx)
+        } else if self.visible().is_empty() {
+            if !self.query.trim().is_empty() {
+                empty_state::no_results(self.query.trim(), tokens)
+            } else if self.loading {
+                empty_state::loading(empty_state::SKELETON_ROWS, tokens)
             } else {
-                empty_state::empty_folder(colors)
-            }]
+                empty_state::empty_folder(tokens)
+            }
         } else {
             // 加载中且已有条目的情况会走到这里：分批到达的条目继续追加到列表，
             // 不退回骨架屏，避免已显示的内容闪回。
             match self.tabs.active_state().view_mode() {
-                ViewMode::Details => self.render_details(cx),
-                ViewMode::Icons => self.render_icon_grid(window, cx),
+                ViewMode::Details => self.render_details(viewport, cx),
+                ViewMode::Icons => self.render_icon_grid(viewport, window, cx),
             }
         };
 
-        content_surface(children)
+        children.push(body);
+        content_column(children)
     }
 
-    /// 详细信息视图：固定表头 + 虚拟化数据行。
-    ///
-    /// 返回内容片段而非成品元素：容器由 [`ShellView::render_content`] 统一装配。
-    fn render_details(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let colors = palette(cx);
+    /// 选中项操作条（设计稿的 `.batch`）。没有选中项时返回 `None`，条不占高度。
+    fn render_batch_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let count = self.selection.len();
+        if count == 0 {
+            return None;
+        }
+        let tokens = &self.tokens;
+        let size = fm_core::format_size(self.selection_size());
+
+        // 复制 / 剪切 / 重命名 / 移到回收站都属于文件写操作，本阶段尚未接入
+        // （见 README 已知缺口）。它们仍然渲染出来并保持设计稿的视觉位置，
+        // 但以降不透明度的禁用态呈现，避免出现「点了没反应」的控件。
+        let actions = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(2.0))
+            .child(widgets::text_button(
+                "batch-copy",
+                "复制",
+                Some(IconName::Copy),
+                false,
+                tokens,
+                |_, _, _| {},
+            ))
+            .child(widgets::text_button(
+                "batch-cut",
+                "剪切",
+                Some(IconName::Scissors),
+                false,
+                tokens,
+                |_, _, _| {},
+            ))
+            .child(widgets::text_button(
+                "batch-rename",
+                "重命名",
+                Some(IconName::Pencil),
+                false,
+                tokens,
+                |_, _, _| {},
+            ))
+            .child(widgets::text_button(
+                "batch-delete",
+                "移到回收站",
+                Some(IconName::Trash),
+                false,
+                tokens,
+                |_, _, _| {},
+            ))
+            .child(widgets::text_button(
+                "batch-clear",
+                "取消选择",
+                None,
+                true,
+                tokens,
+                cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
+                    this.clear_selection(cx);
+                }),
+            ));
+
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(metrics::ROW_PADDING_X))
+                .py(px(7.0))
+                .bg(tokens.panel)
+                .border_b_1()
+                .border_color(tokens.border)
+                .text_size(px(12.5))
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(tokens.fg)
+                        .child(widgets::dot(tokens.accent, 6.0))
+                        .child(format!("已选择 {count} 项")),
+                )
+                .child(widgets::mono(
+                    size,
+                    metrics::FONT_XS,
+                    tokens.muted_fg,
+                    tokens,
+                ))
+                .child(div().flex_grow(1.0))
+                .child(actions)
+                .into_any_element(),
+        )
+    }
+
+    /// 详细信息视图：表头 + 虚拟化数据行。
+    fn render_details(&self, viewport: Viewport, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = &self.tokens;
         let tab = self.tabs.active_state();
+        let columns = details_table::Columns::for_viewport(viewport.width, tokens);
 
         let header = details_table::header(
             tab.sort_key(),
             tab.sort_direction(),
-            colors,
+            self.all_selected(),
+            columns,
+            tokens,
             {
                 let view = cx.entity().downgrade();
-                move |key, _window, cx: &mut App| {
+                Rc::new(move |key, _window, cx: &mut App| {
                     // `update` 只在视图已被销毁（窗口关闭）时失败。
                     // 不静默丢弃：表头「点了没反应」是最难定位的一类问题，
                     // 留一条 debug 日志能让它在 `RUST_LOG=debug` 下立刻暴露。
                     if view.update(cx, |view, cx| view.set_sort(key, cx)).is_err() {
                         tracing::debug!("切换排序时视图已销毁，本次点击被忽略");
                     }
-                }
+                })
+            },
+            {
+                let view = cx.entity().downgrade();
+                Rc::new(move |selected, _window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| view.toggle_select_all(selected, cx))
+                        .is_err()
+                    {
+                        tracing::debug!("全选时视图已销毁，本次点击被忽略");
+                    }
+                })
             },
         );
 
         // 只有视口内的行会进入这个闭包，因此在这里做类型/时间格式化是安全的。
-        // `colors` 在外层算一次再 move 进来：配色与具体是哪一行无关，
-        // 留在闭包内会变成「每个可见行都读一遍主题字段」。
         let open = open_handler(cx);
+        let select = select_handler(cx);
         let list = virtual_rows(
             "details-list",
             cx,
-            self.entries.len(),
+            self.visible().len(),
             move |view: &mut Self, index, _window, _cx| {
-                let Some(entry) = view.entries.get(index) else {
+                let Some(entry) = view.visible().get(index) else {
                     return div().into_any_element();
                 };
+                let name = view.display_name(entry);
                 let kind = view.kind_label(entry);
                 let modified = Self::modified_label(entry);
-                details_table::row(entry, &kind, modified.as_deref(), false, colors, index, &open)
+                details_table::row(
+                    entry,
+                    &name,
+                    &kind,
+                    modified.as_deref(),
+                    view.selection.contains(index),
+                    view.cursor == Some(index),
+                    columns,
+                    &view.tokens,
+                    index,
+                    &open,
+                    &select,
+                )
             },
         )
-        // `virtual_rows` 返回的是 `impl IntoElement` 不透明类型，
-        // 统一转成 `AnyElement` 才能和表头一起交给内容区容器。
         .into_any_element();
 
-        vec![header, list]
+        div()
+            .flex()
+            .flex_col()
+            .flex_grow(1.0)
+            .min_w(px(0.0))
+            .min_h(px(0.0))
+            .child(header)
+            .child(list)
+            .into_any_element()
     }
 
     /// 图标视图：按「行」虚拟化的自适应网格。
-    ///
-    /// 返回内容片段而非成品元素：容器由 [`ShellView::render_content`] 统一装配。
-    fn render_icon_grid(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let colors = palette(cx);
-        let columns = icon_grid::columns_for_width(available_width(
-            window,
-            self.config.sidebar_collapsed,
-        ));
-        let rows = icon_grid::row_count(self.entries.len(), columns);
+    fn render_icon_grid(
+        &self,
+        viewport: Viewport,
+        _window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tokens = &self.tokens;
+        // 网格自身有 12px 外衬（设计稿 `.files.grid` 的 padding）。
+        let inner = (self.content_width(viewport) - metrics::GRID_PADDING * 2.0).max(0.0);
+        let columns = icon_grid::columns_for_width(inner, tokens.cell);
+        let cell_width = icon_grid::cell_width(inner, columns, tokens.cell);
+        let rows = icon_grid::row_count(self.visible().len(), columns);
 
-        // 同 `render_details`：配色与打开处理器都在闭包外准备一次。
         let open = open_handler(cx);
+        let select = select_handler(cx);
         let list = virtual_rows(
             "icon-grid",
             cx,
@@ -165,37 +356,44 @@ impl ShellView {
             move |view: &mut Self, row_index, _window, _cx| {
                 let start = row_index * columns;
                 icon_grid::row(
-                    &view.entries,
+                    view.visible(),
                     start,
                     columns,
+                    cell_width,
                     |index| {
-                        view.entries
+                        view.visible()
                             .get(index)
                             .and_then(|entry| view.extension_label(entry))
                     },
-                    colors,
+                    |index| view.selection.contains(index),
+                    view.cursor,
+                    &view.tokens,
                     &open,
+                    &select,
                 )
             },
         )
+        .px(px(metrics::GRID_PADDING))
+        .pt(px(metrics::GRID_PADDING))
+        .pb(px(20.0))
         .into_any_element();
 
         // 列表 id 固定为 "icon-grid"，而 `rows` 由当前列数决定，
         // 因此滚动位置是按**行号**锚定的：调整窗口宽度改变列数时，
         // 「第 N 行」对应的条目会整批换掉，表现为视图跳位。
-        // 改成按条目锚定需要滚动句柄的配合（见 `fm_views::icon_grid` 的说明），
-        // 属虚拟化网格的固有取舍，此处先记录成因。
-        vec![list]
+        // 改成按条目锚定需要滚动句柄的配合，属虚拟化网格的固有取舍，此处先记录成因。
+        list
     }
 
     /// 「此电脑」：驱动器总览。
-    fn render_computer(&self, colors: Colors, cx: &mut Context<Self>) -> AnyElement {
+    fn render_computer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = &self.tokens;
         if self.drives.is_empty() {
             // 枚举还在进行时给骨架，否则会出现「闪一下空状态再冒出卡片」。
             return if self.loading {
-                empty_state::loading(4, colors)
+                empty_state::loading(4, tokens)
             } else {
-                empty_state::notice(IconName::HardDrive, "未检测到驱动器", colors)
+                empty_state::notice(IconName::HardDrive, "未检测到驱动器", tokens)
             };
         }
 
@@ -209,7 +407,76 @@ impl ShellView {
             }
         };
 
-        computer::drives_overview(&self.drives, colors, on_open)
+        computer::drives_overview(&self.drives, tokens, on_open)
+    }
+
+    /// 右侧预览面板。
+    ///
+    /// 宽屏时它是「第三栏」；窄屏（≤1100）时改为压在内容区之上的浮层，
+    /// 定位依赖 `render` 里挂在 `body` 上的 `relative()`。
+    pub(crate) fn render_preview(
+        &self,
+        viewport: Viewport,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.preview_open {
+            return None;
+        }
+        let tokens = &self.tokens;
+        let content = self.preview_content();
+
+        let on_open = {
+            let view = cx.entity().downgrade();
+            Rc::new(move |path: PathBuf, _window: &mut Window, cx: &mut App| {
+                if view
+                    .update(cx, |view, cx| view.navigate_to(path, cx))
+                    .is_err()
+                {
+                    tracing::debug!("预览面板打开目录时视图已销毁，本次操作被忽略");
+                }
+            })
+        };
+
+        let inner = preview_panel::panel(&content, tokens, Some(on_open));
+
+        let container = div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .h_full()
+            .bg(tokens.panel)
+            .border_l_1()
+            .border_color(tokens.border)
+            .child(inner);
+
+        Some(if viewport.preview_overlay {
+            container
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .w(px(metrics::PREVIEW_OVERLAY_WIDTH))
+                .shadow_lg()
+                .into_any_element()
+        } else {
+            container.w(px(metrics::PREVIEW_WIDTH)).into_any_element()
+        })
+    }
+
+    /// 窄屏侧边栏浮层下的遮罩：点它即收起侧边栏。
+    pub(crate) fn render_scrim(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("sidebar-scrim")
+            .absolute()
+            .inset_0()
+            // 设计稿的遮罩是 `color-mix(fg 40%, transparent)`：
+            // 40% 透明度的前景色，而不是把两个不透明色混合——后者会把底下的内容盖死。
+            .bg(fm_views::tokens::with_alpha(self.tokens.fg, 0.4))
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
+                this.close_sidebar_overlay(cx);
+            }))
+            .into_any_element()
     }
 }
 
@@ -219,7 +486,7 @@ impl ShellView {
 /// 用默认程序打开需要 `ShellExecute`（属 `fm-platform` 的后续工作），
 /// 在那之前绝不能把文件也交给 `navigate_to` —— 那会去扫描一个文件路径，
 /// 用户看到的是「路径不存在」这种莫名其妙的报错。
-fn open_handler(cx: &Context<ShellView>) -> OpenHandler {
+pub(crate) fn open_handler(cx: &Context<ShellView>) -> fm_views::OpenHandler {
     let view = cx.entity().downgrade();
     Rc::new(move |entry: Entry, _window: &mut Window, cx: &mut App| {
         if !entry.is_dir() {
@@ -236,46 +503,36 @@ fn open_handler(cx: &Context<ShellView>) -> OpenHandler {
     })
 }
 
+/// 构造「单击选中」处理器。
+pub(crate) fn select_handler(cx: &Context<ShellView>) -> SelectHandler {
+    let view = cx.entity().downgrade();
+    Rc::new(
+        move |index: usize, mode: fm_views::SelectMode, _window: &mut Window, cx: &mut App| {
+            if view
+                .update(cx, |view, cx| view.select(index, mode, cx))
+                .is_err()
+            {
+                tracing::debug!("选择条目时视图已销毁，本次操作被忽略");
+            }
+        },
+    )
+}
+
 /// 内容区容器：统一裁剪与最小高度，避免长内容把状态栏顶出窗口。
 ///
-/// 接受一组**纵向排列**的子元素，而不是单个元素：这样「表头 + 列表」这类多段内容
-/// 与「空状态」这类单段内容就能走同一条路径。
+/// 接受一组**纵向排列**的子元素，而不是单个元素：这样「选中条 + 表头 + 列表」
+/// 这类多段内容与「空状态」这类单段内容就能走同一条路径。
 ///
-/// 约定：这是内容区容器的**唯一装配点**，只由 [`ShellView::render_content`] 在末尾调用一次，
-/// 各视图函数只返回内容片段、不得自行包容器。
-/// 早先的写法是「部分分支用容器、另两个视图各复制一份样式链」，
-/// 结果是样式调整只对一半界面生效，而且漏包的后果（把状态栏顶出窗口）
-/// 没有任何编译期提示 —— 收敛到单一装配点就是为了消除这一整类缺陷。
-fn content_surface(children: impl IntoIterator<Item = AnyElement>) -> AnyElement {
+/// 约定：这是内容区容器的**唯一装配点**，各视图函数只返回内容片段、不得自行包容器。
+fn content_column(children: impl IntoIterator<Item = AnyElement>) -> AnyElement {
     div()
         .flex()
         .flex_col()
         .flex_grow(1.0)
         .min_w(px(0.0))
+        .min_h(px(0.0))
         .h_full()
         .overflow_hidden()
         .children(children)
         .into_any_element()
-}
-
-/// 内容区可用的横向像素（**推算值**，非实测值）。
-///
-/// 必须减去侧边栏宽度：否则窗口较窄时按整窗宽度算出的列数会多一列，
-/// 最后一列被裁在可视区之外，表现为「右边缺一块」。再减去滚动条预留宽度。
-///
-/// 已知局限：GPUI 未向上层暴露子元素的实测宽度，因此这里只能用推算。
-/// 代价是侧边栏 180ms 折叠动画期间会出现最多一列的瞬时误差 ——
-/// 折叠时内容区在**变宽**，而这里已按最终宽度算好了列数，落在动画前中段的
-/// 最后一列会被裁掉一部分。要彻底消除需要把侧边栏的动画进度暴露给内容区
-/// （或在 `ShellView` 上记录动画时间窗），两者都超出本文件范围，故先以注释记录。
-fn available_width(window: &Window, sidebar_collapsed: bool) -> f32 {
-    let sidebar = if sidebar_collapsed {
-        SIDEBAR_COLLAPSED_WIDTH
-    } else {
-        SIDEBAR_WIDTH
-    };
-    // 用 `f32::from` 而不是取字段：`Pixels` 的内部表示是私有的，只能走转换。
-    let width = f32::from(window.viewport_size().width);
-    // `max(0.0)` 兜住窗口极窄或最小化时的负值，避免下游用负数算列数。
-    (width - sidebar - SCROLLBAR_RESERVE).max(0.0)
 }

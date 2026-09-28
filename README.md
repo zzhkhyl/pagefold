@@ -1,26 +1,58 @@
 # Files（GPUI 版）
 
-面向 Windows 的现代桌面文件资源管理器，Fluent Design / Windows 11 原生观感，参考 Files 项目。
+面向 Windows 的现代桌面文件资源管理器，界面按 `design/` 下的设计稿（「叠页」）实现，
+Fluent Design / Windows 11 原生观感，参考 Files 项目。
 需求基线见 [`.codebuddy/plans/PLAN.md`](./.codebuddy/plans/PLAN.md)。
 
 ---
 
+## 界面实现说明（依据 `design/`）
+
+设计稿是三个 HTML 原型：`file-manager.html`（主界面）、`file-manager-settings.html`（设置页，
+本次未实现）、`app-icons.html`（应用图标四稿）。主界面按设计稿逐条落地，取值不再散落在各处：
+
+- **设计令牌唯一来源**：`crates/views/src/tokens.rs`。设计稿用 OKLCH 表达颜色，
+  这里实现了一整条 `OKLCH → OKLab → 线性 sRGB → HSL` 转换链，并适配 GPUI 的
+  `Hsla.h` 取值是 **0..1**（不是 0..360）这一单位差异——
+  单元测试直接断言 `oklch(55% 0.2 258) ≈ #076be3`，与设计稿公布的换算值一致。
+  派生色（`accent-soft` 16%、`accent-line` 45%、`hover` 6%…）按设计稿语义取「原色 + 透明度」。
+- **尺寸与响应式**：字号 11/12/13/15/17、圆角 6/10、控件 30px、
+  标题栏 38 / 标签条 38 / 标签 32 / 地址栏 32 / 列表头 28 / 状态栏 26、
+  侧边栏 238（折叠 48）、预览面板 306 全部集中在 `tokens::metrics`；
+  断点 1240 / 1100 / 980 / 920 / 720 / 560 集中在 `tokens::breakpoints`，
+  由 `fm-shell::layout::Viewport` 一次性判定「当前宽度下哪些控件存在」。
+- **组件库主题同步**：地址栏与搜索框用的是 `gpui_component::Input`，
+  它的描边 / 底色 / 圆角读组件库主题，因此 `fm-shell::shell::apply_component_theme`
+  会把设计令牌里的关键色值同步过去，避免这一个控件与周围割裂。
+
 ## 已实现能力
 
-- **主窗口四区块**：顶部工具栏（标签条 + 命令条）、可折叠左侧导航栏、主内容区、底部状态栏。
+- **主窗口五区块**：自绘标题栏（品牌 + 状态 + 主题 + 最小化/最大化/关闭）、标签条、命令条、
+  内容区（侧边栏 / 主区 / 预览面板三栏）、底部状态栏。
+  窗口以 `appears_transparent: true` 创建，系统边框隐藏，窗口控制按钮由 shell 提供，
+  动作交回系统（`WindowControlArea`），不自己实现窗口缩放逻辑。
 - **多标签页**：新建 / 关闭 / 切换，每个标签独立维护路径、前进后退历史、视图状态与扫描代数。
   关闭当前标签时优先落到右侧邻居，关闭最后一个标签时重置为新标签。
-- **左侧导航栏三分区**：快速访问（由 `SHGetKnownFolderPath` 定位，正确处理被重定向过的文件夹）、
-  驱动器（图标 + 名称 + 剩余容量条）、常用文件夹（本次仅预留分区）。
-  折叠态 48px 只保留图标，展开态 240px，切换带 180ms 缓动。
-- **面包屑路径导航**：逐级可点击跳转；层数过多时保留首段与尾部、中间折叠为省略号；
-  点击地址栏空白处切换为可编辑地址栏（输入路径后点「跳转」）。
-- **双视图**：图标网格（按行虚拟化，列数随窗口宽度自适应）与详细信息表格
-  （固定表头 + 按行虚拟化，点击列名切换排序，箭头指示当前排序键与方向）。
+- **左侧导航栏**：快速访问（由 `SHGetKnownFolderPath` 定位，正确处理被重定向过的文件夹）、
+  「此电脑」分组（可折叠，子项为驱动器）、底部磁盘容量档位（名称 + 百分比 + 容量条 + 剩余/总量）。
+  选中项为强调色浅底 + 强调色图标；展开 238px、折叠 48px，切换带 180ms 缓动。
+- **地址栏**：面包屑逐级可点击跳转，层数过多时保留首段与尾部、中间折叠为省略号；
+  窄屏（≤720px）只保留首段与末段。点击空白处切换为可编辑地址栏，
+  **回车提交、失焦取消**；右侧「复制路径」写入系统剪贴板（`ClipboardItem`）并弹出通知。
+- **搜索框**：点击进入编辑态，**输入即筛选**当前文件夹（大小写不敏感的名称匹配），
+  无结果时给出专门的空状态；清除按钮一键回到完整列表。
+- **双视图**：图标网格（按行虚拟化，单元格 122/152/192 三档，1:1 缩略图底板 + 两行名称）
+  与详细信息表格（固定表头 + 按行虚拟化，列宽按断点退让，点击列名排序并显示箭头）。
   两个视图都支持**双击文件夹进入**（文件的双击暂不处理，见「已知缺口」）。
-- **深浅色主题**：命令条一键切换，持久化到 `%APPDATA%\files-gpui\config.json`。
+- **选中与预览**：单击选中、`Ctrl` 切换、`Shift` 区间、表头勾选框全选；
+  选中后出现选中条（数量 / 合计大小 / 动作）与右侧预览面板
+  （单项显示名称、类型、大小、修改时间、位置；多项显示清单与合计）。
+- **深浅色主题与外观档位**：命令条一键切换主题；状态栏三档缩略图缩放；
+  界面密度（紧凑 / 标准 / 宽松）与「显示扩展名」由配置提供。
+  全部持久化到 `%APPDATA%\files-gpui\config.json`。
 - **大目录流式扫描**：后台线程扫描与排序，结果按 512 条分批并入视图；
   `generation` 计数保证快速切换目录时旧结果不会错乱，扫描中取消会立即停止 IO。
+  列表渲染按视口虚拟化，复杂度与目录条目数无关。
 - **单实例**：同一登录会话内只保留一个进程。重复启动时新进程会激活已有窗口后立即退出，
   不会堆积多份实例。实现走命名互斥体 + `SetForegroundWindow`，**不写任何注册表**。
 - **「此电脑」驱动器总览**：侧边栏顶部可进入，以卡片形式列出全部驱动器
@@ -37,7 +69,7 @@
   - 「设为文件夹默认打开程序」——覆盖 shell 的文件夹打开处理器，桌面双击文件夹、
     以及其他程序调 `ShellExecute`（浏览器的「在文件夹中显示」、下载完成的「打开文件夹」）
     都会打开 Files。
-  
+
   两项都写在 `HKCU\Software\Classes`（用户级，不需要管理员权限），
   因此**还原只需删掉这些键**——机器级 `HKLM` 里的原始值原封不动，行为自动恢复。
   还原入口有三个，彼此等效：托盘菜单「恢复资源管理器为默认」、
@@ -46,26 +78,41 @@
 
 ### 已知缺口（后续阶段）
 
-- 搜索与筛选、右键上下文菜单、拖放、Ctrl/Shift 多选、剪贴板、预览面板、目录变更监听
-  均只预留了架构位（`platform` 层的 trait 边界已就绪）。
-- 列表项的悬停高亮与**单击选中**尚未接入（需要命中测试与选择模型），因此状态栏的
-  「选中项数量与合计大小」当前展示的是整个目录的条目数与文件合计大小。
-  双击文件夹已可用，但双击文件不会打开——需要用默认程序打开，走 `ShellExecute`，
-  属 `fm-platform` 的后续工作；在那之前刻意不做任何事，避免把文件当目录去扫描。
-- 隐藏文件与系统文件未过滤（`.copilot` 这类条目会照常列出，与资源管理器的默认行为不同）。
+界面部分（按设计稿对照）：
+
+- **文件写操作全部未接入**：复制 / 剪切 / 粘贴 / 重命名 / 删除 / 新建文件与文件夹。
+  设计稿里这些控件（选中条的动作组、命令条的「新建」）**按原位渲染**，
+  但处于设计稿自带的禁用态（`opacity: .4`）并带「尚未接入」的 tooltip——
+  刻意不做成「点了没反应」的样子。
+- **设置页未实现**：`design/file-manager-settings.html` 是一个独立页面，
+  本次只交付主界面。因此「界面密度」与「显示扩展名」目前只能改配置文件
+  （`%APPDATA%\files-gpui\config.json` 的 `density` / `show_ext`），
+  界面上没有开关；`ShellView::set_density` 作为预留入口保留。
+- **标题栏的「设置」「帮助」入口未接入**（设计稿右侧有三个按钮，当前只有主题切换）。
+- **标签条的「更多」按钮未实现**（设计稿里有，用于标签页操作菜单）。
+- **右键上下文菜单、拖放、目录变更实时监听**未实现（`platform` 层的 trait 边界已就绪）。
+- **键盘快捷键未绑定**：设计稿的 `Ctrl+T` / `Ctrl+W` / `Ctrl+L` / `F2` / `Delete`
+  等尚未接入；目前所有操作都需要鼠标。
+- **缩略图与文件内容预览未实现**：预览面板展示的是元信息（名称 / 类型 / 大小 / 修改时间 / 位置），
+  不读取文件内容，也不生成图片缩略图。
+- 预览面板的「在列表中定位」按钮未实现（需要滚动句柄配合）。
+- 双击文件不会打开——需要用默认程序打开，走 `ShellExecute`，属 `fm-platform` 的后续工作；
+  在那之前刻意不做任何事，避免把文件当目录去扫描。
+- 列宽拖拽、标签过多时的横向滚动与左右箭头未实现。
+- 图标视图的滚动位置按**行号**锚定：调整窗口宽度改变列数后，「第 N 行」对应的条目整批换掉，
+  表现为视图跳位（虚拟化网格的固有取舍）。
+- 图标网格的列数按推算宽度计算（GPUI 未暴露子元素实测宽度），
+  因此侧边栏 180ms 折叠动画期间可能出现最多一列的瞬时误差。
+- 系统文件图标（`SHGetFileInfoW`）未接入，当前按扩展名做粗分类（图片 / 音频 / 视频 / 文本 等）。
+- 隐藏文件与系统文件未过滤（`.` 开头的条目会照常列出，与资源管理器的默认行为不同）。
 - 单实例只做「激活已有窗口」，**尚未转发命令行路径**：已有实例在运行时，
   用 `files-gpui.exe D:\x` 启动第二个进程不会让已有窗口跳到 `D:\x`。
   需要一条命名管道之类的 IPC 通道，属后续增量。
-- 托盘图标暂用系统默认图标（`IDI_APPLICATION`）。自有品牌图标需要 `.ico` 与资源脚本，
-  留到界面定型后一并处理。
+- 托盘图标暂用系统默认图标（`IDI_APPLICATION`）。自有品牌图标需要 `.ico` 与资源脚本；
+  设计稿里的应用图标（`app-icons.html` 推荐「B · 页签 · 实底」）尚未落地成 `.ico`。
 - `Win+E` 接管对**提权窗口**无效：低层键盘钩子在安全桌面上收不到按键。
 - 常驻的只有热键宿主，主窗口仍是关闭即退出；因此 `Win+E` 的响应时间取决于主程序冷启动耗时，
   标签页与浏览位置不跨重启保留（会话持久化尚未实现）。
-- 列宽拖拽、标签过多时的横向滚动与左右箭头未实现。
-- 图标视图的网格列数按窗口宽度而非实际内容区宽度计算，滚动条出现时可能偏差一列。
-- 键盘快捷键（`Ctrl+T` / `Ctrl+W` / `Ctrl+L` / `Alt+←→`）尚未绑定；
-  地址栏输入框需点击「跳转」提交，回车提交待接入。
-- 系统文件图标（`SHGetFileInfoW`）未接入，当前按扩展名做粗分类（图片 / 音频 / 视频 / 文本）。
 - 文件夹接管的边界（**是 Windows 本身的限制，不是实现缺陷**）：
   - **任务栏的「文件资源管理器」按钮拦不到**。实测该固定项 `File Explorer.lnk`
     的 `TARGET` 为**空**、文件仅 407 字节且**不含任何 GUID**，
@@ -86,12 +133,12 @@
 
 ## 环境要求
 
-| 组件 | 本机实测版本 | 说明 |
-|---|---|---|
-| Windows | 10 / 11 x64 | |
-| Rust | 1.98.1 stable，host `x86_64-pc-windows-msvc` | `rust-toolchain.toml` 已钉 stable 通道 |
-| MSVC | VS 2022 Community，MSVC 14.44.35207 | 提供 `cl.exe` / `link.exe` |
-| Windows SDK | 10.0.26100.0 | 提供 `rc.exe` 与 `fxc.exe`（release 编译着色器必需） |
+| 组件        | 本机实测版本                                | 说明                                                |
+| ----------- | ------------------------------------------- | --------------------------------------------------- |
+| Windows     | 10 / 11 x64                                 |                                                     |
+| Rust        | 1.98.1 stable，host`x86_64-pc-windows-msvc` | `rust-toolchain.toml` 已钉 stable 通道              |
+| MSVC        | VS 2022 Community，MSVC 14.44.35207         | 提供`cl.exe` / `link.exe`                           |
+| Windows SDK | 10.0.26100.0                                | 提供`rc.exe` 与 `fxc.exe`（release 编译着色器必需） |
 
 ## 构建与运行
 
@@ -145,14 +192,14 @@ Windows **没有「默认文件管理器」这个可设置的项**（设置 → 
 
 全部写在用户级 `HKCU\Software\Classes`：
 
-| 键 | 用途 |
-|---|---|
-| `Folder\shell`、`Directory\shell`、`Drive\shell` 的**默认值** | 设为 `open` —— 双击文件夹/盘符时用的正是这个「默认动词」 |
-| `Folder\shell\open\command` | 文件夹的默认打开处理器（工厂原值 `%SystemRoot%\Explorer.exe` 在 HKLM） |
-| `Directory\shell\open\command` | 文件系统文件夹的打开处理器 |
-| `Drive\shell\open\command` | 盘符的打开处理器（「此电脑」里或桌面上双击 `C:` 走它） |
-| `Directory\shell\Files\command` | 右键菜单项，位置参数 `%1`（被选中的那个文件夹） |
-| `Directory\Background\shell\Files\command` | 右键菜单项，位置参数 `%V`（当前目录；空白处没有选中项） |
+| 键                                                            | 用途                                                                  |
+| ------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `Folder\shell`、`Directory\shell`、`Drive\shell` 的**默认值** | 设为`open` —— 双击文件夹/盘符时用的正是这个「默认动词」               |
+| `Folder\shell\open\command`                                   | 文件夹的默认打开处理器（工厂原值`%SystemRoot%\Explorer.exe` 在 HKLM） |
+| `Directory\shell\open\command`                                | 文件系统文件夹的打开处理器                                            |
+| `Drive\shell\open\command`                                    | 盘符的打开处理器（「此电脑」里或桌面上双击`C:` 走它）                 |
+| `Directory\shell\Files\command`                               | 右键菜单项，位置参数`%1`（被选中的那个文件夹）                        |
+| `Directory\Background\shell\Files\command`                    | 右键菜单项，位置参数`%V`（当前目录；空白处没有选中项）                |
 
 **每个 progid 必须写两条，缺一不可：**
 
@@ -222,10 +269,10 @@ Windows **没有「默认文件管理器」这个可设置的项**（设置 → 
 `PLAN.md` 原方案要求 vendor `gpui-pre-windows-0.3.5` 并对 `directx_renderer.rs` 打补丁，用于绕开两个缺陷。
 经核实，**这两个缺陷的成因都是「构建脚本运行在 Linux 上」，在原生 Windows 下均不成立**：
 
-| 原缺陷 | 成因 | 原生 Windows 下的实际情况 |
-|---|---|---|
-| release 交叉编译失败：`couldn't read .../shaders_bytes.rs` | `build.rs` 的 `#[cfg(target_os = "windows")]` 判断的是构建机平台，Linux 上不进入 `compile_shaders()`，文件永不生成 | 构建机即 Windows，该分支恒为真，文件正常生成 |
-| debug 产物在 Windows 上无法运行 | `directx_renderer.rs` 把构建机的 `CARGO_MANIFEST_DIR` 绝对路径烘焙进二进制，Linux 路径在 Windows 上 `canonicalize()` 必然失败 | `CARGO_MANIFEST_DIR` 本身就是合法的 Windows 路径 |
+| 原缺陷                                                     | 成因                                                                                                                          | 原生 Windows 下的实际情况                        |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| release 交叉编译失败：`couldn't read .../shaders_bytes.rs` | `build.rs` 的 `#[cfg(target_os = "windows")]` 判断的是构建机平台，Linux 上不进入 `compile_shaders()`，文件永不生成            | 构建机即 Windows，该分支恒为真，文件正常生成     |
+| debug 产物在 Windows 上无法运行                            | `directx_renderer.rs` 把构建机的 `CARGO_MANIFEST_DIR` 绝对路径烘焙进二进制，Linux 路径在 Windows 上 `canonicalize()` 必然失败 | `CARGO_MANIFEST_DIR` 本身就是合法的 Windows 路径 |
 
 **并且 `gpui-pre-windows 0.3.5` 的 `build.rs` 自带 `find_fxc_compiler()`，按以下顺序查找编译器，无需人工注入 PATH：**
 
@@ -257,17 +304,17 @@ Windows **没有「默认文件管理器」这个可设置的项**（设置 → 
 
 ### 验证结果
 
-| 检查项 | 结果 |
-|---|---|
-| 依赖解析 | 828 个包，经 USTC 镜像全部拉取成功 |
-| debug 构建 | 通过 |
-| debug 本地运行 | 通过：窗口存活满 15 秒；日志显示 `Using GPU: Intel(R) Graphics`、`Created device with Direct3D 11.1 feature level`、`Use Microsoft YaHei UI as UI font` |
-| 单元测试 | `cargo test --workspace` 62 项全部通过，零警告 |
-| release 构建 | 通过：`Finished release profile [optimized] target(s) in 4m 54s`，0 错误，产物 `target/release/files-gpui.exe`（17.8 MB） |
-| release 产物子系统 | 通过：`PE32+ executable for MS Windows 6.00 (GUI), x86-64`，不弹控制台 |
-| release 本地运行 | 通过：进程存活满 10 秒；构建期由 `fxc.exe` 编译的内嵌着色器字节码可用 |
-| 外壳与双视图 | 通过：四区块 + 面包屑 + 虚拟化双视图运行满 25 秒，无运行期错误 |
-| 万级目录扫描 | 通过：**20,400 条目 / 44 ms**（release）；同一目录在 debug 未优化构建下为 121 ms；均无 panic |
+| 检查项             | 结果                                                                                                                                                   |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 依赖解析           | 828 个包，经 USTC 镜像全部拉取成功                                                                                                                     |
+| debug 构建         | 通过                                                                                                                                                   |
+| debug 本地运行     | 通过：窗口存活满 15 秒；日志显示`Using GPU: Intel(R) Graphics`、`Created device with Direct3D 11.1 feature level`、`Use Microsoft YaHei UI as UI font` |
+| 单元测试           | `cargo test --workspace` 62 项全部通过，零警告                                                                                                         |
+| release 构建       | 通过：`Finished release profile [optimized] target(s) in 4m 54s`，0 错误，产物 `target/release/files-gpui.exe`（17.8 MB）                              |
+| release 产物子系统 | 通过：`PE32+ executable for MS Windows 6.00 (GUI), x86-64`，不弹控制台                                                                                 |
+| release 本地运行   | 通过：进程存活满 10 秒；构建期由`fxc.exe` 编译的内嵌着色器字节码可用                                                                                   |
+| 外壳与双视图       | 通过：四区块 + 面包屑 + 虚拟化双视图运行满 25 秒，无运行期错误                                                                                         |
+| 万级目录扫描       | 通过：**20,400 条目 / 44 ms**（release）；同一目录在 debug 未优化构建下为 121 ms；均无 panic                                                           |
 
 大目录验证方法（20,000 个文件 + 400 个目录）：
 
@@ -309,17 +356,27 @@ RUST_LOG=info cargo run --release -- "$(pwd)/$BENCH"
 ```text
 file-manager/
 ├── .codebuddy/plans/PLAN.md  # 需求基线与阶段记录
+├── design/              # 设计稿（主界面 / 设置页 / 应用图标），界面取值的唯一依据
 ├── Cargo.toml           # workspace 根：成员、共同依赖、release profile
 ├── rust-toolchain.toml  # 钉 stable 通道
 ├── .cargo/config.toml   # USTC 镜像（禁止写入 linker/ar）
 └── crates/
-    ├── app/       # 入口、窗口引导、键位绑定
-    ├── shell/     # 工具栏、标签条、侧边栏、状态栏、布局
-    ├── views/     # 面包屑、图标网格、详情表格、空状态
-    ├── core/      # Entry / TabState / Selection / Command（不依赖 gpui 与 Windows API）
+    ├── app/       # 入口、窗口引导（自绘标题栏选项）、键位绑定
+    ├── shell/     # 标题栏、标签条、命令条、侧边栏、状态栏、响应式布局与内容区
+    ├── views/     # 设计令牌、通用控件、面包屑、图标网格、详情表格、空状态、预览面板、驱动器总览
+    ├── core/      # Entry / TabState / Selection / Command / Density / IconZoom（不依赖 gpui 与 Windows API）
     ├── services/  # 目录流式扫描、图标缓存、配置、监听占位
     └── platform/  # FileSystem trait 及 windows / mock 实现
 ```
+
+界面相关的关键字：
+
+| 想改什么                     | 改哪里                                                                 |
+| ---------------------------- | ---------------------------------------------------------------------- |
+| 颜色、字号、圆角、间距、断点 | `crates/views/src/tokens.rs`（唯一来源）                               |
+| 区块尺寸与响应式判定         | `crates/shell/src/layout.rs` 的 `Viewport`                             |
+| 某个控件的形态               | `crates/views/src/widgets.rs`（图标按钮 / 分段控件 / 勾选框 / 容量条） |
+| 主题与组件库色值同步         | `crates/shell/src/shell.rs` 的 `apply_component_theme`                 |
 
 分层约束：UI 层完全不感知平台差异，所有原生能力经 `platform` 层注入；
 `core` 只描述数据与状态流转，不依赖 gpui、Windows API 或文件系统实现。

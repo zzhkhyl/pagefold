@@ -17,6 +17,7 @@ pub mod shell;
 pub mod sidebar;
 pub mod status_bar;
 pub mod tab_strip;
+pub mod titlebar;
 pub mod toolbar;
 
 pub use shell::ShellView;

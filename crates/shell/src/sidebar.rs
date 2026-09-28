@@ -1,358 +1,418 @@
-//! 左侧导航栏：快速访问 / 驱动器 / 常用文件夹 三个分区。
+//! 左侧导航栏：快速访问 / 此电脑（驱动器）/ 磁盘容量三个分区。
 //!
-//! 视觉规范（PLAN.md）：选中项为强调色 12% 底色加左侧 3px 强调色竖条，
-//! 悬停为中性灰底；分区标题为小号次级文本，分组间留 16px 间距。
-//! 折叠态（48px）只保留图标，不显示文字与容量条。
+//! 形态照搬设计稿的 `.nav`：展开 238px、折叠 48px，导航项 30px 高、6px 圆角、
+//! 选中为强调色 16% 底色 + 图标转为强调色，子项左缩进 30px；
+//! 底部是 `.disk` 容量档位（名字 + 百分比 + 容量条 + 剩余 / 总量）。
 //!
-//! 待补：悬停高亮（需要 `hover` 样式，等双视图阶段一并处理）、
-//! 常用文件夹的添加/移除（需要右键菜单，本次仅预留分区）。
+//! 折叠态只保留图标并水平居中，不显示分区标题与容量档位——48px 放不下文字，
+//! 硬塞只会得到一排被截断的残字。
 
 use std::time::Duration;
 
 use fm_core::{Location, format_size};
 use fm_platform::{Drive, DriveKind};
+use fm_views::metrics;
+use fm_views::widgets;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, ClickEvent, Context, ElementId, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, ease_in_out, px,
-    prelude::FluentBuilder as _,
+    Animation, AnimationExt as _, AnyElement, ClickEvent, Context, ElementId, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
+    Styled as _, Window, div, ease_in_out, px, prelude::FluentBuilder as _,
 };
-use gpui_component::{ActiveTheme as _, Icon, Sizable as _};
+use gpui_component::{Icon, Sizable as _};
 use gpui_kit_assets::IconName;
 
+use crate::layout::Viewport;
 use crate::shell::ShellView;
 
 /// 展开态宽度。
-pub(crate) const SIDEBAR_WIDTH: f32 = 240.0;
+pub(crate) const SIDEBAR_WIDTH: f32 = metrics::SIDEBAR_WIDTH;
 /// 折叠态宽度。
-pub(crate) const SIDEBAR_COLLAPSED_WIDTH: f32 = 48.0;
-/// 单个导航项高度。
-const ROW_HEIGHT: f32 = 30.0;
-/// 驱动器剩余容量条的宽度与高度。
-const METER_WIDTH: f32 = 72.0;
-const METER_HEIGHT: f32 = 4.0;
+pub(crate) const SIDEBAR_COLLAPSED_WIDTH: f32 = metrics::SIDEBAR_COLLAPSED_WIDTH;
+/// 容量条宽度：比设计稿的 72px 略宽，用来容纳「428 GB / 1 TB」这类文本。
+const DISK_METER_WIDTH: f32 = 150.0;
 
 impl ShellView {
     /// 渲染左侧导航栏。
-    pub(crate) fn render_sidebar(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme();
-        let border = theme.border;
-        let foreground = theme.foreground;
-        let muted_foreground = theme.muted_foreground;
-        let accent = theme.accent;
-        let track = theme.muted;
-        let accent_foreground = theme.accent_foreground;
+    ///
+    /// 浮层模式（≤920px）下侧边栏压在内容之上，只在 `sidebar_overlay` 为真时出现；
+    /// 此时它不参与横向布局，宽度由 [`Viewport::sidebar_width`] 返回 0 与之对应。
+    pub(crate) fn render_sidebar(&self, viewport: Viewport, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = &self.tokens;
+        let overlay = viewport.sidebar_overlay;
+        // 浮层模式不使用「折叠成 48px」这一形态：浮层是临时抽屉，
+        // 它要么完整出现、要么完全消失，没有中间态。
+        let collapsed = !overlay && self.config.sidebar_collapsed;
 
-        let collapsed = self.config.sidebar_collapsed;
-        let target_width = if collapsed {
-            SIDEBAR_COLLAPSED_WIDTH
-        } else {
-            SIDEBAR_WIDTH
-        };
+        // 浮层未展开时整条侧边栏不存在——不是「宽度为 0」，
+        // 否则它会挡住下面的内容而用户看不出来。
+        if overlay && !self.sidebar_overlay {
+            return div().into_any_element();
+        }
+
         // 折叠动画从「另一个状态」的宽度出发，因此需要显式记住起点。
-        let start_width = if collapsed {
-            SIDEBAR_WIDTH
+        // 浮层模式两端同宽，动画自然退化为无过渡。
+        let (start_width, target_width) = if overlay {
+            (SIDEBAR_WIDTH, SIDEBAR_WIDTH)
+        } else if collapsed {
+            (SIDEBAR_WIDTH, SIDEBAR_COLLAPSED_WIDTH)
         } else {
-            SIDEBAR_COLLAPSED_WIDTH
+            (SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_WIDTH)
         };
         let location = self.tabs.active_state().location().clone();
 
         let mut rows: Vec<AnyElement> = Vec::new();
 
-        // —— 本机（虚拟位置）——
-        //
-        // 放在最前面：它是「向上」的终点，也是后续 `Win+E` 接管的默认落点。
-        rows.push(navigation_row(
-            ("computer", 0u32),
-            String::from("此电脑"),
-            IconName::PcCase,
-            collapsed,
-            matches!(location, Location::Computer),
-            accent,
-            accent_foreground,
-            foreground,
-            muted_foreground,
-            cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                this.go_to_computer(cx);
-            }),
-        ));
-
         // —— 快速访问 ——
         if !collapsed {
-            rows.push(section_title("快速访问", muted_foreground));
+            rows.push(group_header("快速访问", tokens));
         }
         for (index, entry) in self.quick_access.iter().enumerate() {
-            let icon = quick_access_icon(index);
             let path = entry.path.as_ref().clone();
             let selected = location.is_dir(&path);
-            rows.push(navigation_row(
+            rows.push(nav_row(
                 ("quick", index),
                 entry.name.to_string(),
-                icon,
+                quick_access_icon(index),
                 collapsed,
+                false,
                 selected,
-                accent,
-                accent_foreground,
-                foreground,
-                muted_foreground,
+                tokens,
                 cx.listener(move |this, _: &ClickEvent, _window, cx| {
                     this.navigate_to(path.clone(), cx);
                 }),
             ));
         }
 
-        // —— 驱动器 ——
-        if !collapsed {
-            rows.push(section_title("驱动器", muted_foreground));
-        }
-        for (index, drive) in self.drives.iter().enumerate() {
-            let path = drive.mount_point.clone();
-            let selected = location.is_dir(&path);
-            rows.push(drive_row(
-                ("drive", index),
-                drive,
-                collapsed,
-                selected,
-                accent,
-                accent_foreground,
-                foreground,
-                muted_foreground,
-                track,
-                cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                    this.navigate_to(path.clone(), cx);
+        // —— 此电脑（含驱动器子项）——
+        //
+        // 放在「快速访问」之后：它是「向上」的终点，也是后续 `Win+E` 接管的默认落点。
+        let computer_selected = matches!(location, Location::Computer);
+        if collapsed {
+            rows.push(nav_row(
+                "computer",
+                String::from("此电脑"),
+                IconName::PcCase,
+                true,
+                false,
+                computer_selected,
+                tokens,
+                cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.go_to_computer(cx);
                 }),
             ));
-        }
-
-        // —— 常用文件夹（本次仅预留分区）——
-        if !collapsed {
-            rows.push(section_title("常用文件夹", muted_foreground));
+        } else {
             rows.push(
-                div()
-                    .px_3()
-                    .py_1()
-                    .text_xs()
-                    .text_color(muted_foreground)
-                    .child("尚未添加")
-                    .into_any_element(),
-            );
-        }
-
-        div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .h_full()
-            .border_r_1()
-            .border_color(border)
-            .overflow_hidden()
-            // 折叠切换按钮位于侧边栏顶部。
-            .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .h(px(40.0))
-                    .px_2()
-                    .flex_none()
+                    .gap(px(2.0))
                     .child(
                         div()
-                            .id("sidebar-toggle")
-                            .flex_none()
-                            .p_1()
-                            .cursor_pointer()
-                            .text_color(muted_foreground)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                                this.toggle_sidebar(cx);
-                            }))
-                            .child(Icon::new(IconName::PanelLeft).small()),
-                    ),
-            )
-            .child(
-                div()
-                    .id("sidebar-body")
-                    .flex()
-                    .flex_col()
-                    .flex_grow(1.0)
-                    .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .py_1()
-                    .children(rows),
-            )
-            .with_animation(
-                // id 里带上折叠状态：GPUI 的动画按 id 记忆，id 不变就只在元素首次出现时播放，
-                // 之后的折叠/展开不会有过渡。把状态编进 id 才能每次切换都重新播放。
-                // `ElementId` 只实现了与 `u32`/`EntityId` 的元组转换，bool 需要显式转一下。
-                ("sidebar-width", u32::from(collapsed)),
-                Animation::new(Duration::from_millis(180)).with_easing(ease_in_out),
-                move |element, delta| {
-                    element.w(px(start_width + (target_width - start_width) * delta))
-                },
-            )
-            .into_any_element()
+                            .flex_grow(1.0)
+                            .min_w(px(0.0))
+                            .child(nav_row(
+                                "computer",
+                                String::from("此电脑"),
+                                IconName::PcCase,
+                                false,
+                                false,
+                                computer_selected,
+                                tokens,
+                                cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                    this.go_to_computer(cx);
+                                }),
+                            )),
+                    )
+                    .child(caret_button(
+                        ("computer-caret", u32::from(self.drives_expanded)),
+                        self.drives_expanded,
+                        tokens,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.toggle_drives_group(cx);
+                        }),
+                    ))
+                    .into_any_element(),
+            );
+        }
+
+        if self.drives_expanded || collapsed {
+            for (index, drive) in self.drives.iter().enumerate() {
+                let path = drive.mount_point.clone();
+                let selected = location.is_dir(&path);
+                rows.push(nav_row(
+                    ("drive", index),
+                    drive_label(drive),
+                    drive_icon(drive.kind),
+                    collapsed,
+                    true,
+                    selected,
+                    tokens,
+                    cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.navigate_to(path.clone(), cx);
+                    }),
+                ));
+            }
+        }
+
+        let navigation = div()
+            .id("sidebar-nav")
+            .flex()
+            .flex_col()
+            .flex_grow(1.0)
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .px(px(8.0))
+            .pt(px(8.0))
+            .pb(px(6.0))
+            .children(rows);
+
+        let mut sidebar = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .h_full()
+            .bg(tokens.panel)
+            .border_r_1()
+            .border_color(tokens.border)
+            .overflow_hidden()
+            .child(navigation);
+
+        // 容量档位只在展开态出现：它需要一整行文字，折叠态塞不下。
+        if !collapsed
+            && let Some(meters) = self.render_disk_meters()
+        {
+            sidebar = sidebar.child(meters);
+        }
+
+        // 浮层：不占横向空间，压在内容之上，并加投影把自己与内容分开。
+        // 定位必须在 `with_animation` 之前设置：动画元素只负责宽度，
+        // 它不转发定位类的样式方法。
+        if overlay {
+            sidebar = sidebar
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .shadow_lg();
+        }
+
+        let sidebar = sidebar.with_animation(
+            // id 里带上折叠状态：GPUI 的动画按 id 记忆，id 不变就只在元素首次出现时播放，
+            // 之后的折叠/展开不会有过渡。把状态编进 id 才能每次切换都重新播放。
+            // `ElementId` 只实现了与 `u32`/`EntityId` 的元组转换，bool 需要显式转一下。
+            ("sidebar-width", u32::from(collapsed)),
+            Animation::new(Duration::from_millis(180)).with_easing(ease_in_out),
+            move |element, delta| element.w(px(start_width + (target_width - start_width) * delta)),
+        );
+
+        sidebar.into_any_element()
+    }
+
+    /// 侧边栏底部的磁盘容量档位。
+    ///
+    /// 只在容量已知的驱动器上渲染：空光驱、未插卡的读卡器算不出比例，
+    /// 画一条恒为空的进度条比不画更容易让人误判。
+    fn render_disk_meters(&self) -> Option<AnyElement> {
+        let tokens = &self.tokens;
+        let measurable: Vec<&Drive> = self
+            .drives
+            .iter()
+            .filter(|drive| drive.total_bytes > 0)
+            .collect();
+        if measurable.is_empty() {
+            return None;
+        }
+
+        let meters = measurable.into_iter().map(|drive| {
+            let ratio = drive.used_ratio();
+            let percent = (ratio * 100.0).round();
+            let used = format_size(drive.total_bytes.saturating_sub(drive.free_bytes));
+            let total = format_size(drive.total_bytes);
+            let free = format_size(drive.free_bytes);
+
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .font_family(tokens.mono_font.clone())
+                        .text_size(px(metrics::FONT_XS))
+                        .text_color(tokens.muted_fg)
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(tokens.fg)
+                                .child(drive_label(drive)),
+                        )
+                        .child(format!("{percent:.0}%")),
+                )
+                .child(widgets::capacity_bar(
+                    ratio,
+                    DISK_METER_WIDTH,
+                    metrics::DISK_METER_HEIGHT,
+                    tokens,
+                    tokens.hover,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .font_family(tokens.mono_font.clone())
+                        .text_size(px(metrics::FONT_XS))
+                        .text_color(tokens.muted_fg)
+                        .child(format!("{used} / {total}"))
+                        .child(format!("{free} 可用")),
+                )
+        });
+
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .px(px(12.0))
+                .pt(px(10.0))
+                .pb(px(12.0))
+                .border_t_1()
+                .border_color(tokens.border)
+                .children(meters)
+                .into_any_element(),
+        )
     }
 }
 
-/// 分区标题。
-fn section_title(label: &'static str, color: Hsla) -> AnyElement {
+/// 分区标题：等宽小字 + 图标。
+fn group_header(label: &'static str, tokens: &fm_views::Tokens) -> AnyElement {
     div()
-        // 分组之间留出 16px：折叠态下不渲染标题，但间距仍然由内边距保证。
-        .mt_2()
-        .mb_1()
-        .px_3()
-        .text_xs()
-        .text_color(color)
-        .child(label)
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(6.0))
+        .pt(px(6.0))
+        .pb(px(4.0))
+        .text_color(tokens.muted_fg)
+        .child(widgets::section_label(label, tokens))
         .into_any_element()
 }
 
-/// 快速访问与常用文件夹共用的导航行。
+/// 分组折叠箭头。
+fn caret_button<F>(
+    id: impl Into<ElementId>,
+    expanded: bool,
+    tokens: &fm_views::Tokens,
+    on_click: F,
+) -> AnyElement
+where
+    F: Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+{
+    let hover = tokens.hover;
+    let foreground = tokens.fg;
+    let muted = tokens.muted_fg;
+
+    div()
+        .id(id)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(20.0))
+        .h(px(20.0))
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .text_color(muted)
+        .hover(move |style| style.bg(hover).text_color(foreground))
+        .on_click(on_click)
+        .child(
+            Icon::new(if expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
+            .with_size(px(13.0)),
+        )
+        .into_any_element()
+}
+
+/// 导航行。
+///
+/// `collapsed` 为真时只画图标并水平居中；`is_sub` 为真时左缩进 30px，
+/// 让驱动器明确显示为「此电脑」的下级。
 #[allow(clippy::too_many_arguments)]
-fn navigation_row<F>(
+fn nav_row<F>(
     id: impl Into<ElementId>,
     label: String,
     icon: IconName,
     collapsed: bool,
+    is_sub: bool,
     selected: bool,
-    accent: Hsla,
-    accent_foreground: Hsla,
-    foreground: Hsla,
-    muted_foreground: Hsla,
+    tokens: &fm_views::Tokens,
     on_click: F,
 ) -> AnyElement
 where
-    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    F: Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 {
-    row_shell(id, collapsed, selected, accent, on_click)
-        .child(Icon::new(icon).small())
-        .when(!collapsed, |element| {
-            element
-                .gap_2()
-                .px_2()
-                .text_sm()
-                .text_color(if selected {
-                    accent_foreground
-                } else {
-                    foreground
-                })
-                .child(div().w_full().overflow_hidden().child(label))
-        })
-        .when(collapsed, |element| element.text_color(muted_foreground))
-        .into_any_element()
-}
+    let hover = tokens.hover;
+    let accent_soft = tokens.accent_soft;
+    let accent = tokens.accent;
+    let foreground = tokens.fg;
+    let muted = tokens.muted_fg;
 
-/// 驱动器行：图标 + 名称 + 剩余容量与容量条。
-#[allow(clippy::too_many_arguments)]
-fn drive_row<F>(
-    id: impl Into<ElementId>,
-    drive: &Drive,
-    collapsed: bool,
-    selected: bool,
-    accent: Hsla,
-    accent_foreground: Hsla,
-    foreground: Hsla,
-    muted_foreground: Hsla,
-    track: Hsla,
-    on_click: F,
-) -> AnyElement
-where
-    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-{
-    let label = drive_label(drive);
-    // 容量为 0 的驱动器（空光驱、未插卡读卡器）不显示容量条，显示进度条反而误导。
-    let has_capacity = drive.total_bytes > 0;
-    let used_ratio = drive.used_ratio();
-    let free_text: SharedString = format!("剩余 {}", format_size(drive.free_bytes)).into();
+    let icon_color: Hsla = if selected { accent } else { muted };
 
-    row_shell(id, collapsed, selected, accent, on_click)
-        .child(Icon::new(drive_icon(drive.kind)).small())
-        .when(!collapsed, |element| {
-            element
-                .gap_2()
-                .px_2()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_grow(1.0)
-                        .min_w(px(0.0))
-                        .text_sm()
-                        .text_color(if selected {
-                            accent_foreground
-                        } else {
-                            foreground
-                        })
-                        .child(label)
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted_foreground)
-                                .child(free_text),
-                        ),
-                )
-                .when(has_capacity, |element| {
-                    element.child(
-                        div()
-                            .flex_none()
-                            .w(px(METER_WIDTH))
-                            .h(px(METER_HEIGHT))
-                            .rounded(px(2.0))
-                            .bg(track)
-                            .child(
-                                div()
-                                    .h_full()
-                                    .rounded(px(2.0))
-                                    .bg(accent)
-                                    // 宽度用比例表示，避免依赖运行时测量。
-                                    .w(px(METER_WIDTH * used_ratio)),
-                            ),
-                    )
-                })
-        })
-        .when(collapsed, |element| element.text_color(muted_foreground))
-        .into_any_element()
-}
-
-/// 导航行的公共外壳：固定高度、命中区域、选中底色与左侧竖条。
-///
-/// 返回 `Stateful<Div>` 而非 `Div`：调用 `.id(...)` 之后元素类型就已经变成有状态的，
-/// 写死成 `Div` 会在调用方编译不过。
-fn row_shell<F>(
-    id: impl Into<ElementId>,
-    collapsed: bool,
-    selected: bool,
-    accent: Hsla,
-    on_click: F,
-) -> gpui::Stateful<gpui::Div>
-where
-    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-{
-    let base = div()
+    let mut row = div()
         .id(id)
         .flex()
         .flex_row()
         .items_center()
         .flex_none()
-        .h(px(ROW_HEIGHT))
-        // 折叠态只剩下图标，需要水平居中才不会贴左。
-        .justify_center()
+        .h(px(metrics::NAV_ITEM_HEIGHT))
+        .rounded(px(metrics::RADIUS))
         .cursor_pointer()
+        .hover(move |style| style.bg(hover))
+        .when(selected, |element| element.bg(accent_soft))
         .on_click(on_click);
 
     if collapsed {
-        return base;
+        return row
+            .justify_center()
+            .child(Icon::new(icon).with_size(px(16.0)).text_color(icon_color))
+            .into_any_element();
     }
 
-    base.justify_between().when(selected, |element| {
-        element.bg(accent).child(div().flex_none().w(px(3.0)).h_full().bg(accent))
-    })
+    row = row
+        .gap(px(9.0))
+        .px(px(8.0))
+        .when(is_sub, |element| element.pl(px(metrics::NAV_SUB_INDENT)))
+        .child(Icon::new(icon).with_size(px(15.0)).text_color(icon_color))
+        .child(
+            div()
+                .flex_grow(1.0)
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .truncate()
+                .text_size(px(12.5))
+                .text_color(foreground)
+                .when(selected, |element| {
+                    element.font_weight(gpui::FontWeight::MEDIUM)
+                })
+                .child(label),
+        );
+
+    row.into_any_element()
 }
 
-/// 驱动器展示名。
+/// 驱动器展示名，例如「本地磁盘 (C:)」。
 fn drive_label(drive: &Drive) -> String {
     let kind = match drive.kind {
         DriveKind::Fixed => "本地磁盘",
@@ -376,7 +436,7 @@ fn drive_icon(kind: DriveKind) -> IconName {
 /// 与 `fm-platform::windows::known_folders` 的枚举顺序一一对应。
 fn quick_access_icon(index: usize) -> IconName {
     match index {
-        0 => IconName::House,
+        0 => IconName::Monitor,
         1 => IconName::Download,
         2 => IconName::FileText,
         3 => IconName::Image,

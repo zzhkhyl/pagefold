@@ -4,6 +4,7 @@
 //! 文件系统实现。它只描述「数据长什么样」与「标签页状态如何流转」，
 //! 从而让 `platform` / `services` 能在任意宿主上做静态检查。
 
+pub mod appearance;
 pub mod command;
 pub mod entry;
 pub mod location;
@@ -12,6 +13,7 @@ pub mod tab;
 pub mod tabs;
 pub mod util;
 
+pub use appearance::{Density, IconZoom};
 pub use command::Command;
 pub use entry::{Entry, EntryKind, ExtId, IconId, SortDirection, SortKey, ViewMode};
 pub use location::Location;
