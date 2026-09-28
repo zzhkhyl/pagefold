@@ -7,6 +7,7 @@
 pub mod clipboard;
 pub mod drives;
 pub mod folder_association;
+pub mod fs_ops;
 pub mod hotkey_host;
 pub mod icon;
 pub mod known_folders;
@@ -16,12 +17,12 @@ pub mod single_instance;
 pub mod time;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use fm_core::{Entry, EntryKind, IconId};
 
-use crate::fs::{Drive, FileSystem};
+use crate::fs::{Drive, FileSystem, OpReport};
 
 /// Windows 上的 [`FileSystem`] 实现。
 ///
@@ -91,6 +92,36 @@ impl FileSystem for WindowsFileSystem {
     fn recycle_bin(&self) -> anyhow::Result<Vec<Entry>> {
         // 枚举本身不返回错误：读不到的卷与损坏的 `$I` 都在内部跳过。
         Ok(recycle_bin::enumerate())
+    }
+
+    // ── 写操作 ──────────────────────────────────────────────────────
+    //
+    // 本类型无状态，因此每个方法都只是把具体实现转发给 `fs_ops` / `recycle_bin`。
+    // 这一层刻意不做任何判断：判断（重名怎么办、跨卷怎么办）放在实现里，
+    // 因为那需要看文件系统才能决定。
+
+    fn create_dir(&self, parent: &Path, name: &str) -> anyhow::Result<PathBuf> {
+        fs_ops::create_dir(parent, name)
+    }
+
+    fn create_file(&self, parent: &Path, name: &str) -> anyhow::Result<PathBuf> {
+        fs_ops::create_file(parent, name)
+    }
+
+    fn rename(&self, path: &Path, new_name: &str) -> anyhow::Result<PathBuf> {
+        fs_ops::rename(path, new_name)
+    }
+
+    fn copy_into(&self, sources: &[PathBuf], dest_dir: &Path) -> anyhow::Result<OpReport> {
+        fs_ops::copy_into(sources, dest_dir)
+    }
+
+    fn move_into(&self, sources: &[PathBuf], dest_dir: &Path) -> anyhow::Result<OpReport> {
+        fs_ops::move_into(sources, dest_dir)
+    }
+
+    fn move_to_recycle_bin(&self, paths: &[PathBuf]) -> anyhow::Result<usize> {
+        recycle_bin::move_to_recycle_bin(paths)
     }
 }
 

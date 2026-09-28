@@ -15,6 +15,9 @@ use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
+use gpui_component::button::{
+    Button, ButtonCustomVariant, ButtonVariant, ButtonVariants as _, DropdownButton,
+};
 use gpui_component::input::Input;
 use gpui_component::{Icon, Sizable as _};
 use gpui_kit_assets::IconName;
@@ -182,17 +185,33 @@ impl ShellView {
             }),
         );
 
-        // 新建文件 / 文件夹尚未接入（属文件写操作），保持设计稿的位置但为禁用态。
-        let new_button = widgets::icon_button(
-            "new-item",
-            IconName::Plus,
-            16.0,
-            "新建（尚未接入）",
-            false,
-            false,
-            tokens,
-            |_, _, _| {},
-        );
+        // 命令条上的「新建」是一个**下拉**：设计稿的 `$('#btnNew').onclick`
+        // 会弹出「新建文件夹 / 新建文本文档 / 新建 Markdown 文档 / 粘贴」四项。
+        //
+        // 用组件库的 `DropdownButton` 承载，而不是自己拼一个弹出层：定位、
+        // 边缘翻转、Esc 与点击外部关闭、上下键导航都由它与 `PopupMenu` 提供——
+        // 与内容区右键菜单复用同一套机制，不重复造轮子。
+        //
+        // 触发按钮的配色走 `ButtonCustomVariant`：这样它和旁边那些手绘按钮
+        // 用**同一套设计令牌**（同样的悬停底色、选中底色与文字色），
+        // 不会因为组件库的默认按钮配色而在命令条上显得突兀。
+        let new_button = DropdownButton::new("new-item")
+            .button(
+                Button::new("new-item-trigger")
+                    .with_variant(ButtonVariant::Custom(
+                        ButtonCustomVariant::new(cx)
+                            .color(gpui::transparent_black())
+                            .foreground(tokens.muted_fg)
+                            .hover(tokens.hover)
+                            .active(tokens.accent_soft),
+                    ))
+                    .icon(Icon::new(IconName::Plus).with_size(px(16.0)))
+                    .tooltip("新建")
+                    // 尺寸对齐设计稿的 30px 命中区，与相邻按钮等高。
+                    .w(px(metrics::CONTROL_SIZE))
+                    .h(px(metrics::CONTROL_SIZE)),
+            )
+            .dropdown_menu(crate::context_menu::new_menu_builder(cx));
 
         div()
             .flex_none()

@@ -12,10 +12,11 @@ use std::rc::Rc;
 
 use fm_core::{Entry, SortDirection, SortKey, format_size};
 use gpui::{
-    AnyElement, App, ClickEvent, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    AnyElement, App, ClickEvent, Entity, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
     prelude::FluentBuilder as _,
 };
+use gpui_component::input::InputState;
 use gpui_component::{Icon, Sizable as _};
 use gpui_kit_assets::IconName;
 
@@ -188,6 +189,10 @@ pub fn header(
 ///
 /// `menu` / `right_press` 见 [`crate::context_menu::entry_menu_row`]：
 /// 菜单内容由 shell 决定，这里只负责把菜单挂到行上。
+///
+/// `editing` 是「这一行正在被内联重命名」时的输入框实体（由 shell 持有）。
+/// 视图层不创建也不销毁它——输入框的状态（文本、光标、焦点）必须跨帧存活，
+/// 而视图每帧都在重建行，任何在这里 `cx.new` 的做法都会让每帧拿到一个新输入框。
 #[allow(clippy::too_many_arguments)]
 pub fn row(
     entry: &Entry,
@@ -196,6 +201,7 @@ pub fn row(
     modified: Option<&str>,
     selected: bool,
     current: bool,
+    editing: Option<&Entity<InputState>>,
     columns: Columns,
     tokens: &Tokens,
     index: usize,
@@ -259,16 +265,21 @@ pub fn row(
                 .with_size(px(16.0))
                 .text_color(if entry.is_dir() { tokens.accent } else { muted }),
         )
-        .child(
-            div()
+        // 重命名时**只替换名称文本，图标留着**：与设计稿的标记一致
+        // （`<span class="ic">` 在编辑态里保留），也让用户仍能一眼看出
+        // 自己改的是哪一项，而不是失去所有视觉参照。
+        .child(match editing {
+            Some(state) => widgets::rename_input(state, tokens),
+            None => div()
                 .flex_grow(1.0)
                 .min_w(px(0.0))
                 .overflow_hidden()
                 .truncate()
                 .text_size(px(12.5))
                 .text_color(tokens.fg)
-                .child(name.to_string()),
-        );
+                .child(name.to_string())
+                .into_any_element(),
+        });
 
     let selected_hover = crate::tokens::with_alpha(tokens.fg, 0.1);
     let mut row = div()
@@ -281,7 +292,7 @@ pub fn row(
         .h(px(columns.row_height))
         .px(px(metrics::ROW_PADDING_X))
         .group(group_name)
-        .cursor_pointer()
+        .when(editing.is_none(), |element| element.cursor_pointer())
         // hover 每个元素只能挂**一次**：GPUI 的 `hover()` 带
         // `debug_assert!(hover_style.is_none())`，第二次调用会直接 panic。
         // release 把断言编译掉了，所以这个写法一直没暴露；dev 构建下
@@ -298,14 +309,19 @@ pub fn row(
         .when(current, |element| {
             element.border_1().border_color(accent_line)
         })
-        .on_click(move |event: &ClickEvent, window, cx| {
-            // 单击与双击共用同一个处理器，必须用 click_count 区分：
-            // 只有双击才是「打开」，单击只更新选中集。
-            if event.click_count() == 2 {
-                (*opened)(target.clone(), window, cx);
-                return;
-            }
-            (*row_select)(index, crate::select_mode(event), window, cx);
+        // 编辑态下整行不再响应点击：输入框就在行内，而点击会**冒泡**到行上，
+        // 那会顺带改变选中集（把用户正在改的那一项取消选中），
+        // 更糟的是双击会触发「打开」——在改名的过程中把文件打开。
+        .when(editing.is_none(), |element| {
+            element.on_click(move |event: &ClickEvent, window, cx| {
+                // 单击与双击共用同一个处理器，必须用 click_count 区分：
+                // 只有双击才是「打开」，单击只更新选中集。
+                if event.click_count() == 2 {
+                    (*opened)(target.clone(), window, cx);
+                    return;
+                }
+                (*row_select)(index, crate::select_mode(event), window, cx);
+            })
         })
         .child(checkbox)
         .child(name_cell);

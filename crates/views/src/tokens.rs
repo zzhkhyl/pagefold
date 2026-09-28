@@ -50,6 +50,8 @@ pub mod metrics {
     /// 面包屑单段高度与圆角。
     pub const CRUMB_HEIGHT: f32 = 24.0;
     pub const CRUMB_RADIUS: f32 = 5.0;
+    /// 内联重命名输入框的圆角（设计稿 `.rename` 用的是 5px 这一档）。
+    pub const RENAME_RADIUS: f32 = 5.0;
     /// 搜索框宽度区间。
     pub const SEARCH_WIDTH: f32 = 230.0;
     pub const SEARCH_MIN_WIDTH: f32 = 132.0;

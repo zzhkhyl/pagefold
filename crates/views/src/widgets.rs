@@ -10,10 +10,11 @@ use std::rc::Rc;
 
 use fm_core::{Entry, EntryKind};
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, Hsla, InteractiveElement as _, IntoElement,
+    AnyElement, App, ClickEvent, ElementId, Entity, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
     prelude::FluentBuilder as _,
 };
+use gpui_component::input::{Input, InputState};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, Sizable as _};
 use gpui_kit_assets::IconName;
@@ -262,12 +263,16 @@ pub fn capacity_bar(
 /// 文本按钮（设计稿的 `.btn.btn-ghost.btn-sm`）：用于选中条与预览面板的动作。
 ///
 /// `enabled = false` 时降低不透明度并挂上说明性的 tooltip，而不是把按钮整个移除——
-/// 本阶段尚未实现的能力（复制/剪切/重命名…）在界面上仍然是可见的，
-/// 用户不会因为「按钮有时有、有时没有」而怀疑界面出了问题。
+/// 被禁用往往只是**此刻**不适用（剪贴板为空时不能粘贴），按钮消失会让用户
+/// 以为功能不见了。
+///
+/// `tooltip` 由调用方给出而不是从 `label` 推导：禁用时真正需要说明的是**为什么**
+/// 不能点（「剪贴板为空」），而那只有调用方知道。
 pub fn text_button<F>(
     id: impl Into<ElementId>,
     label: &'static str,
     icon: Option<IconName>,
+    tooltip: impl Into<SharedString>,
     enabled: bool,
     tokens: &Tokens,
     on_click: F,
@@ -278,11 +283,7 @@ where
     let muted = tokens.muted_fg;
     let foreground = tokens.fg;
     let hover = tokens.hover;
-    let tooltip: SharedString = if enabled {
-        label.into()
-    } else {
-        "该操作尚未接入（见 README 已知缺口）".into()
-    };
+    let tooltip: SharedString = tooltip.into();
 
     div()
         .id(id)
@@ -310,6 +311,34 @@ where
             // 而不是把捕获到的字符串移动进接收者（`Fn` 闭包不允许消耗捕获值）。
             Tooltip::new(tooltip.clone()).build(window, cx)
         })
+        .into_any_element()
+}
+
+/// 内联重命名输入框（设计稿的 `.rename`）。
+///
+/// 详情表的名称列与网格的名称块都用它，样式因此只在这里定义一次——
+/// 同一个交互在两个视图里长得不一样，是用户最容易察觉的不一致。
+///
+/// 高度取 `行高 - 10`（设计稿的 `calc(var(--row-h) - 10px)`），
+/// 因此它会比一行略矮，看起来是「嵌在行里」而不是「撑破了行」。
+/// 高度对两种视图都成立：网格的名称区固定 33px，而这里最多二十几像素。
+pub fn rename_input(state: &Entity<InputState>, tokens: &Tokens) -> AnyElement {
+    let height = (tokens.row_height - 10.0).max(16.0);
+
+    div()
+        .flex_grow(1.0)
+        .min_w(px(0.0))
+        .h(px(height))
+        .px(px(6.0))
+        .rounded(px(metrics::RENAME_RADIUS))
+        .border_1()
+        .border_color(tokens.accent)
+        .bg(tokens.surface)
+        .flex()
+        .items_center()
+        // `appearance(false)` 去掉组件库输入框自带的白底与描边，
+        // 由上面这个容器提供设计稿的「强调色描边 + surface 底」。
+        .child(Input::new(state).appearance(false).h_full())
         .into_any_element()
 }
 

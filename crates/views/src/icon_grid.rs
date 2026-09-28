@@ -9,9 +9,10 @@
 //! 悬停浅灰底、选中强调色浅底加描边，与详情视图共用同一套语义。
 
 use gpui::{
-    AnyElement, ClickEvent, InteractiveElement as _, IntoElement, ParentElement as _,
+    AnyElement, ClickEvent, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, div, px, prelude::FluentBuilder as _,
 };
+use gpui_component::input::InputState;
 use gpui_component::{Icon, Sizable as _};
 
 use fm_core::Entry;
@@ -79,6 +80,11 @@ pub fn row_height(cell_width: f32) -> f32 {
 ///
 /// `extensions` 由调用方经扩展名驻留表解析后传入，用于挑选文件类型图标；
 /// `selected` 让调用方按当前选中集判断每个单元格的状态，避免视图层持有选中模型。
+///
+/// `editing` 是「某个条目正在被内联重命名」时的 `(下标, 输入框)`：
+/// 它必须带下标，因为网格的一行里有多个单元格，只有命中下标的那一个
+/// 才把名称换成输入框。输入框实体由 shell 持有——视图每帧重建单元格，
+/// 在这里 `cx.new` 会让每帧都得到一个全新的输入框。
 #[allow(clippy::too_many_arguments)]
 pub fn row(
     entries: &[Entry],
@@ -88,6 +94,7 @@ pub fn row(
     extensions: impl Fn(usize) -> Option<String>,
     selected: impl Fn(usize) -> bool,
     cursor: Option<usize>,
+    editing: Option<(usize, &Entity<InputState>)>,
     tokens: &Tokens,
     open: &OpenHandler,
     select: &SelectHandler,
@@ -98,6 +105,11 @@ pub fn row(
 
     let cells = (0..columns).map(|offset| {
         let index = start + offset;
+        // `Option<(usize, &Entity<_>)>` 是 `Copy` 的，因此可以在闭包里按值用，
+        // 不需要为每个单元格克隆输入框的引用。
+        let editing = editing
+            .filter(|(target, _)| *target == index)
+            .map(|(_, state)| state);
         match entries.get(index) {
             Some(entry) => cell(
                 entry,
@@ -106,6 +118,7 @@ pub fn row(
                 height,
                 selected(index),
                 cursor == Some(index),
+                editing,
                 index,
                 tokens,
                 open,
@@ -145,6 +158,7 @@ fn cell(
     height: f32,
     selected: bool,
     current: bool,
+    editing: Option<&Entity<InputState>>,
     index: usize,
     tokens: &Tokens,
     open: &OpenHandler,
@@ -191,13 +205,18 @@ fn cell(
         .when(current, |element| {
             element.border_color(accent_line)
         })
-        .on_click(move |event: &ClickEvent, window, cx| {
-            // 单击与双击共用同一个处理器，必须用 click_count 区分。
-            if event.click_count() == 2 {
-                (*opened)(target.clone(), window, cx);
-                return;
-            }
-            (*selecting)(index, crate::select_mode(event), window, cx);
+        .when(editing.is_none(), |element| element.cursor_pointer())
+        // 编辑态下单元格不再响应点击：点击会**冒泡**到单元格上，
+        // 改变选中集或触发「打开」——在改名的过程中把文件打开是最糟的结果。
+        .when(editing.is_none(), |element| {
+            element.on_click(move |event: &ClickEvent, window, cx| {
+                // 单击与双击共用同一个处理器，必须用 click_count 区分。
+                if event.click_count() == 2 {
+                    (*opened)(target.clone(), window, cx);
+                    return;
+                }
+                (*selecting)(index, crate::select_mode(event), window, cx);
+            })
         })
         .child(
             // 缩略图底板：与设计稿一致地使用 panel 底色，让文件图标在两种主题下
@@ -220,8 +239,20 @@ fn cell(
                         .text_color(if entry.is_dir() { tokens.accent } else { tokens.muted_fg }),
                 ),
         )
-        .child(
-            div()
+        .child(match editing {
+            // 编辑态：名称区改放输入框。外层补一层 flex_row 是为了让
+            // `rename_input` 的 `flex_grow` 有参照物——否则它会按内容宽度收缩。
+            Some(state) => div()
+                .flex_none()
+                .w_full()
+                .h(px(NAME_HEIGHT))
+                .overflow_hidden()
+                .flex()
+                .flex_row()
+                .items_center()
+                .child(crate::widgets::rename_input(state, tokens))
+                .into_any_element(),
+            None => div()
                 .flex_none()
                 .w_full()
                 .h(px(NAME_HEIGHT))
@@ -229,8 +260,9 @@ fn cell(
                 .line_clamp(2)
                 .text_size(px(metrics::FONT_SM))
                 .text_color(tokens.fg)
-                .child(entry.name.to_string()),
-        )
+                .child(entry.name.to_string())
+                .into_any_element(),
+        })
         .child(
             div()
                 .flex_none()

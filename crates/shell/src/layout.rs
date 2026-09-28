@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use fm_core::{Entry, Location, ViewMode};
+use fm_services::clipboard::ClipboardMode;
 use fm_views::{
     AreaMenuBuilder, SelectHandler, breakpoints, computer, details_table, empty_state, icon_grid,
     metrics, preview_panel, virtual_rows, widgets,
@@ -176,9 +177,15 @@ impl ShellView {
         let tokens = &self.tokens;
         let size = fm_core::format_size(self.selection_size());
 
-        // 复制 / 剪切 / 重命名 / 移到回收站都属于文件写操作，本阶段尚未接入
-        // （见 README 已知缺口）。它们仍然渲染出来并保持设计稿的视觉位置，
-        // 但以降不透明度的禁用态呈现，避免出现「点了没反应」的控件。
+        // 写操作全部作用于「当前目录」，而虚拟位置没有目录可写：回收站里的条目
+        // **看着**有路径，但那只指向 `$Recycle.Bin` 内部，复制 / 剪切 / 改名 /
+        // 再删一次都没有意义。因此整组置为禁用并说明原因，而不是让它们点了没反应。
+        let writable = self.current_dir().is_some();
+        let blocked = "回收站与「此电脑」里的项目不支持该操作";
+        // 重命名一次只能改一项：批量重命名需要一个「前缀 + 起始序号 + 预览」的
+        // 对话框（设计稿的 `#dlgRename`），属后续增量。
+        let single = self.selection.single().is_some();
+
         let actions = div()
             .flex()
             .flex_row()
@@ -188,38 +195,61 @@ impl ShellView {
                 "batch-copy",
                 "复制",
                 Some(IconName::Copy),
-                false,
+                if writable { "复制选中项到剪贴板" } else { blocked },
+                writable,
                 tokens,
-                |_, _, _| {},
+                cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                    this.clip_selection(ClipboardMode::Copy, window, cx);
+                }),
             ))
             .child(widgets::text_button(
                 "batch-cut",
                 "剪切",
                 Some(IconName::Scissors),
-                false,
+                if writable {
+                    "剪切选中项（粘贴后原位置移除）"
+                } else {
+                    blocked
+                },
+                writable,
                 tokens,
-                |_, _, _| {},
+                cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                    this.clip_selection(ClipboardMode::Cut, window, cx);
+                }),
             ))
             .child(widgets::text_button(
                 "batch-rename",
                 "重命名",
                 Some(IconName::Pencil),
-                false,
+                if !writable {
+                    blocked
+                } else if single {
+                    "重命名该项"
+                } else {
+                    "一次只能重命名一项（批量重命名尚未接入）"
+                },
+                writable && single,
                 tokens,
-                |_, _, _| {},
+                cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                    this.rename_selected(window, cx);
+                }),
             ))
             .child(widgets::text_button(
                 "batch-delete",
                 "移到回收站",
                 Some(IconName::Trash),
-                false,
+                if writable { "移到回收站（需确认）" } else { blocked },
+                writable,
                 tokens,
-                |_, _, _| {},
+                cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                    this.delete_selection(window, cx);
+                }),
             ))
             .child(widgets::text_button(
                 "batch-clear",
                 "取消选择",
                 None,
+                "取消选择",
                 true,
                 tokens,
                 cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
@@ -307,6 +337,7 @@ impl ShellView {
         let right_press = crate::context_menu::right_press_handler(cx);
         let list = virtual_rows(
             "details-list",
+            &self.details_scroll,
             cx,
             self.visible().len(),
             move |view: &mut Self, index, _window, _cx| {
@@ -316,6 +347,19 @@ impl ShellView {
                 let name = view.display_name(entry);
                 let kind = view.kind_label(entry);
                 let modified = Self::modified_label(entry);
+                // 正在被重命名的那一行，把名称位换成输入框。
+                //
+                // 除下标外**还要比对路径**：下标是发起重命名时记下的，而重命名
+                // 期间可能有一次在途扫描落地并改变排序，那时下标会指向别的条目，
+                // 输入框就会跑到错误的那一行上（而提交时用的仍是正确路径，
+                // 结果会更让人困惑：改的是 A，输入框却在 B 上）。
+                let editing = view
+                    .renaming
+                    .as_ref()
+                    .filter(|renaming| {
+                        renaming.index == index && entry.path.as_ref() == &renaming.path
+                    })
+                    .map(|renaming| &renaming.input);
                 details_table::row(
                     entry,
                     &name,
@@ -323,6 +367,7 @@ impl ShellView {
                     modified.as_deref(),
                     view.selection.contains(index),
                     view.cursor == Some(index),
+                    editing,
                     columns,
                     &view.tokens,
                     index,
@@ -347,6 +392,16 @@ impl ShellView {
     }
 
     /// 图标视图：按「行」虚拟化的自适应网格。
+    /// 当前视口下网格视图的列数。
+    ///
+    /// 抽成方法而不是在两处各算一遍：`scroll_into_view` 要把条目下标换算成行下标，
+    /// 用的必须是**同一个**列数——两处各算一遍，迟早会因为某次改动而错位。
+    pub(crate) fn grid_columns_for(&self, viewport: Viewport) -> usize {
+        // 网格自身有 12px 外衬（设计稿 `.files.grid` 的 padding）。
+        let inner = (self.content_width(viewport) - metrics::GRID_PADDING * 2.0).max(0.0);
+        icon_grid::columns_for_width(inner, self.tokens.cell)
+    }
+
     fn render_icon_grid(
         &self,
         viewport: Viewport,
@@ -354,9 +409,8 @@ impl ShellView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let tokens = &self.tokens;
-        // 网格自身有 12px 外衬（设计稿 `.files.grid` 的 padding）。
+        let columns = self.grid_columns_for(viewport);
         let inner = (self.content_width(viewport) - metrics::GRID_PADDING * 2.0).max(0.0);
-        let columns = icon_grid::columns_for_width(inner, tokens.cell);
         let cell_width = icon_grid::cell_width(inner, columns, tokens.cell);
         let rows = icon_grid::row_count(self.visible().len(), columns);
 
@@ -366,6 +420,7 @@ impl ShellView {
         let right_press = crate::context_menu::right_press_handler(cx);
         let list = virtual_rows(
             "icon-grid",
+            &self.grid_scroll,
             cx,
             rows,
             move |view: &mut Self, row_index, _window, _cx| {
@@ -382,6 +437,19 @@ impl ShellView {
                     },
                     |index| view.selection.contains(index),
                     view.cursor,
+                    // 网格的一行里有多个单元格，因此这里交出「下标 + 输入框」，
+                    // 由视图自己判断哪一个格子要换成输入框。
+                    //
+                    // 与详情视图同理，下标之外再核一次路径：在途扫描落地后
+                    // 下标可能指向别的条目，那时输入框会跑到错误的格子上。
+                    view.renaming
+                        .as_ref()
+                        .filter(|renaming| {
+                            view.visible()
+                                .get(renaming.index)
+                                .is_some_and(|entry| entry.path.as_ref() == &renaming.path)
+                        })
+                        .map(|renaming| (renaming.index, &renaming.input)),
                     &view.tokens,
                     &open,
                     &select,

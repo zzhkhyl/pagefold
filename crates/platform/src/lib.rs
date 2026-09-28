@@ -10,7 +10,7 @@ pub mod mock;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-pub use fs::{Drive, DriveKind, FileSystem};
+pub use fs::{Drive, DriveKind, FileSystem, OpReport};
 
 /// 返回当前平台的 [`FileSystem`] 实现。
 ///
@@ -38,6 +38,26 @@ pub fn format_time_local(time: std::time::SystemTime) -> Option<String> {
 #[cfg(not(target_os = "windows"))]
 pub fn format_time_local(_time: std::time::SystemTime) -> Option<String> {
     None
+}
+
+/// 把底层错误压成**一句面向用户的话**。
+///
+/// 写操作失败的原因要直接进 toast，因此不能是
+/// `Os { code: 5, kind: PermissionDenied, message: "拒绝访问。" }`。
+/// 平台实现按错误码给出「没有权限，文件可能被占用或受保护」这类句子；
+/// 认不出的错误码则保留原始文本（那句话至少是可搜索的）。
+///
+/// 放在平台层而不是 UI 层：错误码的含义是平台知识，
+/// 上层不该出现 `if code == 5` 这种判断。
+#[cfg(target_os = "windows")]
+pub fn describe_error(error: &anyhow::Error) -> String {
+    windows::fs_ops::describe(error)
+}
+
+/// 非 Windows 宿主没有 Win32 错误码，直接用错误自身的文本。
+#[cfg(not(target_os = "windows"))]
+pub fn describe_error(error: &anyhow::Error) -> String {
+    error.to_string()
 }
 
 /// 单实例守卫：保证同一登录会话内只有一个进程实例。

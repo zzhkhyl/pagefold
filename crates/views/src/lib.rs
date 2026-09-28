@@ -28,7 +28,8 @@ use std::rc::Rc;
 
 use fm_core::Entry;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, ElementId, Render, Styled as _, Window, px, uniform_list,
+    AnyElement, App, ClickEvent, Context, ElementId, Render, Styled as _, UniformListScrollHandle,
+    Window, px, uniform_list,
 };
 
 /// 单击选中项的三种语义，与资源管理器一致。
@@ -77,8 +78,14 @@ pub type SelectHandler = Rc<dyn Fn(usize, SelectMode, &mut Window, &mut App)>;
 ///
 /// 行高由 `uniform_list` 实测**第一项**得出，因此换密度时只要改行内高度即可，
 /// 不需要额外的「行高参数」——但所有行必须等高，否则滚动定位会漂移。
+///
+/// `scroll` 由调用方持有并传入：只有它知道「该把哪一条滚进视野」（新建条目之后、
+/// 重命名之后）。两种视图**各自持有自己的句柄**——它们的虚拟化单位不同
+/// （详情表一行一个条目，网格一行多个单元格），共用一个句柄会让切换视图时的
+/// 滚动位置互相污染。
 pub fn virtual_rows<T, F>(
     id: impl Into<ElementId>,
+    scroll: &UniformListScrollHandle,
     cx: &Context<T>,
     count: usize,
     row: F,
@@ -100,6 +107,7 @@ where
     // 返回具体类型而不是 `impl IntoElement`：调用方还需要给它加内边距
     // （网格视图的 12px 外衬），不透明返回类型会让这些样式方法无法访问。
     uniform_list(id, count, render)
+        .track_scroll(scroll)
         .flex_grow(1.0)
         .min_h(px(0.0))
         .w_full()

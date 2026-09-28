@@ -83,11 +83,88 @@ pub trait FileSystem: Send + Sync + 'static {
 
     /// 枚举回收站条目（**只读**）。
     ///
-    /// 只列不改：还原与清空都是写操作，属后续阶段。
     /// 条目里的 `modified` 是**删除时间**（原修改时间没有存在 `$I` 里），
     /// `path` 指向回收站内的实际存放位置（`$R` 项）。
+    /// 还原与清空仍未实现——它们需要另一套接口。
     ///
     /// 单个卷读不到、单个条目损坏都只跳过，不返回错误：
     /// 回收站里混着损坏项是常态，不该让整个视图报错。
     fn recycle_bin(&self) -> anyhow::Result<Vec<Entry>>;
+
+    // ── 以下为写操作 ────────────────────────────────────────────────
+    //
+    // 与上面读操作的两点约定差异：
+    //
+    // 1. 写操作**会**修改磁盘，因此错误必须逐条如实回传（见 [`OpReport`]），
+    //    而不是「一失败就整体放弃」：批量里一个文件被占用，
+    //    不该让另外九个白做。
+    // 2. 名称合法性由 `fm_core::naming` 判定，本层**不重复校验**——
+    //    只负责「重名怎么办」这一件需要看文件系统才能决定的事。
+
+    /// 在 `parent` 下建一个目录，返回它**实际落在**的路径。
+    ///
+    /// 重名时**自动改名**（`新建文件夹 (2)`）而不是报错，与资源管理器一致：
+    /// 「新建文件夹」是一个人一天会按十次的动作，让它因重名失败毫无道理。
+    /// 传入的名称必须是 [`fm_core::naming::validate`] 通过的名称。
+    fn create_dir(&self, parent: &Path, name: &str) -> anyhow::Result<PathBuf>;
+
+    /// 在 `parent` 下建一个空文件，返回它**实际落在**的路径。重名规则同 [`FileSystem::create_dir`]。
+    fn create_file(&self, parent: &Path, name: &str) -> anyhow::Result<PathBuf>;
+
+    /// 改名（所在目录不变），返回新路径。
+    ///
+    /// 与「新建」相反，这里的名称是用户**明确给定**的，因此重名**报错**而不是
+    /// 悄悄加序号——用户输入 `报告.docx` 却得到 `报告 (2).docx` 是更坏的结果。
+    ///
+    /// 例外：仅大小写不同的改名（`报告.docx` → `报告.DOCX`）必须放行，
+    /// 那是修正命名而不是制造冲突（同目录下 Windows 本身也不区分大小写）。
+    fn rename(&self, path: &Path, new_name: &str) -> anyhow::Result<PathBuf>;
+
+    /// 把若干条目复制进 `dest_dir`，逐条回传结果。重名时自动改名。
+    ///
+    /// 目录按递归复制；符号链接与目录联接**跳过并记为失败**，
+    /// 因为跟随它们可能把整棵树复抄一遍甚至无限递归（见平台实现的说明）。
+    fn copy_into(&self, sources: &[PathBuf], dest_dir: &Path) -> anyhow::Result<OpReport>;
+
+    /// 把若干条目移动进 `dest_dir`，逐条回传结果。重名时自动改名。
+    ///
+    /// 跨卷移动会自动退化为「复制 + 删源」——`rename` 无法跨卷，
+    /// 而用户不该关心两个盘是不是同一个卷。
+    fn move_into(&self, sources: &[PathBuf], dest_dir: &Path) -> anyhow::Result<OpReport>;
+
+    /// 把若干条目移入回收站，返回实际移入的数量。
+    ///
+    /// **失败即报错**（不像复制那样逐条吞掉）：回收站是「我以为删掉了」的最后一道
+    /// 心理防线，部分失败必须让用户看见，而不是弹一句「已删除 3 项」了事。
+    fn move_to_recycle_bin(&self, paths: &[PathBuf]) -> anyhow::Result<usize>;
+}
+
+/// 一次写操作的回执。
+///
+/// 刻意不是 `Result<()>`：批量操作里「部分成功」是常态，而 UI 需要能说出
+/// 「已复制 3 项，2 项因重名改名，1 项失败（文件被占用）」这种话。
+/// 把失败压成一个 `Err` 会让另外九条成功的结果无处安放。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OpReport {
+    /// 成功处理的条目数。
+    pub done: usize,
+    /// 因重名而被改名的条目：`(原目标路径, 实际路径)`。
+    ///
+    /// 保留下来是因为 UI 要能指出「它现在叫什么」——用户看到的列表里
+    /// 会多出一个 `报告 (2).docx`，不说清楚会被当成操作出错。
+    pub renamed: Vec<(PathBuf, PathBuf)>,
+    /// 失败的条目及原因（面向用户的短句，不是 `Os { code: .. }`）。
+    pub failed: Vec<(PathBuf, String)>,
+}
+
+impl OpReport {
+    /// 是否有条目失败。
+    pub fn has_failures(&self) -> bool {
+        !self.failed.is_empty()
+    }
+
+    /// 是否一个条目都没动（用户点了粘贴但源全都不在之类）。
+    pub fn is_empty(&self) -> bool {
+        self.done == 0 && self.failed.is_empty()
+    }
 }

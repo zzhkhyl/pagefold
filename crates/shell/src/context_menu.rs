@@ -24,13 +24,17 @@
 //!   待键位接入后，把 hint 加回 [`MenuItemSpec`] 即可。
 //! - **危险项配色**（`.is-danger` 的红色）。组件库的菜单项渲染没有危险态变体，
 //!   而为了这一项改成自绘会连带丢掉「图标列对齐、勾选态、禁用态」等现成能力，
-//!   不划算。「移到回收站」因此在菜单里与普通项同色，但它**默认禁用**，
-//!   不会产生「点了就会删」的误导。
+//!   不划算。风险的提示改由**确认对话框**承担：点「移到回收站」不会立刻删，
+//!   而是先弹一个把确定按钮染成危险色的对话框（见 `ShellView::delete_selection`）。
+//!   这比只把菜单项染红更有效——染红只说了「有点危险」，
+//!   而对话框会说清「要把哪一项移入回收站」。
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use fm_core::{Entry, EntryKind, SortKey, ViewMode};
+use fm_services::clipboard::ClipboardMode;
+use fm_services::ops::NewItem;
 use gpui::{App, ClickEvent, Context, WeakEntity, Window};
 use gpui_component::Icon;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
@@ -56,7 +60,21 @@ pub(crate) enum MenuAction {
     SetViewMode(ViewMode),
     /// 按指定键排序。再次点同一键会翻转方向，由 `TabState::toggle_sort` 负责。
     SetSort(SortKey),
-    /// 文件写操作的占位：菜单里保留位置，但**禁用**。
+    /// 在当前位置新建一个项目。
+    Create(NewItem),
+    /// 把选中项放进剪贴板（复制或剪切）。
+    Clip(ClipboardMode),
+    /// 把剪贴板里的内容粘贴到当前位置。
+    Paste,
+    /// 开始内联重命名。目标由 `dispatch` 从被点的条目上取，不放在这里——
+    /// 路径在菜单打开期间可能失效，届时按下标或路径重查一次更可靠。
+    Rename,
+    /// 移到回收站（先弹确认框）。
+    DeleteToRecycleBin,
+    /// 占位：菜单里保留位置但禁用，因此永远不会被派发。
+    ///
+    /// 留一个显式的「没有动作」变体，而不是借一个真实动作当占位：
+    /// 借来的动作会在单测与将来的重构里被当成真的，那是最难查的一类错。
     NotImplemented,
 }
 
@@ -97,11 +115,11 @@ impl MenuItemSpec {
         }
     }
 
-    /// 尚未接入的文件写操作。
+    /// 尚未接入的动作。
     ///
-    /// 与命令条的「新建」按钮、选中条的动作组用同一套约定：**保留设计稿里的位置**
-    /// 但置为禁用。直接删掉这一项会让菜单看起来「本来就没有这个功能」，
-    /// 而写操作是文件管理器的核心动作，用户需要知道它即将到来。
+    /// 与命令条、选中条用同一套约定：**保留设计稿里的位置**但置为禁用。
+    /// 直接删掉这一项会让菜单看起来「本来就没有这个功能」，
+    /// 而用户需要知道它即将到来。
     fn not_implemented(label: impl Into<String>, icon: IconName) -> Self {
         Self {
             label: label.into(),
@@ -116,14 +134,21 @@ impl MenuItemSpec {
         self.checked = checked;
         self
     }
+
+    /// 置为禁用（用于「功能有，但此刻不适用」）。
+    ///
+    /// 与 [`MenuItemSpec::not_implemented`] 的区别只在语义：那个是「还没做」，
+    /// 这个是「做得了，但现在不行」（剪贴板为空时不能粘贴）。
+    fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
 }
 
 /// 条目右键菜单的节点清单。
 ///
 /// 逐项对齐 `design/file-manager.html` 里 `#files` 的 `oncontextmenu`：
 /// 打开 / 在新标签页中打开 /（分隔）/ 复制 / 剪切 / 重命名 /（分隔）/ 属性 / 移到回收站。
-/// 其中复制、剪切、重命名、移到回收站属于**文件写操作**，README「已知缺口」记载
-/// 尚未接入，因此保留位置但置为禁用。
 ///
 /// `selected` 是当前选中项数量，用于多选文案（设计稿的「复制 3 项」）。
 /// `current_dir` 是当前所在目录，供「在新标签页中打开」决定落点：
@@ -133,8 +158,9 @@ pub(crate) fn entry_menu_spec(
     selected: usize,
     current_dir: Option<&Path>,
 ) -> Vec<MenuNode> {
-    // 驱动器是卷而不是普通条目：改名、进回收站、以及「在它的子目录开新标签」
-    // 这几件事在语义上都不成立，见下面的逐项说明。
+    // 驱动器是卷而不是普通条目：改名、进回收站、复制整个磁盘、以及
+    // 「在它的子目录开新标签」这几件事在语义上都不成立，因此**整组隐藏**
+    // 而不是显示成禁用：禁用意味着「以后会有」，而这四件事永远不会被实现。
     let is_drive = matches!(entry.kind, EntryKind::Drive);
     let multi = selected > 1;
     // 设计稿的写法是 `复制${n>1?' '+n+' 项':''}`：只有多选时才带数量与「项」。
@@ -165,25 +191,29 @@ pub(crate) fn entry_menu_spec(
 
     nodes.push(MenuNode::Separator);
 
-    nodes.push(MenuNode::Item(MenuItemSpec::not_implemented(
-        format!("复制{count}"),
-        IconName::Copy,
-    )));
-    nodes.push(MenuNode::Item(MenuItemSpec::not_implemented(
-        format!("剪切{count}"),
-        IconName::Scissors,
-    )));
-
-    // 驱动器**不显示**改名与删除，而不是显示成禁用：禁用意味着「以后会有」，
-    // 而「给整个磁盘改名」「把磁盘删进回收站」这两件事永远不会被实现。
     if !is_drive {
-        nodes.push(MenuNode::Item(MenuItemSpec::not_implemented(
-            if multi { "批量重命名" } else { "重命名" },
-            IconName::Pencil,
+        nodes.push(MenuNode::Item(MenuItemSpec::new(
+            format!("复制{count}"),
+            IconName::Copy,
+            MenuAction::Clip(ClipboardMode::Copy),
         )));
-    }
+        nodes.push(MenuNode::Item(MenuItemSpec::new(
+            format!("剪切{count}"),
+            IconName::Scissors,
+            MenuAction::Clip(ClipboardMode::Cut),
+        )));
+        nodes.push(MenuNode::Item(if multi {
+            // 批量重命名需要一个「前缀 + 起始序号 + 实时预览」的对话框
+            // （设计稿的 `#dlgRename`），属后续增量：位置保留，禁用。
+            MenuItemSpec::not_implemented("批量重命名", IconName::Pencil)
+        } else {
+            MenuItemSpec::new("重命名", IconName::Pencil, MenuAction::Rename)
+        }));
 
-    nodes.push(MenuNode::Separator);
+        // 第二条分隔线只在这组写操作存在时才加，否则驱动器菜单上会出现
+        // 两条相邻的分隔线（一条悬空的横线）。
+        nodes.push(MenuNode::Separator);
+    }
 
     // 设计稿的「属性」不是独立的属性对话框，而是把右侧预览面板打开。
     nodes.push(MenuNode::Item(MenuItemSpec::new(
@@ -193,9 +223,10 @@ pub(crate) fn entry_menu_spec(
     )));
 
     if !is_drive {
-        nodes.push(MenuNode::Item(MenuItemSpec::not_implemented(
+        nodes.push(MenuNode::Item(MenuItemSpec::new(
             "移到回收站",
             IconName::Trash,
+            MenuAction::DeleteToRecycleBin,
         )));
     }
 
@@ -222,12 +253,26 @@ pub(crate) fn recycle_bin_menu_spec() -> Vec<MenuNode> {
 ///
 /// 对齐设计稿 `#files` 右键处理里「没有命中行」的那条分支。
 ///
+/// `writable` 表示**当前位置能不能落笔**：「此电脑」与回收站都不是真实目录，
+/// 那里既不显示「新建」也不显示「粘贴」——与资源管理器一致。
+/// 把它们渲染成一排禁用项只会让人去猜为什么点不动。
+///
+/// `can_paste` 是剪贴板里有没有内容。这一项**保留并禁用**（而不是隐藏）：
+/// 用户刚复制过、切了个目录想来粘贴，此时菜单里能看到「粘贴」，
+/// 而不是怀疑自己刚才那下复制没生效。
+///
 /// 设计稿末尾那段「回收站 / 清空回收站」仍没有对应实现：回收站这个虚拟位置
-/// 现在已经有了（侧边栏可进入、只读浏览），但**清空回收站是写操作**，不在本次范围。
+/// 现在已经有了（侧边栏可进入、只读浏览），但**清空回收站是写操作**，
+/// 不在本次范围。
 ///
 /// 视图模式两项的措辞取自命令条的 tooltip（「详细信息视图」/「图标视图」），
 /// 而不是设计稿空白菜单里的「列表视图 / 网格视图」：同一个动作在应用内应该只有一个名字。
-pub(crate) fn area_menu_spec(view_mode: ViewMode, sort_key: SortKey) -> Vec<MenuNode> {
+pub(crate) fn area_menu_spec(
+    view_mode: ViewMode,
+    sort_key: SortKey,
+    writable: bool,
+    can_paste: bool,
+) -> Vec<MenuNode> {
     let view_node = |label: &str, icon: IconName, mode: ViewMode| {
         MenuNode::Item(
             MenuItemSpec::new(label, icon, MenuAction::SetViewMode(mode)).checked(view_mode == mode),
@@ -237,42 +282,51 @@ pub(crate) fn area_menu_spec(view_mode: ViewMode, sort_key: SortKey) -> Vec<Menu
         MenuNode::Item(MenuItemSpec::new(label, icon, MenuAction::SetSort(key)).checked(sort_key == key))
     };
 
-    vec![
-        MenuNode::Item(MenuItemSpec::not_implemented(
+    let mut nodes = Vec::new();
+
+    if writable {
+        nodes.push(MenuNode::Item(MenuItemSpec::new(
             "新建文件夹",
             IconName::Folder,
-        )),
-        MenuNode::Item(MenuItemSpec::not_implemented(
+            MenuAction::Create(NewItem::Folder),
+        )));
+        // 设计稿的空白处菜单只有这两项（`新建 Markdown 文档` 只出现在命令条的
+        // 「新建」下拉里），这里跟随设计稿。
+        nodes.push(MenuNode::Item(MenuItemSpec::new(
             "新建文本文档",
             IconName::FileText,
-        )),
-        MenuNode::Separator,
-        MenuNode::Item(MenuItemSpec::not_implemented(
-            "粘贴",
-            IconName::ClipboardPaste,
-        )),
-        MenuNode::Item(MenuItemSpec::new(
-            "刷新",
-            IconName::RefreshCw,
-            MenuAction::Refresh,
-        )),
-        MenuNode::Separator,
-        // 排序收进子菜单：设计稿把它放在命令条的按钮上，这里用子菜单承载同一组动作，
-        // 好处是主菜单不必变长，且当前排序键能用勾选态直接标出来。
-        MenuNode::Submenu {
-            label: String::from("排序方式"),
-            icon: IconName::SortAscending,
-            items: vec![
-                sort_node("按名称", IconName::FileText, SortKey::Name),
-                sort_node("按修改日期", IconName::Clock, SortKey::Modified),
-                sort_node("按类型", IconName::Folder, SortKey::Kind),
-                sort_node("按大小", IconName::List, SortKey::Size),
-            ],
-        },
-        MenuNode::Separator,
-        view_node("详细信息视图", IconName::List, ViewMode::Details),
-        view_node("图标视图", IconName::LayoutGrid, ViewMode::Icons),
-    ]
+            MenuAction::Create(NewItem::TextFile),
+        )));
+        nodes.push(MenuNode::Separator);
+        nodes.push(MenuNode::Item(
+            MenuItemSpec::new("粘贴", IconName::ClipboardPaste, MenuAction::Paste)
+                .disabled(!can_paste),
+        ));
+    }
+
+    nodes.push(MenuNode::Item(MenuItemSpec::new(
+        "刷新",
+        IconName::RefreshCw,
+        MenuAction::Refresh,
+    )));
+    nodes.push(MenuNode::Separator);
+    // 排序收进子菜单：设计稿把它放在命令条的按钮上，这里用子菜单承载同一组动作，
+    // 好处是主菜单不必变长，且当前排序键能用勾选态直接标出来。
+    nodes.push(MenuNode::Submenu {
+        label: String::from("排序方式"),
+        icon: IconName::SortAscending,
+        items: vec![
+            sort_node("按名称", IconName::FileText, SortKey::Name),
+            sort_node("按修改日期", IconName::Clock, SortKey::Modified),
+            sort_node("按类型", IconName::Folder, SortKey::Kind),
+            sort_node("按大小", IconName::List, SortKey::Size),
+        ],
+    });
+    nodes.push(MenuNode::Separator);
+    nodes.push(view_node("详细信息视图", IconName::List, ViewMode::Details));
+    nodes.push(view_node("图标视图", IconName::LayoutGrid, ViewMode::Icons));
+
+    nodes
 }
 
 /// 把节点清单翻译成可弹出的菜单。
@@ -339,8 +393,8 @@ fn click_handler(
     entry: Option<Entry>,
 ) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
     let shell = shell.clone();
-    move |_event: &ClickEvent, _window: &mut Window, cx: &mut App| {
-        dispatch(&shell, &action, entry.as_ref(), cx);
+    move |_event: &ClickEvent, window: &mut Window, cx: &mut App| {
+        dispatch(&shell, &action, entry.as_ref(), window, cx);
     }
 }
 
@@ -348,10 +402,14 @@ fn click_handler(
 ///
 /// 一律经 `WeakEntity::update` 回到 `ShellView`，与 `open_handler` / `select_handler` 一致：
 /// 菜单的生命周期可能比视图长（视图被销毁时菜单仍可能显示在屏幕上），不能持强引用。
+///
+/// 写操作需要 `&mut Window`：它们都要弹提示（`push_notification` 挂在窗口上），
+/// 而确认对话框与内联输入框更是必须拿到窗口句柄。
 fn dispatch(
     shell: &WeakEntity<ShellView>,
     action: &MenuAction,
     entry: Option<&Entry>,
+    window: &mut Window,
     cx: &mut App,
 ) {
     let applied = shell.update(cx, |view, cx| match action {
@@ -370,6 +428,20 @@ fn dispatch(
         MenuAction::ShowPreview => view.show_preview(cx),
         MenuAction::SetViewMode(mode) => view.set_view_mode(*mode, cx),
         MenuAction::SetSort(key) => view.set_sort(*key, cx),
+        // 写操作的目标一律取自**当前选中集**，而不是菜单构造时捕获的那一项：
+        // 菜单打开期间用户可能改了选中（比如正好点了别处），
+        // 而「复制/剪切/删除」的语义本来就是「对选中项」，不是「对右键点中的那一项」。
+        //
+        // 唯一例外是重命名：它作用于右键点中的那一个条目，因此这里单独取 `entry`。
+        MenuAction::Create(item) => view.create(*item, window, cx),
+        MenuAction::Clip(mode) => view.clip_selection(*mode, window, cx),
+        MenuAction::Paste => view.paste(window, cx),
+        MenuAction::Rename => {
+            if let Some(entry) = entry {
+                view.begin_rename(entry.path.as_ref().clone(), window, cx);
+            }
+        }
+        MenuAction::DeleteToRecycleBin => view.delete_selection(window, cx),
         MenuAction::NotImplemented => {}
     });
 
@@ -415,16 +487,87 @@ pub(crate) fn entry_menu_builder(cx: &Context<ShellView>) -> fm_views::EntryMenu
 pub(crate) fn area_menu_builder(cx: &Context<ShellView>) -> fm_views::AreaMenuBuilder {
     let shell = cx.entity().downgrade();
     Rc::new(move |menu, window, cx| {
-        let Ok((view_mode, sort_key)) = shell.read_with(&**cx, |view: &ShellView, _| {
-            let tab = view.tabs.active_state();
-            (tab.view_mode(), tab.sort_key())
-        }) else {
+        // 这次右键落在条目上吗？是的话条目自己的菜单负责，这里必须交出一个
+        // **空菜单**：组件库看到空菜单就不渲染浮层（`ContextMenu::request_layout`
+        // 里的 `is_empty()` 分支）。这是唯一可靠的截断点——在行的处理器里调
+        // `stop_propagation` 拦不住祖先，原因见 `right_press_handler`。
+        //
+        // 标记「消费即清」：否则上一次在条目上的右键会连下一次在空白处的右键一起吞掉。
+        let suppressed = shell
+            .update(cx, |view, _| std::mem::take(&mut view.area_menu_suppressed))
+            .unwrap_or(false);
+        if suppressed {
+            return menu;
+        }
+
+        let Ok((view_mode, sort_key, writable, can_paste)) =
+            shell.read_with(&**cx, |view: &ShellView, _| {
+                let tab = view.tabs.active_state();
+                (
+                    tab.view_mode(),
+                    tab.sort_key(),
+                    // 「此电脑」与回收站都不是真实目录，那里无处落笔。
+                    view.current_dir().is_some(),
+                    !view.clipboard.is_empty(),
+                )
+            })
+        else {
             return menu;
         };
 
-        let nodes = area_menu_spec(view_mode, sort_key);
+        let nodes = area_menu_spec(view_mode, sort_key, writable, can_paste);
         build_menu(menu, &nodes, None, &shell, window, cx)
     })
+}
+
+/// 命令条「新建」下拉的节点清单。
+///
+/// 与空白处菜单**刻意不同**：这里多一项「新建 Markdown 文档」，且没有
+/// 刷新 / 排序 / 视图模式——那三样在命令条上已经各有自己的按钮，重复一遍
+/// 只会让同一个动作出现两个入口。
+///
+/// 逐项对齐设计稿 `$('#btnNew').onclick` 里那次 `openCtx(...)` 调用的清单。
+pub(crate) fn new_menu_spec(can_paste: bool) -> Vec<MenuNode> {
+    vec![
+        MenuNode::Item(MenuItemSpec::new(
+            "新建文件夹",
+            IconName::Folder,
+            MenuAction::Create(NewItem::Folder),
+        )),
+        MenuNode::Item(MenuItemSpec::new(
+            "新建文本文档",
+            IconName::FileText,
+            MenuAction::Create(NewItem::TextFile),
+        )),
+        MenuNode::Item(MenuItemSpec::new(
+            "新建 Markdown 文档",
+            IconName::FileText,
+            MenuAction::Create(NewItem::MarkdownFile),
+        )),
+        MenuNode::Separator,
+        MenuNode::Item(
+            MenuItemSpec::new("粘贴", IconName::ClipboardPaste, MenuAction::Paste)
+                .disabled(!can_paste),
+        ),
+    ]
+}
+
+/// 构造命令条「新建」下拉的菜单构造器。
+///
+/// 与右键菜单共用 [`build_menu`]：同一套节点、同一套回调，
+/// 因此措辞与禁用逻辑不会在两个入口之间分叉。
+pub(crate) fn new_menu_builder(
+    cx: &Context<ShellView>,
+) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+    let shell = cx.entity().downgrade();
+    move |menu, window, cx| {
+        // 与空白处菜单同源：剪贴板空不空决定「粘贴」是否禁用。
+        let can_paste = shell
+            .read_with(&**cx, |view: &ShellView, _| !view.clipboard.is_empty())
+            .unwrap_or(false);
+        let nodes = new_menu_spec(can_paste);
+        build_menu(menu, &nodes, None, &shell, window, cx)
+    }
 }
 
 /// 右键按下时的处理器。
@@ -436,6 +579,16 @@ pub(crate) fn right_press_handler(cx: &Context<ShellView>) -> fm_views::RightPre
     let view = cx.entity().downgrade();
     Rc::new(move |index: usize, _window: &mut Window, cx: &mut App| {
         let applied = view.update(cx, |view, cx| {
+            // 先记下「这次右键落在条目上」，让空白处菜单把自己收起来（见
+            // `area_menu_builder`）。必须放在分支**之前**：无论这一项此前是否已选中，
+            // 祖先的那次浮层都已经被同一个事件安排上了。
+            //
+            // 顺带说明为什么不能靠 `cx.stop_propagation()`：所有鼠标监听都注册在
+            // `window.on_mouse_event` 上，冒泡阶段**逆序**执行，而内容区容器的监听
+            // 因为「先画子元素、后注册自己」排在最前——等这里被调用时，祖先的浮层
+            // 早就弹出来了，此时截断已经晚了。
+            view.area_menu_suppressed = true;
+
             if view.selection.contains(index) {
                 if view.cursor != Some(index) {
                     view.cursor = Some(index);
@@ -481,17 +634,6 @@ mod tests {
         entry(name, EntryKind::Drive)
     }
 
-    /// 收集清单里所有菜单项的标签与禁用态，便于按名字断言。
-    fn labels(nodes: &[MenuNode]) -> Vec<(String, bool)> {
-        nodes
-            .iter()
-            .filter_map(|node| match node {
-                MenuNode::Item(spec) => Some((spec.label.clone(), spec.disabled)),
-                _ => None,
-            })
-            .collect()
-    }
-
     fn find<'a>(nodes: &'a [MenuNode], label: &str) -> Option<&'a MenuItemSpec> {
         nodes.iter().find_map(|node| match node {
             MenuNode::Item(spec) if spec.label == label => Some(spec),
@@ -499,13 +641,21 @@ mod tests {
         })
     }
 
-    /// 所有写操作都必须禁用——它们是 README 记载「尚未接入」的那批动作。
-    fn assert_write_ops_disabled(nodes: &[MenuNode]) {
-        for label in ["复制", "剪切", "重命名", "移到回收站"] {
-            if let Some(spec) = find(nodes, label) {
-                assert!(spec.disabled, "{label} 属于文件写操作，必须是禁用态");
-                assert_eq!(spec.action, MenuAction::NotImplemented);
-            }
+    /// 四项写操作必须**可用**，且各自指向正确的动作。
+    ///
+    /// 这组断言是「写操作接入」这件事的防回归点：它们曾经全是禁用态，
+    /// 若哪天因为重构又被置回禁用，这里会立刻红。
+    fn assert_write_ops_enabled(nodes: &[MenuNode]) {
+        let expected = [
+            ("复制", MenuAction::Clip(ClipboardMode::Copy)),
+            ("剪切", MenuAction::Clip(ClipboardMode::Cut)),
+            ("重命名", MenuAction::Rename),
+            ("移到回收站", MenuAction::DeleteToRecycleBin),
+        ];
+        for (label, action) in expected {
+            let spec = find(nodes, label).unwrap_or_else(|| panic!("{label} 不该被删掉"));
+            assert!(!spec.disabled, "{label} 已实现，不能再是禁用态");
+            assert_eq!(spec.action, action, "{label} 指向了错误的动作");
         }
     }
 
@@ -520,7 +670,7 @@ mod tests {
             MenuAction::OpenInNewTab(PathBuf::from("C:\\dir\\子目录")),
             "目录的新标签应落在它自己身上，而不是当前目录"
         );
-        assert_write_ops_disabled(&nodes);
+        assert_write_ops_enabled(&nodes);
     }
 
     #[test]
@@ -534,6 +684,8 @@ mod tests {
             MenuAction::OpenInNewTab(PathBuf::from("C:\\dir")),
             "文件没有自己的「目录」，新标签应落在当前目录"
         );
+        // 文件与目录在这一组上完全一致：都是「复制/剪切/重命名/移到回收站」。
+        assert_write_ops_enabled(&nodes);
     }
 
     #[test]
@@ -549,14 +701,24 @@ mod tests {
     fn drive_menu_hides_operations_that_make_no_sense_for_a_volume() {
         let nodes = entry_menu_spec(&drive("D:"), 1, None);
 
-        // 隐藏（而不是禁用）：这三件事对「卷」永远不会有实现。
+        // 隐藏（而不是禁用）：这几件事对「卷」永远不会有实现。
         assert!(find(&nodes, "重命名").is_none(), "驱动器不该出现改名");
         assert!(find(&nodes, "移到回收站").is_none(), "驱动器不该进回收站");
         assert!(find(&nodes, "在新标签页中打开").is_none());
+        assert!(find(&nodes, "复制").is_none(), "复制整个磁盘没有意义");
+        assert!(find(&nodes, "剪切").is_none());
 
         // 仍然保留了「打开」与「属性」。
         assert!(find(&nodes, "打开").is_some());
         assert!(find(&nodes, "属性").is_some());
+
+        // 写操作整组被去掉之后，第二条分隔线也必须一起去掉，
+        // 否则驱动器菜单上会出现两条相邻的横线（视觉上是多余的）。
+        let separators = nodes
+            .iter()
+            .filter(|node| matches!(node, MenuNode::Separator))
+            .count();
+        assert_eq!(separators, 1);
     }
 
     #[test]
@@ -567,9 +729,17 @@ mod tests {
         assert!(find(&single, "重命名").is_some());
 
         let many = entry_menu_spec(&dir, 3, None);
-        assert!(find(&many, "复制 3 项").is_some(), "多选时文案要带上数量");
-        assert!(find(&many, "剪切 3 项").is_some());
-        assert!(find(&many, "批量重命名").is_some());
+        let copy = find(&many, "复制 3 项").expect("多选时文案要带上数量");
+        let cut = find(&many, "剪切 3 项").expect("剪切同理");
+        assert!(!copy.disabled && !cut.disabled, "多选不影响复制/剪切的可用性");
+        assert_eq!(copy.action, MenuAction::Clip(ClipboardMode::Copy));
+        assert_eq!(cut.action, MenuAction::Clip(ClipboardMode::Cut));
+
+        // 批量重命名需要一个「前缀 + 起始序号 + 预览」的对话框，属后续增量，
+        // 因此多选时它是**禁用**的，而且指向占位动作而不是单项重命名。
+        let batch = find(&many, "批量重命名").expect("多选时应保留批量重命名的位置");
+        assert!(batch.disabled, "批量重命名尚未接入，必须是禁用态");
+        assert_eq!(batch.action, MenuAction::NotImplemented);
         assert!(find(&many, "重命名").is_none(), "多选不该再显示单项重命名");
     }
 
@@ -591,7 +761,7 @@ mod tests {
 
     #[test]
     fn area_menu_marks_the_current_view_mode_and_sort_key() {
-        let nodes = area_menu_spec(ViewMode::Icons, SortKey::Size);
+        let nodes = area_menu_spec(ViewMode::Icons, SortKey::Size, true, true);
 
         let icons = find(&nodes, "图标视图").expect("应当有图标视图");
         let details = find(&nodes, "详细信息视图").expect("应当有详细信息视图");
@@ -619,17 +789,108 @@ mod tests {
     }
 
     #[test]
-    fn area_menu_keeps_refresh_and_hides_nothing_that_works() {
-        let nodes = area_menu_spec(ViewMode::Details, SortKey::Name);
+    fn area_menu_offers_the_create_actions_in_a_writable_directory() {
+        let nodes = area_menu_spec(ViewMode::Details, SortKey::Name, true, false);
+
         let refresh = find(&nodes, "刷新").expect("刷新应当存在");
         assert!(!refresh.disabled, "刷新是已实现能力，不能禁用");
         assert_eq!(refresh.action, MenuAction::Refresh);
 
-        // 新建与粘贴是写操作，位置保留但禁用。
+        let folder = find(&nodes, "新建文件夹").expect("真实目录里应当能新建");
+        assert!(!folder.disabled);
+        assert_eq!(folder.action, MenuAction::Create(NewItem::Folder));
+
+        let text = find(&nodes, "新建文本文档").expect("同上");
+        assert!(!text.disabled);
+        assert_eq!(text.action, MenuAction::Create(NewItem::TextFile));
+
+        // 剪贴板为空时粘贴**保留但禁用**——用户刚复制过、切了目录想来粘贴，
+        // 看到这一项在（只是灰着）比整项消失更好理解。
+        let paste = find(&nodes, "粘贴").expect("粘贴不该被删掉");
+        assert!(paste.disabled, "can_paste = false 时必须禁用");
+        assert_eq!(paste.action, MenuAction::Paste);
+    }
+
+    #[test]
+    fn area_menu_enables_paste_once_the_clipboard_has_content() {
+        let nodes = area_menu_spec(ViewMode::Details, SortKey::Name, true, true);
+        let paste = find(&nodes, "粘贴").expect("粘贴应当存在");
+        assert!(!paste.disabled);
+        assert_eq!(paste.action, MenuAction::Paste);
+    }
+
+    #[test]
+    fn area_menu_drops_the_write_group_outside_a_real_directory() {
+        // 「此电脑」与回收站都不是真实目录：那里无处落笔，
+        // 与其摆一排禁用项让人猜，不如整组不出现（资源管理器也是这样）。
+        let nodes = area_menu_spec(ViewMode::Details, SortKey::Name, false, true);
+
         for label in ["新建文件夹", "新建文本文档", "粘贴"] {
-            let spec = find(&nodes, label).unwrap_or_else(|| panic!("{label} 不该被删掉"));
-            assert!(spec.disabled, "{label} 尚未接入，必须是禁用态");
+            assert!(find(&nodes, label).is_none(), "{label} 不该出现在虚拟位置");
         }
+
+        // 读操作与视图操作必须全部保留。
+        assert!(find(&nodes, "刷新").is_some());
+        assert!(find(&nodes, "详细信息视图").is_some());
+        assert!(find(&nodes, "图标视图").is_some());
+        assert!(
+            nodes
+                .iter()
+                .any(|node| matches!(node, MenuNode::Submenu { label, .. } if label == "排序方式")),
+            "排序子菜单与写操作无关，必须保留"
+        );
+
+        // 首项不能是分隔线：整组被去掉后如果不补，菜单会以一条横线开头。
+        assert!(!matches!(nodes.first(), Some(MenuNode::Separator)));
+    }
+
+    #[test]
+    fn new_menu_offers_three_create_kinds_in_the_design_order() {
+        let nodes = new_menu_spec(false);
+
+        let labels: Vec<String> = nodes
+            .iter()
+            .filter_map(|node| match node {
+                MenuNode::Item(spec) => Some(spec.label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "新建文件夹",
+                "新建文本文档",
+                "新建 Markdown 文档",
+                "粘贴"
+            ],
+            "顺序与设计稿 `$('#btnNew').onclick` 的清单一致"
+        );
+
+        assert_eq!(
+            find(&nodes, "新建 Markdown 文档").map(|spec| spec.action.clone()),
+            Some(MenuAction::Create(NewItem::MarkdownFile)),
+            "「新建 Markdown 文档」只出现在命令条的下拉里"
+        );
+
+        // 下拉里不该出现刷新 / 排序 / 视图模式：命令条上它们各有自己的按钮。
+        for label in ["刷新", "详细信息视图", "图标视图", "排序方式"] {
+            assert!(
+                find(&nodes, label).is_none(),
+                "{label} 不该出现在「新建」下拉里"
+            );
+        }
+    }
+
+    #[test]
+    fn new_menu_disables_paste_until_the_clipboard_has_content() {
+        let empty = new_menu_spec(false);
+        let paste = find(&empty, "粘贴").expect("粘贴应当存在");
+        assert!(paste.disabled, "剪贴板为空时必须禁用");
+        assert_eq!(paste.action, MenuAction::Paste);
+
+        let filled = new_menu_spec(true);
+        let paste = find(&filled, "粘贴").expect("粘贴应当存在");
+        assert!(!paste.disabled, "有内容时必须可用");
     }
 
     #[test]

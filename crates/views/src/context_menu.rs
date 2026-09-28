@@ -42,7 +42,7 @@ pub type RightPressHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 /// 给一行 / 一个网格单元挂上右键菜单。
 ///
-/// `wrapper` 的**布局由调用方决定**，本函数只负责两件事：右键截断与菜单挂载。
+/// `wrapper` 的**布局由调用方决定**，本函数只负责两件事：右键回调与菜单挂载。
 /// 之所以不在这里写死尺寸：详情行需要 `w_full()`（占满整行），
 /// 而网格单元格必须由内容撑开——在 `flex_row` 里给单元格写 `w_full()`
 /// 会让每个单元格都占满整行，5 个单元格就是 500% 宽。
@@ -50,13 +50,14 @@ pub type RightPressHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 /// # 为什么外面要多包一层 `div`
 ///
 /// `ContextMenu` 的右键监听挂在 `window.on_mouse_event` 的**冒泡阶段**，
-/// 且它自己不调用 `stop_propagation`（源码里唯一的 `stop_propagation` 是给滚轮用的）。
-/// 而内容区容器上还挂着「空白处菜单」，它是行的祖先——不在这里截断的话，
-/// 在条目上按右键会**同时弹出两个浮层**。
+/// 且它自己不调用 `stop_propagation`（源码里那唯一一处是给滚轮用的）。
+/// 而内容区容器上还挂着「空白处菜单」，它是行的祖先——两者会**同时弹出**。
 ///
-/// 截断点必须落在外层 `div` 上，不能落在行自身上：冒泡顺序是
-/// 「行 → 行自己的 ContextMenu 节点 → 外层 div → 内容区容器」，
-/// 放在外层才能先放行行自己的菜单、再拦住祖先的。
+/// 这里那行 `stop_propagation` 只能截断「行内部」剩余的处理，**拦不住祖先的菜单**：
+/// 窗口级监听在冒泡阶段是**逆序**执行的，而容器的监听因为「先画子元素、后注册自己」
+/// 排在最前——等这个处理器被调用时，祖先的浮层早已被安排上了。真正负责收起
+/// 空白处菜单的是 `ShellView::area_menu_suppressed` 标记（置位于此、消费于
+/// `fm_shell::context_menu::area_menu_builder`，靠「空菜单不渲染」这一出口生效）。
 pub fn entry_menu_row(
     wrapper: Stateful<Div>,
     row: Stateful<Div>,
@@ -72,6 +73,8 @@ pub fn entry_menu_row(
     wrapper
         .on_mouse_down(MouseButton::Right, move |_event, window, cx| {
             (*right_press)(index, window, cx);
+            // 只影响行内部剩余的处理；祖先的菜单由 `area_menu_suppressed` 负责，
+            // 原因见上面的文档注释。
             cx.stop_propagation();
         })
         .child(row.context_menu(move |popup, window, cx| {

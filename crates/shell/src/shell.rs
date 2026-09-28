@@ -5,24 +5,31 @@
 //! 底部状态栏。尺寸与色值不写死在这里，而是通过 [`fm_views::Tokens`] 取得，
 //! 换主题或改密度时只有 `tokens.rs` 需要动。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use fm_core::naming;
 use fm_core::{
     Density, Entry, EntryKind, IconZoom, Location, Selection, SortKey, TabId, TabsState, ViewMode,
 };
-use fm_platform::Drive;
+use fm_platform::{Drive, OpReport};
+use fm_services::clipboard::{Clipboard, ClipboardMode, PastePlan};
 use fm_services::config::Config;
 use fm_services::directory::{DEFAULT_BATCH, DirectoryService, ScanBatch, SortSpec};
+use fm_services::ops::{self, NewItem, OpResult};
 use fm_views::preview_panel::{EntrySummary, PreviewContent};
 use fm_views::{Tokens, widgets};
 use gpui::{
-    App, AppContext as _, ClipboardItem, Context, Entity, Focusable as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div, px,
+    Anchor, App, AppContext as _, ClipboardItem, Context, Entity, Focusable as _, IntoElement,
+    ParentElement as _, Render, ScrollStrategy, SharedString, Styled as _, Subscription, Task,
+    UniformListScrollHandle, Window, div, px,
 };
+use gpui_component::button::ButtonVariant;
+use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, Theme, ThemeMode, WindowExt as _};
+use gpui_component::notification::Notification;
+use gpui_component::{ActiveTheme as _, Edges, Theme, ThemeMode, WindowExt as _};
 
 use crate::layout::Viewport;
 
@@ -66,6 +73,41 @@ pub struct ShellView {
     /// 搜索框是否处于可编辑态。
     pub(crate) search_editing: bool,
     pub(crate) search_input: Option<Entity<InputState>>,
+    /// 应用内剪贴板（复制 / 剪切的暂存区）。
+    ///
+    /// 与 [`ShellView::selection`] 是两件不同的事：选中是「此刻界面上高亮的」，
+    /// 剪贴板是「用户此前按过复制 / 剪切、还没粘贴掉的」。两者会自然分叉——
+    /// 切标签页、刷新目录都会清空选中，但剪贴板必须留着，
+    /// 否则「复制 → 切到另一个目录 → 粘贴」这条最基本的路径就不成立。
+    pub(crate) clipboard: Clipboard,
+    /// 正在内联重命名的条目。
+    pub(crate) renaming: Option<RenameState>,
+    /// 本次右键是否落在某个条目上（由条目上的处理器置位，空白处菜单的构造器消费）。
+    ///
+    /// 存在的理由：内容区容器挂着「空白处菜单」、每一行挂着「条目菜单」，而两者的
+    /// 右键监听都注册在 `window.on_mouse_event` 上、冒泡阶段**逆序**执行——容器的
+    /// 监听因为「先画子元素、后注册自己」排在最前。于是「在条目上按右键」会同时弹出
+    /// 两个浮层，而且在行的处理器里 `stop_propagation` 已经来不及：祖先的浮层早被安排了。
+    ///
+    /// 因此换一个出口：置位这个标记，让空白处菜单的构造器交出一个**空菜单**，
+    /// 组件库看到空菜单就不渲染浮层。见 `crate::context_menu::area_menu_builder`。
+    pub(crate) area_menu_suppressed: bool,
+    /// 写操作的后台任务。持有理由同 [`ShellView::scan_task`]：`Task` 一被丢弃就取消。
+    op_task: Option<Task<()>>,
+    /// 列表是否可能**不完整**（被我们主动取消了一次在途扫描）。
+    ///
+    /// 新建条目时为了让「建完立刻改名」成立，会把在途扫描作废并手动把新条目插进列表。
+    /// 若那次扫描本来还没跑完，列表就停在半截——此时欠用户一次刷新，
+    /// 在重命名会话结束（不管有没有真改名）时补上。
+    list_incomplete: bool,
+    /// 下一次扫描结束后要选中的路径。
+    ///
+    /// 写操作（新建、重命名）之后列表要重扫，而重扫是异步的：那一刻新条目
+    /// 还不存在，没法立刻选中。因此把「该选谁」记下来，等最后一批数据落地时
+    /// 再换算成下标（见 `apply_pending_select`）。
+    ///
+    /// 存路径而不是下标：排序与筛选都可能让同一个条目的下标变化。
+    pending_select: Option<PathBuf>,
     /// 输入框事件订阅。
     ///
     /// **必须持有**：`Subscription` 一旦被 drop 就会退订，
@@ -79,6 +121,21 @@ pub struct ShellView {
     scan_task: Option<Task<()>>,
     /// 当前帧使用的设计令牌。每帧渲染前刷新一次，子渲染函数只读。
     pub(crate) tokens: Tokens,
+    /// 详情表与网格各自的滚动句柄。
+    ///
+    /// 两者**分开持有**：它们的虚拟化单位不同（详情表一行一个条目，网格一行多个
+    /// 单元格），共用一个句柄会让切换视图时的滚动位置互相污染。
+    ///
+    /// 用途只有一个但很关键：把刚新建 / 刚改名的条目滚进视野。条目的位置由排序决定，
+    /// 新建的那一条完全可能在视野之外——那样即使输入框已经拉起，用户也看不见，
+    /// 表现为「点了新建没有任何反应」。
+    pub(crate) details_scroll: UniformListScrollHandle,
+    pub(crate) grid_scroll: UniformListScrollHandle,
+    /// 最近一帧网格视图的列数。
+    ///
+    /// 缓存它而不是缓存整个视口：把条目下标换算成网格行下标只需要列数，
+    /// 而那个换算会发生在**没有 window 的地方**（扫描收尾的异步回调里）。
+    grid_columns: usize,
 }
 
 impl ShellView {
@@ -135,10 +192,20 @@ impl ShellView {
             address_input: None,
             search_editing: false,
             search_input: None,
+            clipboard: Clipboard::new(),
+            renaming: None,
+            area_menu_suppressed: false,
+            list_incomplete: false,
+            op_task: None,
+            pending_select: None,
             address_subscription: None,
             search_subscription: None,
             scan_task: None,
             tokens,
+            details_scroll: UniformListScrollHandle::new(),
+            grid_scroll: UniformListScrollHandle::new(),
+            // 真实值在第一帧渲染时写入；这里只给一个不会除零的初值。
+            grid_columns: 1,
         };
 
         // 让上次退出时的视图模式在启动时就生效：`TabState` 只认识自己的默认值（图标视图），
@@ -208,6 +275,18 @@ pub(crate) fn apply_component_theme(config: &Config, cx: &mut App) {
     theme.list_head = tokens.panel;
     theme.radius = px(fm_views::metrics::RADIUS);
     theme.radius_lg = px(fm_views::metrics::RADIUS_LG);
+    // 通知（toast）的落点与设计稿的 `.toasts` 对齐：左下角、左 14px、底 40px
+    // （设计稿是 `left:14px;bottom:40px`，40 是为了避开 26px 高的状态栏）。
+    // 组件库默认在**右上角**，不同步的话提示会跑到与设计稿相反的一侧。
+    theme.notification.placement = Anchor::BottomLeft;
+    theme.notification.margins = Edges {
+        top: px(0.0),
+        right: px(0.0),
+        bottom: px(40.0),
+        left: px(14.0),
+    };
+    // 设计稿给 toast 的上限是 `min(420px, 100vw - 28px)`，组件库默认 382px。
+    theme.notification.width = px(420.0);
 }
 
 /// 两个颜色按比例混合（`weight` 是后者的占比）。
@@ -241,6 +320,503 @@ fn default_start_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("C:\\"))
 }
 
+/// 一次内联重命名的会话。
+///
+/// 生命周期与「正在编辑的那一行」严格一致：开始重命名时建立，提交或取消时销毁。
+/// 输入框实体必须活过整段会话，因此由 shell 持有而不是在渲染时创建——
+/// 行是每帧重建的，在那里 `cx.new` 会让光标与已输入的文字每帧清零。
+pub(crate) struct RenameState {
+    /// 目标在 [`ShellView::visible`] 里的下标。**只用于渲染**：决定哪一行
+    /// 把名称换成输入框。提交时改用 `path`——编辑期间目录可能被重扫，
+    /// 下标会失效，而路径不会。
+    pub(crate) index: usize,
+    /// 目标路径。渲染层也要读它：判断输入框该落在哪一行时，光比下标不够可靠。
+    pub(crate) path: PathBuf,
+    /// 输入框实体。
+    pub(crate) input: Entity<InputState>,
+    /// 输入框事件订阅。
+    ///
+    /// **必须持有**：`Subscription` 一被丢弃就退订，表现为「能打字，
+    /// 但回车与失焦都没反应」——与地址栏那个坑同源。
+    _subscription: Subscription,
+}
+
+/// 写操作：新建、复制、剪切、粘贴、重命名、移入回收站。
+///
+/// 六条路径共用同一个骨架：**后台线程执行 → 回到视图弹提示 → 刷新列表**。
+/// 三步都不能省：复制一个大目录是秒级操作，放在 UI 线程上就是一次肉眼可见的
+/// 卡死；不弹提示，用户不知道那一秒里发生了什么；不刷新，界面与磁盘就不一致。
+///
+/// 这一层因此必须拿到 `Window`：提示挂在窗口上，而异步上下文里的窗口只能通过
+/// `spawn_in` / `update_in` 取得（`Context::spawn` 那条路径上没有窗口）。
+impl ShellView {
+    /// 当前所在目录。
+    ///
+    /// 虚拟位置（「此电脑」、回收站）返回 `None`：它们不是真实目录，
+    /// 任何「在当前位置新建 / 粘贴」都无处落笔。
+    pub(crate) fn current_dir(&self) -> Option<PathBuf> {
+        self.tabs
+            .active_state()
+            .location()
+            .as_dir()
+            .map(Path::to_path_buf)
+    }
+
+    /// 当前选中项的路径，按可见顺序。
+    ///
+    /// 取 `visible()` 而不是 `entries`：筛选状态下用户看到的是 `visible()`，
+    /// 被操作的也必须是同一批，否则会出现「删掉了一个屏幕上没有的东西」。
+    pub(crate) fn selected_paths(&self) -> Vec<PathBuf> {
+        self.selection
+            .iter()
+            .filter_map(|index| self.visible().get(index))
+            .map(|entry| entry.path.as_ref().clone())
+            .collect()
+    }
+
+    /// 把某个条目滚进可视区。
+    ///
+    /// 条目的位置由排序决定，新建的那一条完全可能在视野之外——那样即使输入框
+    /// 已经拉起，用户也看不见，表现为「点了新建没有任何反应」。
+    ///
+    /// 用 `Nearest` 且**非 strict** 语义：条目已经完全可见时不做任何滚动，
+    /// 新建一个本来就在视野里的条目不该把列表拽走。
+    fn scroll_into_view(&self, index: usize) {
+        let (handle, row) = match self.tabs.active_state().view_mode() {
+            ViewMode::Details => (&self.details_scroll, index),
+            // 网格的虚拟化单位是行：第 N 个条目落在第 `N / 列数` 行。
+            ViewMode::Icons => (&self.grid_scroll, index / self.grid_columns.max(1)),
+        };
+        handle.scroll_to_item(row, ScrollStrategy::Nearest);
+    }
+
+    /// 清空搜索筛选。
+    fn clear_filter(&mut self) {
+        self.query.clear();
+        self.search_editing = false;
+        self.filtered = None;
+    }
+
+    /// 在当前位置新建一个项目。
+    pub(crate) fn create(&mut self, item: NewItem, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = self.current_dir() else {
+            return;
+        };
+        let fs = Arc::clone(self.service.file_system());
+
+        self.op_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { ops::create_with_entry(&*fs, &dir, item) })
+                .await;
+
+            let _ = this.update_in(cx, move |view, window, cx| {
+                view.finish_create(window, cx, result);
+            });
+        }));
+    }
+
+    /// 新建完成后的收尾。
+    ///
+    /// 与其它写操作不同，这里**不重新扫描**：等一轮扫描要几百毫秒，而设计稿要求
+    /// 「建完立刻就能改名」。因此把新建的那一条直接插进列表（元信息由 `stat` 取真），
+    /// 选中它，然后立即进入重命名。下一次刷新（或改名提交时的重扫）会把列表
+    /// 对齐到磁盘的真实状态。
+    fn finish_create(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        result: OpResult<(PathBuf, Entry)>,
+    ) {
+        let (path, mut entry) = match result {
+            Ok(created) => created,
+            Err(reason) => {
+                window.push_notification(Notification::error(reason), cx);
+                return;
+            }
+        };
+
+        // 与扫描路径上完全一致地补上扩展名句柄：类型列与图标都依赖它。
+        self.service.attach_extension(&mut entry);
+
+        // 清掉筛选条件：新项目很可能不匹配当前关键词，那会变成「建完了却看不见，
+        // 更没法给它改名」。设计稿的 `makeFolder()` 同样会清空搜索框。
+        self.clear_filter();
+
+        // 这一批条目现在由我们说了算：让在途扫描失效，否则它剩下的批次回来时会与
+        // 手动插入的这一条**重复**，甚至把 `entries` 整个清掉。
+        // 代价是列表可能停在半截——记下来，等重命名会话结束时补一次刷新。
+        if self.loading {
+            self.list_incomplete = true;
+        }
+        self.service.begin_scan();
+        self.loading = false;
+
+        let sort = {
+            let tab = self.tabs.active();
+            SortSpec::new(tab.state().sort_key(), tab.state().sort_direction())
+        };
+        self.service
+            .insert_sorted(&mut self.entries, entry, sort);
+
+        // 选中新建的这一条，并**先把它滚进视野**：它的位置由排序决定，
+        // 完全可能落在视野之外——那样即便输入框已经拉起，用户也看不见。
+        if let Some(index) = self
+            .visible()
+            .iter()
+            .position(|entry| entry.path.as_ref() == &path)
+        {
+            self.selection.select_single(index);
+            self.cursor = Some(index);
+            self.scroll_into_view(index);
+        }
+
+        // 三种新建都**立刻进入重命名**，且不再弹提示——输入框本身就是反馈，
+        // 再弹一句「已新建」等于两条消息说同一件事。没有人想要一个叫
+        // 「新建文件夹」或「新建文本文档.txt」的东西。
+        //
+        // 这里**刻意与设计稿不同**：设计稿的 `makeFile` 只弹提示、不进改名。
+        // 但同一个「新建」动作在文件夹与文件上给出两种反馈没有道理，而
+        // 「新建文本文档 (2).txt」这种带序号的默认名反而更需要马上改。
+        // 资源管理器也是这么做的（右键「新建文本文档」同样直接进改名）。
+        self.begin_rename(path, window, cx);
+    }
+
+    /// 重命名当前唯一选中的项（选中条上的按钮）。
+    pub(crate) fn rename_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = self.selected_paths();
+        // 只处理「恰好一项」：按钮在多选下本来就是禁用的，
+        // 而「随便挑一项改名」这种自作主张比什么都不做更糟。
+        let [path] = paths.as_slice() else {
+            return;
+        };
+        self.begin_rename(path.clone(), window, cx);
+    }
+
+    /// 把选中项放进剪贴板（复制或剪切）。
+    ///
+    /// 这是纯内存操作，没有 IO，因此**不需要后台线程**：提示可以当场弹出来，
+    /// 用户点完立刻看到反馈，而不是等一次异步往返。
+    pub(crate) fn clip_selection(
+        &mut self,
+        mode: ClipboardMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(origin) = self.current_dir() else {
+            window.push_notification(
+                Notification::warning("当前位置的项目不支持复制或剪切"),
+                cx,
+            );
+            return;
+        };
+
+        let paths = self.selected_paths();
+        let count = paths.len();
+        // 空选中会被 `put` 转成「清空剪贴板」，因此这里只判断要不要提示。
+        self.clipboard.put(mode, paths, origin);
+
+        if count > 0 {
+            // 文案与设计稿的 `toast('已复制 N 项到剪贴板')` 一致。
+            window.push_notification(
+                Notification::success(format!("已{} {count} 项到剪贴板", mode.verb())),
+                cx,
+            );
+        }
+
+        // 剪贴板的状态决定空白处菜单里「粘贴」是否禁用，必须重绘。
+        cx.notify();
+    }
+
+    /// 粘贴到当前目录。
+    pub(crate) fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = self.current_dir() else {
+            // 菜单里那一项本来就是禁用的；这里再兜一次，是因为
+            // 「菜单开着的时候用户切到了回收站」是可能的。
+            window.push_notification(Notification::warning("当前位置不能粘贴"), cx);
+            return;
+        };
+
+        // 「能不能粘、粘是复制还是移动」是纯逻辑，判定放在 `Clipboard` 里
+        // （有单测），这里只消费结果。
+        let plan = match self.clipboard.plan(&dir) {
+            Ok(plan) => plan,
+            Err(error) => {
+                window.push_notification(Notification::warning(error.message()), cx);
+                return;
+            }
+        };
+
+        let verb = match plan {
+            PastePlan::Copy { .. } => ClipboardMode::Copy.action(),
+            PastePlan::Move { .. } => ClipboardMode::Cut.action(),
+        };
+        let fs = Arc::clone(self.service.file_system());
+        // 后台线程要一份独立所有权；外层留一份，用于收尾时结算剪贴板。
+        let planned = plan.clone();
+
+        self.op_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { ops::paste(&*fs, &planned) })
+                .await;
+
+            let _ = this.update_in(cx, move |view, window, cx| {
+                view.finish_paste(window, cx, &plan, verb, result);
+            });
+        }));
+    }
+
+    /// 粘贴完成后的收尾。
+    fn finish_paste(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        plan: &PastePlan,
+        verb: &str,
+        result: OpResult<OpReport>,
+    ) {
+        match result {
+            Ok(report) => {
+                // 剪贴板怎么收尾的规则（剪切只在**全部成功**时失效，
+                // 部分失败留着重试）在 `Clipboard::complete` 里，那条规则有单测。
+                self.clipboard.complete(plan, &report);
+                self.notice_report(window, cx, verb, &report);
+                self.refresh_after_write(cx);
+            }
+            Err(reason) => window.push_notification(Notification::error(reason), cx),
+        }
+    }
+
+    /// 弹一条写操作的回执提示。
+    ///
+    /// 部分失败用 `warning` 而不是 `error`：那批操作确实完成了大部分，
+    /// 用错误色会让用户以为整个操作都失败了。
+    fn notice_report(&self, window: &mut Window, cx: &mut App, verb: &str, report: &OpReport) {
+        let text = ops::summarize(verb, report);
+        if report.has_failures() {
+            // toast 只报第一条原因（一行字里罗列五个原因没人会看），
+            // 剩下的必须有去处：日志。否则那些失败就彻底消失了。
+            for (path, reason) in &report.failed {
+                tracing::warn!(path = %path.display(), reason = %reason, "写操作存在失败项");
+            }
+            window.push_notification(Notification::warning(text), cx);
+        } else {
+            window.push_notification(Notification::success(text), cx);
+        }
+    }
+
+    /// 开始内联重命名。
+    ///
+    /// 参数是路径而不是下标：右键菜单里的动作在构造时就捕获了条目快照，
+    /// 到用户点击时列表可能已经刷过一轮，下标不再可靠。
+    pub(crate) fn begin_rename(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self
+            .visible()
+            .iter()
+            .position(|entry| entry.path.as_ref() == &path)
+        else {
+            return;
+        };
+        let name = self.visible()[index].name.to_string();
+
+        // 同一时刻只允许一个输入框：先结束上一个会话，否则两个 `InputState`
+        // 可能同时持有焦点，按键会进到看不见的那一个里。
+        self.renaming = None;
+
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(name.clone())
+                // Esc 的行为：开启它之后，组件库的输入框会在按下 Esc 时**清空内容**
+                // （本项目的搜索框用的也是它）。设计稿的「Esc 直接收起输入框」
+                // 需要全局键位，而 `crates/app/src/actions.rs` 目前是空壳，
+                // 属后续增量；在那之前「Esc 清空 → 失焦放弃」是能提供的最近似行为
+                // （见 `commit_rename`：空名按放弃处理，不会被提交上去）。
+                .clean_on_escape()
+        });
+
+        // 预选主干、不含扩展名：与资源管理器一致，直接把新名字敲进去
+        // 不会把 `.txt` 弄丢。`set_selected_range` 收的是 UTF-8 字节偏移，
+        // 而它自己会把落在字符中间的偏移夹到字符边界，因此中文名也安全。
+        let selection = naming::rename_selection_range(&name);
+        input.update(cx, |state, cx| state.set_selected_range(selection, cx));
+
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            move |this, _state, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.commit_rename(window, cx),
+                // 失焦即提交，而不是取消：设计稿的 `el.onblur` 就是这么写的，
+                // 资源管理器也是这个行为（点了别处就当作「改完了」）。
+                InputEvent::Blur => this.commit_rename(window, cx),
+                InputEvent::Change | InputEvent::Focus => {}
+            },
+        );
+
+        self.renaming = Some(RenameState {
+            index,
+            path,
+            input: input.clone(),
+            _subscription: subscription,
+        });
+
+        let handle = input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// 提交内联重命名。
+    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // `take` 同时起到「只提交一次」的保护：回车与失焦会接连触发，
+        // 第二次进来时状态已空，直接返回。
+        let Some(renaming) = self.renaming.take() else {
+            return;
+        };
+
+        let typed = renaming.input.read(cx).value().to_string();
+        let old_name = renaming
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let trimmed = typed.trim();
+
+        // 两种情况都算「用户没改」：清空（设计稿的 `if(!name){renderList();return}`
+        // 就是放弃），以及与原文相同。此时不该弹提示——他什么也没做，
+        // 一句「已重命名为 X」只会让人以为是系统改的。
+        if trimmed.is_empty() || trimmed == old_name {
+            // 用户什么也没改。但列表可能停在半截（新建时作废过一次在途扫描），
+            // 那种情况下欠他一次刷新——否则他会一直看着一个不完整的目录，
+            // 而且没有任何迹象说明「再刷新一下就好了」。
+            if self.list_incomplete {
+                self.list_incomplete = false;
+                self.refresh_after_write(cx);
+            }
+            cx.notify();
+            return;
+        }
+
+        let fs = Arc::clone(self.service.file_system());
+        let path = renaming.path.clone();
+        // 输入的名字既要在后台线程里当参数，又要作为「拿不到文件名」时的兜底，
+        // 因此先克隆一份留给收尾闭包。
+        let fallback_name = typed.clone();
+
+        self.op_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { ops::rename(&*fs, &path, &typed) })
+                .await;
+
+            let _ = this.update_in(cx, move |view, window, cx| match result {
+                Ok(new_path) => {
+                    let name = new_path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or(fallback_name);
+                    // 文案与设计稿的 `toast('已重命名为「X」')` 一致。
+                    // 设计稿还带一个「撤销」按钮，那需要一套撤销栈，属后续增量。
+                    window
+                        .push_notification(Notification::success(format!("已重命名为「{name}」")), cx);
+                    view.pending_select = Some(new_path);
+                    view.refresh_after_write(cx);
+                }
+                // 名称非法、目标已存在等都在这里被拦下并如实告知。
+                // 刻意不重新打开输入框让用户改：焦点已经不在那一行上了，
+                // 重新聚焦会让人以为程序在抢键盘。
+                Err(reason) => window.push_notification(Notification::error(reason), cx),
+            });
+        }));
+    }
+
+    /// 把选中项移入回收站。**先弹确认框。**
+    ///
+    /// 为什么危险动作要单独一个对话框，而不是像设计稿那样只把菜单项染红：
+    /// 染红只说了「有点危险」，而对话框能说清「要把哪一项移入回收站」，
+    /// 并把误点的代价从「东西进回收站了」降到「多点一下」。
+    pub(crate) fn delete_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = self.selected_paths();
+        if paths.is_empty() || self.current_dir().is_none() {
+            return;
+        }
+
+        // 确认文案：单项时写出名字，多项时报数量。
+        // 「将「报告.docx」移到回收站？」能让人在按下确定之前确认自己选对了东西——
+        // 这正是确认框存在的意义；只报「1 个项目」就丢掉了这个价值。
+        let subject = if paths.len() == 1 {
+            paths[0]
+                .file_name()
+                .map(|name| format!("「{}」", name.to_string_lossy()))
+                .unwrap_or_else(|| String::from("该项目"))
+        } else {
+            format!("这 {} 个项目", paths.len())
+        };
+
+        // 对话框的回调里拿不到 `this`，因此先留下一个弱引用。
+        let view = cx.entity().downgrade();
+
+        window.open_alert_dialog(cx, move |alert, _window, _cx| {
+            // 构建闭包是 `Fn`，因此每次调用都要克隆一份给内层闭包。
+            let view = view.clone();
+            let paths = paths.clone();
+
+            alert
+                .title("移到回收站")
+                .description(format!("将{subject}移到回收站？"))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("移到回收站")
+                        // 对应设计稿的 `confirmDialog(..., okText, danger)`：
+                        // 危险动作的确定按钮用危险色，而不是与普通确认同色。
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("取消")
+                        .show_cancel(true),
+                )
+                .on_ok(move |_event, window, cx| {
+                    let _ =
+                        view.update(cx, |view, cx| view.start_recycle(paths.clone(), window, cx));
+                    // true = 关闭对话框。
+                    true
+                })
+        });
+    }
+
+    /// 真正发起移入回收站（用户确认之后）。
+    fn start_recycle(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let fs = Arc::clone(self.service.file_system());
+
+        self.op_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { ops::recycle(&*fs, &paths) })
+                .await;
+
+            let _ = this.update_in(cx, move |view, window, cx| match result {
+                Ok(count) => {
+                    window.push_notification(
+                        Notification::success(format!("已移到回收站 {count} 项")),
+                        cx,
+                    );
+                    view.refresh_after_write(cx);
+                }
+                // 回收站的失败**必须**让用户看见：它是「我以为删掉了」的
+                // 最后一道心理防线，不能悄悄吞掉。
+                Err(reason) => window.push_notification(Notification::error(reason), cx),
+            });
+        }));
+    }
+}
+
 /// 扫描与虚拟位置加载。
 impl ShellView {
     /// 刷新当前位置。
@@ -249,6 +825,23 @@ impl ShellView {
     /// 这里刻意不用「把虚拟位置当成一个假路径去扫描」的做法——
     /// 那样只会得到一个「路径不存在」的错误，而不是有意义的界面。
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
+        self.reload_inner(cx, true);
+    }
+
+    /// 写操作之后的刷新：**保留搜索关键词**。
+    ///
+    /// 与 [`ShellView::reload`] 只差这一点。用户主动刷新或换了位置时清掉筛选条件是
+    /// 合理的（那个词在新位置可能毫无意义），但写操作之后清掉它就很莫名其妙——
+    /// 他只是改了个文件名，搜索框却空了。
+    ///
+    /// 例外是「新建」：那条路径会显式调 [`ShellView::clear_filter`]，
+    /// 因为刚建出来的项目很可能不匹配当前关键词（设计稿也这么做）。
+    pub(crate) fn refresh_after_write(&mut self, cx: &mut Context<Self>) {
+        self.reload_inner(cx, false);
+    }
+
+    /// 刷新的共同实现。`clear_filter` 决定要不要顺带清掉搜索条件。
+    fn reload_inner(&mut self, cx: &mut Context<Self>, clear_filter: bool) {
         let tab = self.tabs.active();
         let location = tab.state().location().clone();
         let sort = SortSpec::new(tab.state().sort_key(), tab.state().sort_direction());
@@ -256,9 +849,9 @@ impl ShellView {
         // 导航会换掉整份条目，任何基于下标的选中与筛选都必须一起清掉；
         // 留着它们会让「上一层的第 3 项」在新目录里被当作选中项高亮，属于纯粹的错乱。
         self.clear_selection_state();
-        self.query.clear();
-        self.search_editing = false;
-        self.filtered = None;
+        if clear_filter {
+            self.clear_filter();
+        }
 
         match location {
             Location::Computer => self.begin_drives_load(cx),
@@ -269,6 +862,30 @@ impl ShellView {
                 self.begin_scan(dir, sort, cx);
             }
         }
+    }
+
+    /// 扫描结束后，把 `pending_select` 指向的条目选中。
+    ///
+    /// 用路径换算下标，而不是把下标一路传下来：扫描是异步的，
+    /// 回来时排序可能已经变化、筛选也可能把中间的项目去掉。
+    fn apply_pending_select(&mut self) {
+        let Some(path) = self.pending_select.take() else {
+            return;
+        };
+        let Some(index) = self
+            .visible()
+            .iter()
+            .position(|entry| entry.path.as_ref() == &path)
+        else {
+            // 找不到就静默放弃。最常见的原因是它被当前的搜索条件挡住了——
+            // 那不是错误，弹一句「找不到刚创建的项目」只会让人困惑。
+            return;
+        };
+        self.selection.select_single(index);
+        self.cursor = Some(index);
+        // 顺便带进视野：改完名字之后视线还在那一行上，但重扫可能因为排序或
+        // 筛选条件的变化把它挪到了别处。
+        self.scroll_into_view(index);
     }
 
     /// 发起一次目录扫描，返回本次加载的代数。
@@ -342,6 +959,11 @@ impl ShellView {
                     if view.service.is_current(generation) {
                         view.loading = false;
                         view.error = Some(message);
+                        // 这一轮扫描没有产出任何条目，因此「等扫描完成后选中它」
+                        // 这个请求不可能被满足。留着它，下一次（可能是很久以后、
+                        // 也可能因为别的原因触发的）扫描成功时会突然选中一个
+                        // 与用户当下动作无关的条目。
+                        view.pending_select = None;
                         cx.notify();
                     }
                 });
@@ -366,6 +988,11 @@ impl ShellView {
                     view.refresh_filter();
                     if is_last {
                         view.loading = false;
+                        // 扫描跑完最后一批 = 列表已经完整。
+                        view.list_incomplete = false;
+                        // 写操作之后的重新选中只能等到这里：在此之前新条目
+                        // 还不在列表里，没有下标可选。
+                        view.apply_pending_select();
                     }
                     cx.notify();
                 });
@@ -1001,6 +1628,9 @@ impl Render for ShellView {
         self.refresh_tokens(cx);
 
         let viewport = Viewport::for_width(f32::from(window.viewport_size().width));
+        // 缓存网格列数：`scroll_into_view` 在没有 window 的地方（扫描收尾的
+        // 异步回调里）也要把条目下标换算成网格行下标。
+        self.grid_columns = self.grid_columns_for(viewport);
 
         // 先把各区块各自渲染成 `AnyElement` 再拼装，
         // 避免在同一个表达式里交替借用 `self` 与 `cx`。
@@ -1042,6 +1672,9 @@ impl Render for ShellView {
             .size_full()
             .flex()
             .flex_col()
+            // `relative` 是下面两个浮层的定位基准：它们都是 `absolute().inset_0()`，
+            // 少了这一句会一路上溯到窗口根。
+            .relative()
             .bg(self.tokens.surface)
             .text_color(self.tokens.fg)
             .font_family(self.tokens.font_family.clone())
@@ -1049,6 +1682,19 @@ impl Render for ShellView {
             .child(toolbar)
             .child(body)
             .child(status_bar)
+            // 通知层与对话框层**必须由应用的视图自己挂上**。
+            //
+            // 组件库 0.6.4 的 `Root::render` 只渲染了「我们这一个视图 + 文字选择层 +
+            // 几个 overlay」，**不含通知层与对话框层**；它自己的测试也是手动调用
+            // `Root::render_dialog_layer(...)` 的（见 `dialog/dialog.rs` 的测试
+            // `DialogHost`）。少了这一步的后果很有欺骗性：`push_notification` 与
+            // `open_alert_dialog` 都会静默失效——提示和对话框都不出现，也不报错，
+            // 调用点看起来完全正常。
+            //
+            // 放在最后 = 画在最上层；两层自身都是 `absolute().inset_0()`，
+            // 不参与上面的 flex 布局，因此不影响任何区块的尺寸。
+            .children(gpui_component::Root::render_notification_layer(window, cx))
+            .children(gpui_component::Root::render_dialog_layer(window, cx))
     }
 }
 

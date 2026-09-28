@@ -1,4 +1,8 @@
-//! 回收站枚举（只读）。
+//! 回收站：枚举（读 `$Recycle.Bin`）与移入（走 shell）。
+//!
+//! 两个方向用了**两套完全不同的实现**，理由见各自的函数注释：
+//! 「读」自己解析 `$Recycle.Bin` 就够（省掉 COM），
+//! 「写」必须交给 shell（那是 shell 的语义，不是文件系统的语义）。
 //!
 //! ## 为什么直接读 `$Recycle.Bin`，而不是走 Shell 命名空间
 //!
@@ -21,11 +25,18 @@
 //! 多一段 unsafe 却换不来额外能力）。
 
 use std::fs;
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use anyhow::Context;
 use fm_core::{Entry, EntryKind, IconId};
+use windows::Win32::UI::Shell::{
+    FILEOPERATION_FLAGS, FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_WANTNUKEWARNING,
+    SHFILEOPSTRUCTW, SHFileOperationW,
+};
+use windows::core::PCWSTR;
 
 /// 枚举所有卷上的回收站条目。
 ///
@@ -42,6 +53,120 @@ pub fn enumerate() -> Vec<Entry> {
     }
 
     entries
+}
+
+/// 把若干条目移入回收站，返回交给它的条目数。
+///
+/// ## 为什么这一件事必须走 shell
+///
+/// 「移入回收站」不是文件系统操作，而是 **shell 的行为**：它要在每个卷的
+/// `$Recycle.Bin\<SID>\` 下写一对 `$I`/`$R`，还要维护回收站的元数据。
+/// 自己实现等于重新实现一遍 shell 的删除语义，而且一定会漏掉细节
+/// （配额、`$I` 的版本差异、跨卷时换卷的规则）。
+/// 因此复制与移动走 `std::fs`（见 [`super::fs_ops`]），唯独删除走 shell。
+///
+/// ## 线程
+///
+/// **在独立线程里调用**。原因不是性能，而是 `SHFileOperationW` 在需要显示
+/// 进度或警告时会创建窗口，而窗口需要一个能泵消息的线程；
+/// 借 GPUI 的后台线程去跑，等于让它的消息泵服务另一套 UI。
+/// 一次删除起一个短命线程（创建成本几十微秒）要便宜得多。
+///
+/// ## 标志位的取舍
+///
+/// - `FOF_ALLOWUNDO`：**核心**。没有它这就是永久删除。
+/// - `FOF_NOCONFIRMATION`：确认对话框由我们自己出（设计稿把这一项当危险动作，
+///   用带 `danger` 样式的确认框），没必要再弹一次系统的。
+/// - `FOF_WANTNUKEWARNING`：但**保留**「无法进回收站、将被永久删除」这条警告
+///   （超过回收站配额的大文件会走这条路）。按文档它会覆盖
+///   `FOF_NOCONFIRMATION`，正是我们想要的：常规情况不问，真要销毁时一定问。
+/// - 不加 `FOF_SILENT`：宁可让系统显示自己的进度条，也不要让删一个几 GB 的
+///   目录看起来像卡死。设计稿的 `.transfer` 进度面板落地后可以再换掉它。
+pub fn move_to_recycle_bin(paths: &[PathBuf]) -> anyhow::Result<usize> {
+    if paths.is_empty() {
+        return Ok(0);
+    }
+
+    let count = paths.len();
+    let from = path_list(paths);
+
+    let result = std::thread::Builder::new()
+        .name(String::from("fm-recycle-bin"))
+        .spawn(move || delete_impl(from))
+        .context("无法创建回收站操作线程")?
+        .join()
+        // 子线程 panic 时不把 panic 继续抛给调用方：那会让一次删除失败
+        // 变成整个进程崩溃。这里退化为一条普通的错误。
+        .map_err(|_| anyhow::anyhow!("回收站操作线程异常终止"))?;
+
+    result.map(|()| count)
+}
+
+/// 组装 `SHFileOperationW` 要的路径列表：**每个路径以 NUL 结尾，末尾再补一个 NUL**。
+///
+/// 这是这个 API 最容易写错的一处：写成普通的 NUL 分隔列表会被它读成
+/// 一条包含多个路径的怪路径，而写成单个字符串则只会处理第一个。
+fn path_list(paths: &[PathBuf]) -> Vec<u16> {
+    let mut buffer = Vec::new();
+    for path in paths {
+        buffer.extend(path.as_os_str().encode_wide());
+        buffer.push(0);
+    }
+    buffer.push(0);
+    buffer
+}
+
+/// 真正的调用。必须在独立线程上执行（见 [`move_to_recycle_bin`]）。
+fn delete_impl(from: Vec<u16>) -> anyhow::Result<()> {
+    // `from` 必须活到调用返回：`pFrom` 只是借了它的指针。
+    let mut operation = SHFILEOPSTRUCTW {
+        wFunc: FO_DELETE,
+        pFrom: PCWSTR(from.as_ptr()),
+        // `fFlags` 是 u16，而这些常量是 u32 的新类型——必须显式收窄。
+        fFlags: flags_to_u16(&[
+            FOF_ALLOWUNDO,
+            FOF_NOCONFIRMATION,
+            FOF_WANTNUKEWARNING,
+        ]),
+        // pTo 保持 null：FO_DELETE 不需要目标。
+        ..Default::default()
+    };
+
+    // SAFETY: `pFrom` 指向的 `from` 在本函数内始终存活且以双 NUL 结尾；
+    // 其余字段由 `Default`（全零）给出，对 FO_DELETE 都是合法值。
+    let code = unsafe { SHFileOperationW(&mut operation) };
+
+    if code != 0 {
+        anyhow::bail!("{}", describe_shell_code(code));
+    }
+    // 返回 0 也可能有项目被中断（用户点了系统进度条上的取消）。
+    // 这里必须当成失败上报：否则会弹出一句「已删除 3 项」而实际只删了 1 项。
+    if operation.fAnyOperationsAborted.as_bool() {
+        anyhow::bail!("删除被中断，部分项目未处理");
+    }
+
+    Ok(())
+}
+
+/// 把若干 `FILEOPERATION_FLAGS` 合成 `SHFILEOPSTRUCTW::fFlags` 要的 `u16`。
+fn flags_to_u16(flags: &[FILEOPERATION_FLAGS]) -> u16 {
+    flags.iter().fold(0u32, |acc, flag| acc | flag.0) as u16
+}
+
+/// `SHFileOperationW` 的返回码 → 用户可读的原因。
+///
+/// 刻意只映射**一定认得**的 Win32 值。这个 API 的返回码混用两套编码：
+/// 普通 Win32 错误码与 shell 私有的 `DE_*` 系列（0x71 起），
+/// 而 `DE_*` 在本项目的 `windows` crate 里没有导出。
+/// 与其手写那几个魔数（猜错会把「权限不足」说成「文件重名」，比报数字更糟），
+/// 不如把原始码附上——那个数字是可以在网上搜到的。
+fn describe_shell_code(code: i32) -> String {
+    match code {
+        2 | 3 => String::from("项目已不存在"),
+        5 => String::from("没有权限，项目可能被占用或受保护"),
+        32 => String::from("项目正被其它程序使用"),
+        _ => format!("删除失败（系统错误码 {code}）"),
+    }
 }
 
 /// 收集一个卷的回收站条目。

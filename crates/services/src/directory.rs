@@ -84,6 +84,24 @@ impl DirectoryService {
         &self.file_system
     }
 
+    /// 为条目补上扩展名句柄，与扫描路径上的处理完全一致。
+    ///
+    /// 暴露出来是为了「新建之后立刻显示」这条路径：新条目不是扫描来的，
+    /// 但它同样需要句柄——否则类型列与图标会与扫描出来的同类条目不一致。
+    pub fn attach_extension(&self, entry: &mut Entry) {
+        attach_extension(&self.interner, entry);
+    }
+
+    /// 把一个新条目按给定排序插进列表的正确位置。
+    ///
+    /// 实现是「追加后整体重排」而不是二分插入：新建是低频动作，而重排复用的
+    /// 正是扫描用的**同一个比较器**——两条路径不会因为「插入位置算得不一样」
+    /// 而出现顺序差异。
+    pub fn insert_sorted(&self, entries: &mut Vec<Entry>, entry: Entry, sort: SortSpec) {
+        entries.push(entry);
+        sort_entries(entries, sort);
+    }
+
     /// 开始一次新扫描并返回其代数。
     ///
     /// 该调用会立即让所有在途扫描失效——这正是「快速连续切换目录时旧结果不错乱」的保障。
