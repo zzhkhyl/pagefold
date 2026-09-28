@@ -17,7 +17,7 @@ use gpui_component::{Icon, Sizable as _};
 use fm_core::Entry;
 
 use crate::tokens::{Tokens, metrics};
-use crate::{OpenHandler, SelectHandler};
+use crate::{EntryMenuBuilder, OpenHandler, RightPressHandler, SelectHandler};
 
 /// 单元格内名称区的高度：两行 12px / 1.35 行高。
 ///
@@ -91,6 +91,8 @@ pub fn row(
     tokens: &Tokens,
     open: &OpenHandler,
     select: &SelectHandler,
+    menu: &EntryMenuBuilder,
+    right_press: &RightPressHandler,
 ) -> AnyElement {
     let height = cell_height(cell_width);
 
@@ -108,6 +110,8 @@ pub fn row(
                 tokens,
                 open,
                 select,
+                menu,
+                right_press,
             ),
             // 末行不足时补等高空占位：行高不一致会让 uniform_list 的滚动计算失准。
             None => div()
@@ -145,6 +149,8 @@ fn cell(
     tokens: &Tokens,
     open: &OpenHandler,
     select: &SelectHandler,
+    menu: &EntryMenuBuilder,
+    right_press: &RightPressHandler,
 ) -> AnyElement {
     let icon = crate::widgets::entry_icon(entry, extension);
     let thumb_size = (cell_width - metrics::CELL_PADDING * 2.0).max(16.0);
@@ -158,7 +164,7 @@ fn cell(
     let selecting = std::rc::Rc::clone(select);
     let selected_hover = crate::tokens::with_alpha(tokens.fg, 0.1);
 
-    div()
+    let cell = div()
         .id(("icon-cell", index))
         .flex()
         .flex_col()
@@ -171,12 +177,16 @@ fn cell(
         .border_1()
         .border_color(tokens.surface)
         .cursor_pointer()
-        .hover(move |style| style.bg(hover).border_color(border))
+        // 与详情行同理：`hover()` 每个元素只能设置一次，否则 dev 构建下 panic。
+        .hover(move |style| {
+            if selected {
+                style.bg(selected_hover).border_color(accent_line)
+            } else {
+                style.bg(hover).border_color(border)
+            }
+        })
         .when(selected, |element| {
-            element
-                .bg(accent_soft)
-                .border_color(accent_line)
-                .hover(move |style| style.bg(selected_hover))
+            element.bg(accent_soft).border_color(accent_line)
         })
         .when(current, |element| {
             element.border_color(accent_line)
@@ -231,8 +241,17 @@ fn cell(
                 .text_size(px(metrics::FONT_XS))
                 .text_color(tokens.muted_fg)
                 .child(meta_label(entry)),
-        )
-        .into_any_element()
+        );
+
+    // 包装层不能写 `w_full()`：网格行是 `flex_row`，写满了每个单元格都会占满整行宽度。
+    // 由内容（单元格自己的固定宽高）撑开，正是原来单元格作为直接子项时的行为。
+    let wrapper = div()
+        .id(("icon-cell-wrap", index))
+        .flex()
+        .flex_row()
+        .flex_none();
+
+    crate::context_menu::entry_menu_row(wrapper, cell, entry, index, menu, right_press)
 }
 
 /// 单元格下方的元信息。

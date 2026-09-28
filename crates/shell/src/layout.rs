@@ -11,13 +11,14 @@ use std::rc::Rc;
 
 use fm_core::{Entry, Location, ViewMode};
 use fm_views::{
-    SelectHandler, breakpoints, computer, details_table, empty_state, icon_grid, metrics,
-    preview_panel, virtual_rows, widgets,
+    AreaMenuBuilder, SelectHandler, breakpoints, computer, details_table, empty_state, icon_grid,
+    metrics, preview_panel, virtual_rows, widgets,
 };
 use gpui::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
+use gpui_component::menu::ContextMenuExt as _;
 use gpui_kit_assets::IconName;
 
 use crate::shell::ShellView;
@@ -154,8 +155,12 @@ impl ShellView {
             }
         };
 
+        // 内容区空白处的右键菜单。只有「没命中行」的右键才会走到它：
+        // 行上的右键会在 `fm_views::context_menu` 的外层包装里被截断。
+        let area_menu = crate::context_menu::area_menu_builder(cx);
+
         children.push(body);
-        content_column(children)
+        content_column(children, &area_menu)
     }
 
     /// 选中项操作条（设计稿的 `.batch`）。没有选中项时返回 `None`，条不占高度。
@@ -294,6 +299,8 @@ impl ShellView {
         // 只有视口内的行会进入这个闭包，因此在这里做类型/时间格式化是安全的。
         let open = open_handler(cx);
         let select = select_handler(cx);
+        let menu = crate::context_menu::entry_menu_builder(cx);
+        let right_press = crate::context_menu::right_press_handler(cx);
         let list = virtual_rows(
             "details-list",
             cx,
@@ -317,6 +324,8 @@ impl ShellView {
                     index,
                     &open,
                     &select,
+                    &menu,
+                    &right_press,
                 )
             },
         )
@@ -349,6 +358,8 @@ impl ShellView {
 
         let open = open_handler(cx);
         let select = select_handler(cx);
+        let menu = crate::context_menu::entry_menu_builder(cx);
+        let right_press = crate::context_menu::right_press_handler(cx);
         let list = virtual_rows(
             "icon-grid",
             cx,
@@ -370,6 +381,8 @@ impl ShellView {
                     &view.tokens,
                     &open,
                     &select,
+                    &menu,
+                    &right_press,
                 )
             },
         )
@@ -524,8 +537,17 @@ pub(crate) fn select_handler(cx: &Context<ShellView>) -> SelectHandler {
 /// 这类多段内容与「空状态」这类单段内容就能走同一条路径。
 ///
 /// 约定：这是内容区容器的**唯一装配点**，各视图函数只返回内容片段、不得自行包容器。
-fn content_column(children: impl IntoIterator<Item = AnyElement>) -> AnyElement {
+///
+/// `menu` 是空白处的右键菜单（内容由 [`crate::context_menu`] 决定）。
+/// 容器必须带 `.id()`：`context_menu` 要用它派生稳定的元素 id，
+/// 否则菜单的展开状态会在每一帧重渲染时丢失。
+fn content_column(
+    children: impl IntoIterator<Item = AnyElement>,
+    menu: &AreaMenuBuilder,
+) -> AnyElement {
+    let menu = menu.clone();
     div()
+        .id("content-area")
         .flex()
         .flex_col()
         .flex_grow(1.0)
@@ -534,5 +556,6 @@ fn content_column(children: impl IntoIterator<Item = AnyElement>) -> AnyElement 
         .h_full()
         .overflow_hidden()
         .children(children)
+        .context_menu(move |popup, window, cx| (*menu)(popup, window, cx))
         .into_any_element()
 }

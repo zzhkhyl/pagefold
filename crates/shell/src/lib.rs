@@ -12,6 +12,7 @@
 //! 这样做是为了让所有区块共享同一份状态而不必跨模块传参，
 //! 同时保持「一个区块一个文件」的可读性。
 
+pub mod context_menu;
 pub mod layout;
 pub mod shell;
 pub mod sidebar;

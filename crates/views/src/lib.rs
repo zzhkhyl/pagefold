@@ -12,6 +12,7 @@
 
 pub mod breadcrumb;
 pub mod computer;
+pub mod context_menu;
 pub mod details_table;
 pub mod empty_state;
 pub mod icon_grid;
@@ -19,6 +20,7 @@ pub mod preview_panel;
 pub mod tokens;
 pub mod widgets;
 
+pub use context_menu::{AreaMenuBuilder, EntryMenuBuilder, RightPressHandler};
 pub use tokens::{Tokens, breakpoints, metrics};
 
 use std::ops::Range;

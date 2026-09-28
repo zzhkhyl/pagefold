@@ -21,7 +21,7 @@ use gpui_kit_assets::IconName;
 
 use crate::tokens::{Tokens, breakpoints, metrics};
 use crate::widgets;
-use crate::{OpenHandler, SelectHandler, SelectMode};
+use crate::{EntryMenuBuilder, OpenHandler, RightPressHandler, SelectHandler, SelectMode};
 
 /// 点击列名排序的回调。
 ///
@@ -185,6 +185,9 @@ pub fn header(
 ///
 /// `index` 用作元素 id：虚拟化列表每帧都会重建行，id 必须在这两帧之间保持稳定，
 /// 否则点击命中会错位。
+///
+/// `menu` / `right_press` 见 [`crate::context_menu::entry_menu_row`]：
+/// 菜单内容由 shell 决定，这里只负责把菜单挂到行上。
 #[allow(clippy::too_many_arguments)]
 pub fn row(
     entry: &Entry,
@@ -198,6 +201,8 @@ pub fn row(
     index: usize,
     open: &OpenHandler,
     select: &SelectHandler,
+    menu: &EntryMenuBuilder,
+    right_press: &RightPressHandler,
 ) -> AnyElement {
     // 目录的「大小」没有意义（系统给出的目录 metadata.len() 与内容无关），显示为破折号。
     let size = if entry.is_dir() {
@@ -277,12 +282,19 @@ pub fn row(
         .px(px(metrics::ROW_PADDING_X))
         .group(group_name)
         .cursor_pointer()
-        .hover(move |style| style.bg(hover))
-        .when(selected, |element| {
-            element
-                .bg(accent_soft)
-                .hover(move |style| style.bg(selected_hover))
+        // hover 每个元素只能挂**一次**：GPUI 的 `hover()` 带
+        // `debug_assert!(hover_style.is_none())`，第二次调用会直接 panic。
+        // release 把断言编译掉了，所以这个写法一直没暴露；dev 构建下
+        // 只要有任何一行处于选中态就会崩。选中态因此不是「再挂一个 hover」，
+        // 而是让同一个闭包按选中与否给出不同底色。
+        .hover(move |style| {
+            if selected {
+                style.bg(selected_hover)
+            } else {
+                style.bg(hover)
+            }
         })
+        .when(selected, |element| element.bg(accent_soft))
         .when(current, |element| {
             element.border_1().border_color(accent_line)
         })
@@ -327,7 +339,16 @@ pub fn row(
         true,
     ));
 
-    row.into_any_element()
+    // 包装层的布局必须与原来放在行上的约束一致（`flex_none` + `w_full`）：
+    // 它现在才是虚拟列表的直接子项，行高与宽度都由它决定。
+    let wrapper = div()
+        .id(("details-row-wrap", index))
+        .flex()
+        .flex_row()
+        .flex_none()
+        .w_full();
+
+    crate::context_menu::entry_menu_row(wrapper, row, entry, index, menu, right_press)
 }
 
 /// 表头里的可排序列。

@@ -527,6 +527,16 @@ impl ShellView {
         self.reload(cx);
     }
 
+    /// 在指定目录打开一个新标签并切过去。
+    ///
+    /// 与 [`ShellView::open_tab`] 的差别只在落点：后者沿用当前标签的位置。
+    /// 右键菜单的「在新标签页中打开」需要一个明确的落点——目录落在它自己身上，
+    /// 文件落在当前目录（文件没有「自己的目录」可言）。
+    pub(crate) fn open_tab_at(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.tabs.open_at(Location::Directory(path));
+        self.reload(cx);
+    }
+
     /// 关闭指定标签，并重新扫描接管焦点的那个标签。
     pub(crate) fn close_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
         self.tabs.close(id);
@@ -630,6 +640,16 @@ impl ShellView {
         self.config.show_preview = self.preview_open;
         self.config.save();
         cx.notify();
+    }
+
+    /// 打开右侧预览面板；已经打开时保持原样。
+    ///
+    /// 与 [`ShellView::toggle_preview`] 的区别是**语义**而非行为：右键菜单里的
+    /// 「属性」表达的是「我要看它的信息」，点它是想看，不该把已经开着的面板关掉。
+    pub(crate) fn show_preview(&mut self, cx: &mut Context<Self>) {
+        if !self.preview_open {
+            self.toggle_preview(cx);
+        }
     }
 
     /// 切换深色/浅色主题并持久化。
