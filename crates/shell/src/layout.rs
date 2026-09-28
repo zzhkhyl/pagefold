@@ -17,7 +17,7 @@ use fm_views::{
 };
 use gpui::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px, prelude::FluentBuilder as _,
 };
 use gpui_component::menu::ContextMenuExt as _;
 use gpui_kit_assets::IconName;
@@ -127,9 +127,9 @@ impl ShellView {
 
         let mut children: Vec<AnyElement> = Vec::new();
 
-        if let Some(batch) = self.render_batch_bar(cx) {
-            children.push(batch);
-        }
+        // 选中条常驻（见 `render_batch_bar` 的说明：它不再随选中状态出现/消失，
+        // 否则下面的列表每点一次条目就上下跳一次）。
+        children.push(self.render_batch_bar(cx));
 
         let body = if let Some(error) = self.error.clone() {
             // 错误优先展示：出错时列表本来就是空的，先显示骨架会误导。
@@ -168,13 +168,18 @@ impl ShellView {
         content_column(children, &area_menu)
     }
 
-    /// 选中项操作条（设计稿的 `.batch`）。没有选中项时返回 `None`，条不占高度。
-    fn render_batch_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let count = self.selection.len();
-        if count == 0 {
-            return None;
-        }
+    /// 选中项操作条（设计稿的 `.batch`）。
+    ///
+    /// **常驻**：没有选中项时也占着同样的高度——左端写「未选择项目」，动作全部禁用。
+    /// 设计稿是 `hidden` 掉整条（`.batch[hidden]{display:none}`），但那样每点一次
+    /// 条目，下面的列表就会上下跳一次；这种跳动的代价（手感）比省下的 40px 大得多。
+    ///
+    /// 高度**定死**（与预览面板表头共用 [`metrics::BATCH_BAR_HEIGHT`]）而不是靠内边距
+    /// 撑出来：两栏并排，差一两个像素就会被看出来。
+    fn render_batch_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let tokens = &self.tokens;
+        let count = self.selection.len();
+        let has_selection = count > 0;
         let size = fm_core::format_size(self.selection_size());
 
         // 写操作全部作用于「当前目录」，而虚拟位置没有目录可写：回收站里的条目
@@ -182,6 +187,14 @@ impl ShellView {
         // 再删一次都没有意义。因此整组置为禁用并说明原因，而不是让它们点了没反应。
         let writable = self.current_dir().is_some();
         let blocked = "回收站与「此电脑」里的项目不支持该操作";
+        // 不能点的原因按优先级取：**没选中**排在位置不可写之前——
+        // 一个都没选的时候说「回收站不支持该操作」是答非所问。
+        let why = if has_selection {
+            blocked
+        } else {
+            "请先选择要操作的项目"
+        };
+        let can_write = has_selection && writable;
         // 重命名一次只能改一项：批量重命名需要一个「前缀 + 起始序号 + 预览」的
         // 对话框（设计稿的 `#dlgRename`），属后续增量。
         let single = self.selection.single().is_some();
@@ -195,8 +208,12 @@ impl ShellView {
                 "batch-copy",
                 "复制",
                 Some(IconName::Copy),
-                if writable { "复制选中项到剪贴板" } else { blocked },
-                writable,
+                if can_write {
+                    "复制选中项到剪贴板"
+                } else {
+                    why
+                },
+                can_write,
                 tokens,
                 cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
                     this.clip_selection(ClipboardMode::Copy, window, cx);
@@ -206,12 +223,12 @@ impl ShellView {
                 "batch-cut",
                 "剪切",
                 Some(IconName::Scissors),
-                if writable {
+                if can_write {
                     "剪切选中项（粘贴后原位置移除）"
                 } else {
-                    blocked
+                    why
                 },
-                writable,
+                can_write,
                 tokens,
                 cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
                     this.clip_selection(ClipboardMode::Cut, window, cx);
@@ -221,14 +238,14 @@ impl ShellView {
                 "batch-rename",
                 "重命名",
                 Some(IconName::Pencil),
-                if !writable {
-                    blocked
+                if !can_write {
+                    why
                 } else if single {
                     "重命名该项"
                 } else {
                     "一次只能重命名一项（批量重命名尚未接入）"
                 },
-                writable && single,
+                can_write && single,
                 tokens,
                 cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
                     this.rename_selected(window, cx);
@@ -238,8 +255,12 @@ impl ShellView {
                 "batch-delete",
                 "移到回收站",
                 Some(IconName::Trash),
-                if writable { "移到回收站（需确认）" } else { blocked },
-                writable,
+                if can_write {
+                    "移到回收站（需确认）"
+                } else {
+                    why
+                },
+                can_write,
                 tokens,
                 cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
                     this.delete_selection(window, cx);
@@ -249,49 +270,69 @@ impl ShellView {
                 "batch-clear",
                 "取消选择",
                 None,
-                "取消选择",
-                true,
+                if has_selection {
+                    "取消选择"
+                } else {
+                    "没有选中项"
+                },
+                has_selection,
                 tokens,
                 cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
                     this.clear_selection(cx);
                 }),
             ));
 
-        Some(
-            div()
-                .flex_none()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .px(px(metrics::ROW_PADDING_X))
-                .py(px(7.0))
-                .bg(tokens.panel)
-                .border_b_1()
-                .border_color(tokens.border)
-                .text_size(px(12.5))
-                .child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(tokens.fg)
-                        .child(widgets::dot(tokens.accent, 6.0))
-                        .child(format!("已选择 {count} 项")),
-                )
-                .child(widgets::mono(
-                    size,
-                    metrics::FONT_XS,
-                    tokens.muted_fg,
-                    tokens,
-                ))
-                .child(div().flex_grow(1.0))
-                .child(actions)
-                .into_any_element(),
-        )
+        let mut bar = div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(metrics::ROW_PADDING_X))
+            .h(px(metrics::BATCH_BAR_HEIGHT))
+            .bg(tokens.panel)
+            .border_b_1()
+            .border_color(tokens.border)
+            .text_size(px(12.5))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(tokens.fg)
+                    // 圆点只在真有选中项时出现：它是「你有选中」的指示器，
+                    // 常驻的空态里留着它只会让人以为选上了什么。
+                    .when(has_selection, |element| {
+                        element.child(widgets::dot(tokens.accent, 6.0))
+                    })
+                    .child(if has_selection {
+                        format!("已选择 {count} 项").into_any_element()
+                    } else {
+                        // 常驻的空态必须有一句话：只留一片空白，用户既看不出
+                        // 「这里以后会出现操作」，也不知道按钮为什么都是灰的。
+                        div()
+                            .text_color(tokens.muted_fg)
+                            .child("未选择项目")
+                            .into_any_element()
+                    }),
+            );
+
+        // 合计大小只在有选中项时出现：「0 字节」既没有意义又占位置。
+        if has_selection {
+            bar = bar.child(widgets::mono(
+                size,
+                metrics::FONT_XS,
+                tokens.muted_fg,
+                tokens,
+            ));
+        }
+
+        bar.child(div().flex_grow(1.0))
+            .child(actions)
+            .into_any_element()
     }
 
     /// 详细信息视图：表头 + 虚拟化数据行。

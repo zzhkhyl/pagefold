@@ -175,7 +175,6 @@ fn card(
                         CARD_WIDTH - CARD_PADDING * 2.0,
                         metrics::DISK_METER_HEIGHT,
                         tokens,
-                        tokens.hover,
                     ))
                 })
                 .child(

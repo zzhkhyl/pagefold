@@ -78,6 +78,30 @@ pub fn panel(
         .into_any_element()
 }
 
+/// 预览面板的表头栏。
+///
+/// 三处内容（空态 / 多选 / 单选）都走这里，高度与列表上方那条选中条**共用同一个
+/// 令牌**（[`metrics::BATCH_BAR_HEIGHT`]）：两栏并排，差一两个像素就会被看出来。
+/// 各自写一遍迟早会长歪——改之前那三处就是三种不同的高度，因为都是靠内边距撑的。
+///
+/// 定高 + 单行是刻意的：内容再长也只截断，不换行。换行会把这一栏撑高，
+/// 高度就又对不上了。
+fn header(content: AnyElement, tokens: &Tokens) -> AnyElement {
+    div()
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .h(px(metrics::BATCH_BAR_HEIGHT))
+        .px(px(metrics::ROW_PADDING_X))
+        .border_b_1()
+        .border_color(tokens.border)
+        .overflow_hidden()
+        .child(content)
+        .into_any_element()
+}
+
 /// 未选择任何项目。
 fn empty(tokens: &Tokens) -> AnyElement {
     div()
@@ -85,18 +109,14 @@ fn empty(tokens: &Tokens) -> AnyElement {
         .flex_col()
         .flex_none()
         .w_full()
-        .child(
+        .child(header(
             div()
-                .flex_none()
-                .px(px(12.0))
-                .pt(px(12.0))
-                .pb(px(10.0))
-                .border_b_1()
-                .border_color(tokens.border)
                 .text_size(px(metrics::FONT_UI))
                 .text_color(tokens.muted_fg)
-                .child("未选择任何项目"),
-        )
+                .child("未选择任何项目")
+                .into_any_element(),
+            tokens,
+        ))
         .child(
             div()
                 .flex()
@@ -141,19 +161,19 @@ fn multiple(names: &[SharedString], total_size: &str, tokens: &Tokens) -> AnyEle
         .flex_col()
         .flex_none()
         .w_full()
-        .child(
+        .child(header(
+            // 原来是上下两行（数量 + 合计），两行塞不进这条定高栏，也会让两栏
+            // 高度对不上。压成一行，信息一个不少。
             div()
-                .flex_none()
                 .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .px(px(12.0))
-                .pt(px(12.0))
-                .pb(px(10.0))
-                .border_b_1()
-                .border_color(tokens.border)
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .min_w(px(0.0))
+                .overflow_hidden()
                 .child(
                     div()
+                        .flex_none()
                         .text_size(px(metrics::FONT_LG))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(tokens.fg)
@@ -161,12 +181,15 @@ fn multiple(names: &[SharedString], total_size: &str, tokens: &Tokens) -> AnyEle
                 )
                 .child(
                     div()
+                        .flex_none()
                         .font_family(tokens.mono_font.clone())
                         .text_size(px(metrics::FONT_XS))
                         .text_color(tokens.muted_fg)
                         .child(format!("合计 {total_size}")),
-                ),
-        )
+                )
+                .into_any_element(),
+            tokens,
+        ))
         .child(
             div()
                 .id("preview-multi-scroll")
@@ -260,22 +283,20 @@ fn single(
         .flex_none()
         .h_full()
         .w_full()
-        .child(
+        .child(header(
+            // 名字过长时截断而不是换行：换行会把这一栏撑高，两栏高度就又对不上了。
             div()
-                .flex_none()
-                .px(px(12.0))
-                .pt(px(12.0))
-                .pb(px(10.0))
-                .border_b_1()
-                .border_color(tokens.border)
-                .child(
-                    div()
-                        .text_size(px(metrics::FONT_LG))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(tokens.fg)
-                        .child(summary.name.clone()),
-                ),
-        )
+                .flex_grow(1.0)
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .truncate()
+                .text_size(px(metrics::FONT_LG))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(tokens.fg)
+                .child(summary.name.clone())
+                .into_any_element(),
+            tokens,
+        ))
         .child(body);
 
     // 只有目录才有可执行的「打开」动作：进入目录是我们已经具备的能力。

@@ -274,7 +274,6 @@ impl ShellView {
                     DISK_METER_WIDTH,
                     metrics::DISK_METER_HEIGHT,
                     tokens,
-                    tokens.hover,
                 ))
                 .child(
                     div()

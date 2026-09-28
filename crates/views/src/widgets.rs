@@ -218,21 +218,37 @@ pub fn section_label(label: &'static str, tokens: &Tokens) -> AnyElement {
         .into_any_element()
 }
 
-/// 驱动器容量条：底槽 + 已用部分 + 剩余留白。
+/// 驱动器容量条：**只有两种颜色**——已用（强调色，超过 85% 转警告色）与空闲（深灰）。
 ///
-/// 之所以拆成三段而不是「底槽 + 前景」：设计稿用剩余留白把「还能装多少」
-/// 也画了出来，三段结构才能让这两段比例在任何宽度下都准确。
-pub fn capacity_bar(
-    used_ratio: f32,
-    width: f32,
-    height: f32,
-    tokens: &Tokens,
-    track: Hsla,
-) -> AnyElement {
+/// 底槽直接就是空闲段的颜色，已用段从左侧盖上去，因此整条**不存在第三种颜色**。
+///
+/// 之前是「底槽（`hover` 淡灰）+ 已用 + 空闲段」三段，并且照设计稿给两段之间
+/// 留了 6px 空隙——那 6px 露出的正是淡灰底槽，在**最右端**显示为一条淡灰色尾巴，
+/// 看起来像进度条没画完（0% 的盘上整条都是它）。
+/// 设计稿的三段结构是为「已用 / 其它 / 空闲」准备的，而这里只有前两段，
+/// 那份空隙因此没有要分隔的对象。
+///
+/// 保留「底槽与空闲段同色」而不是把底槽去掉：四舍五入可能留下不到 1px 的缝，
+/// 同色能让那种缝隙无从显形。
+///
+/// ## 已用段的圆角为什么要自己声明
+///
+/// 父容器的 `rounded` 只圆**它自己的底色**（空闲段），盖在上面的已用段拿不到——
+/// GPUI 的 `ContentMask` 只带一个矩形 `bounds`（见 `gpui_pre::window::ContentMask`），
+/// `overflow_hidden` 因此**不按圆角裁剪子元素**。所以已用段的左端必须自己圆，
+/// 否则 67% 那条蓝色会以一个直角起头，与右端的圆角不对称。
+pub fn capacity_bar(used_ratio: f32, width: f32, height: f32, tokens: &Tokens) -> AnyElement {
     let ratio = used_ratio.clamp(0.0, 1.0);
     let used_width = width * ratio;
-    // 剩余段留 6% 的空隙：设计稿用它把已用与空闲两段在视觉上分开。
-    let free_width = (width * (1.0 - ratio) - 6.0).max(0.0);
+    let free_width = width - used_width;
+    let outer_radius = height / 2.0;
+    // 半径按已用段的半宽夹一次，与 CSS 对圆角的处理一致：2px 宽的段不会去画
+    // 一个 3px 半径的畸形圆，而是退化成一段小圆角。
+    let radius = outer_radius.min(used_width / 2.0);
+    // 右端只在已用段**已经抵到容器右端的圆角弧内**时才跟着圆。
+    // 其余情况下它停在中途，必须保持直角——圆了会在它与后面的深灰之间
+    // 露出一道月牙形的深灰。
+    let reaches_end = free_width < outer_radius;
 
     div()
         .flex_none()
@@ -240,22 +256,17 @@ pub fn capacity_bar(
         .flex_row()
         .w(px(width))
         .h(px(height))
-        .rounded(px(height / 2.0))
+        .rounded(px(outer_radius))
         .overflow_hidden()
-        .bg(track)
+        .bg(crate::tokens::with_alpha(tokens.fg, 0.3))
         .child(
             div()
                 .flex_none()
                 .h_full()
                 .w(px(used_width))
-                .bg(tokens.capacity_fill(ratio)),
-        )
-        .child(
-            div()
-                .flex_none()
-                .h_full()
-                .w(px(free_width))
-                .bg(crate::tokens::with_alpha(tokens.fg, 0.3)),
+                .bg(tokens.capacity_fill(ratio))
+                .rounded_l(px(radius))
+                .when(reaches_end, |element| element.rounded_r(px(radius))),
         )
         .into_any_element()
 }

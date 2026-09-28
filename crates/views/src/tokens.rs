@@ -50,6 +50,11 @@ pub mod metrics {
     /// 面包屑单段高度与圆角。
     pub const CRUMB_HEIGHT: f32 = 24.0;
     pub const CRUMB_RADIUS: f32 = 5.0;
+    /// 列表上方那条横栏的高度：**选中条与预览面板表头共用这一个值**。
+    ///
+    /// 定死高度而不是靠内边距撑出来：两栏并排，差一两个像素就会被看出来，
+    /// 而文字行高由字体度量决定——两边各撑各的，迟早会因为换个字体或改个字号而错开。
+    pub const BATCH_BAR_HEIGHT: f32 = 40.0;
     /// 内联重命名输入框的圆角（设计稿 `.rename` 用的是 5px 这一档）。
     pub const RENAME_RADIUS: f32 = 5.0;
     /// 搜索框宽度区间。
