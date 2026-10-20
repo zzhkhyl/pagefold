@@ -1,6 +1,6 @@
 //! 配置持久化。
 //!
-//! 存储位置：`%APPDATA%\files-gpui\config.json`。
+//! 存储位置：`%APPDATA%\pagefold\config.json`。
 //!
 //! 容错原则：配置是「锦上添花」而不是启动前提。
 //! 文件缺失、内容损坏、字段新增/删除、写盘失败，都只记 WARN 日志并回退到默认值——
@@ -54,12 +54,12 @@ impl Default for Config {
 }
 
 impl Config {
-    /// 配置文件路径：`%APPDATA%\files-gpui\config.json`。
+    /// 配置文件路径：`%APPDATA%\pagefold\config.json`。
     ///
     /// 取不到 `APPDATA` 时返回 `None`（极简环境或 CI），此时配置读写整体静默跳过。
     pub fn path() -> Option<PathBuf> {
         let base = std::env::var_os("APPDATA")?;
-        Some(PathBuf::from(base).join("files-gpui").join("config.json"))
+        Some(PathBuf::from(base).join("pagefold").join("config.json"))
     }
 
     /// 读取配置，任何异常都回退到默认值。

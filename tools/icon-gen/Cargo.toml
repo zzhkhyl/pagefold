@@ -1,6 +1,6 @@
 [package]
 name = "icon-gen"
-description = "由 design/app-icons.html 的 C 方案生成全平台应用图标（SVG 源 + PNG + ICO + ICNS）"
+description = "由设计稿的 C 方案生成全平台应用图标（SVG 源 + PNG + ICO + ICNS）"
 version = "0.1.0"
 edition = "2024"
 publish = false

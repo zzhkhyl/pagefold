@@ -31,13 +31,13 @@ const INITIAL_HEIGHT: f32 = 820.0;
 /// 后果是任务栏没有名字，且单实例激活时 `FindWindowW` 找不到窗口。
 /// 隐藏系统边框后这个文本仍然生效：任务栏与 Alt+Tab 读的都是窗口文本。
 ///
-/// 这就是**任务栏上显示的名字**，也是应用的中文名。
-const WINDOW_TITLE: &str = "文件夹管理器";
+/// 这就是**任务栏上显示的名字**，也是应用的名称。
+const WINDOW_TITLE: &str = "Pagefold";
 
 /// 单实例互斥体名。
 ///
 /// 不带 `Global\` 前缀 → 作用域是当前登录会话，多用户同时登录时各自能开一个实例。
-const INSTANCE_MUTEX: &str = "FilesGPUI.SingleInstance.v1";
+const INSTANCE_MUTEX: &str = "Pagefold.SingleInstance.v1";
 
 /// 启动应用。该函数会阻塞直到应用退出。
 pub fn run() {

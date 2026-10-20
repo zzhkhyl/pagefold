@@ -1,4 +1,4 @@
-# Files（GPUI 版）workspace 根。
+# Pagefold workspace 根。
 #
 # 构建方式：Windows 原生 MSVC，不加 --target，不使用任何 MinGW/gcc linker。
 # 因此本文件与 .cargo/config.toml 中都不允许出现 [target.x86_64-pc-windows-gnu] 之类的配置
@@ -14,7 +14,7 @@ edition = "2024"
 rust-version = "1.98"
 license = "MIT"
 description = "面向 Windows 的桌面文件资源管理器（GPUI 实现）"
-repository = "https://github.com/zzhkhyl/files-gpui"
+repository = "https://github.com/zzhkhyl/pagefold"
 publish = false
 
 [workspace.dependencies]

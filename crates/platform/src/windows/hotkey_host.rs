@@ -70,7 +70,7 @@ const TRAY_ICON_ID: u32 = 1;
 ///
 /// 与主程序的互斥体**不同名**：宿主不是主程序的第二个实例，
 /// 两者必须能同时存在。
-const HOST_MUTEX: &str = "FilesGPUI.HotkeyHost.v1";
+const HOST_MUTEX: &str = "Pagefold.HotkeyHost.v1";
 
 /// `WndProc` 是 C 回调，无法捕获上下文，只能通过全局静态取状态。
 ///
@@ -107,7 +107,7 @@ pub fn run(app_title: &str, exe_path: PathBuf) -> anyhow::Result<()> {
         let module = GetModuleHandleW(None).context("获取模块句柄失败")?;
         let instance = HINSTANCE(module.0);
 
-        let class_name = w!("FilesGpuiHotkeyHost");
+        let class_name = w!("PagefoldHotkeyHost");
         let window_class = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
             hInstance: instance,

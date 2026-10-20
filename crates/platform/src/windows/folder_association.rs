@@ -743,8 +743,8 @@ mod tests {
     fn shell_command_quotes_both_path_and_argument() {
         // 含空格的路径不加引号会被 shell 拆成多个参数，
         // 于是它去找一个叫 `C:\Program` 的程序。
-        let command = shell_command(Path::new(r"C:\Program Files\Files\files-gpui.exe"), "%1");
-        assert_eq!(command, r#""C:\Program Files\Files\files-gpui.exe" "%1""#);
+        let command = shell_command(Path::new(r"C:\Program Files\Pagefold\pagefold.exe"), "%1");
+        assert_eq!(command, r#""C:\Program Files\Pagefold\pagefold.exe" "%1""#);
     }
 
     #[test]
@@ -892,7 +892,7 @@ mod tests {
     #[test]
     fn installed_command_is_recognised_and_foreign_ones_are_not() {
         const TEST_KEY: &str = r"Software\Files\__test_state";
-        let exe = Path::new(r"C:\Program Files\Files\files-gpui.exe");
+        let exe = Path::new(r"C:\Program Files\Pagefold\pagefold.exe");
         let command = shell_command(exe, SELECTED_ARGUMENT);
 
         Key::open(TEST_KEY, true)
@@ -904,7 +904,7 @@ mod tests {
         // 大小写不同也要认出来：Windows 路径不区分大小写。
         assert!(is_our_command(
             TEST_KEY,
-            &shell_command(Path::new(r"c:\program files\files\FILES-GPUI.EXE"), SELECTED_ARGUMENT)
+            &shell_command(Path::new(r"c:\program files\pagefold\PAGEFOLD.EXE"), SELECTED_ARGUMENT)
         ));
         // 换一个程序就应当不匹配，否则会误判成「已安装」而不去安装。
         assert!(!is_our_command(

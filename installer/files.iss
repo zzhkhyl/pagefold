@@ -1,17 +1,17 @@
-; 文件夹管理器（Files）· Windows 安装包定义
+; Pagefold · Windows 安装包定义
 ;
 ; ── 构建方式 ────────────────────────────────────────────────────────────────
 ;   1) 先出发布产物（安装包的载荷）：
 ;        cargo build --release -p fm-app
 ;   2) 用 Inno Setup 的命令行编译器编译本脚本：
 ;        target\innosetup\ISCC.exe installer\files.iss
-;      产物落在 dist\Files-<版本>-x64-setup.exe
+;      产物落在 dist\Pagefold-<版本>-x64-setup.exe
 ;
 ;   Inno Setup 本体不需要安装：官方安装器支持免管理员的 portable 解包，
 ;   解到 target\innosetup 即可（命令见 README「打包安装程序」一节）。
 ;
 ; ── 设计要点 ────────────────────────────────────────────────────────────────
-;   · **用户级安装**：装到 %LOCALAPPDATA%\Programs\Files，与之前手工部署的位置一致。
+;   · **用户级安装**：装到 %LOCALAPPDATA%\Programs\Pagefold，全程不弹 UAC。
 ;     PrivilegesRequired=lowest 让安装全程不弹 UAC——装到 Program Files 需要管理员
 ;     权限，而本程序是单文件、不写共享位置，装到系统目录没有任何收益。
 ;   · **对系统有副作用的动作一律默认不勾选**：接管文件夹会改变「双击文件夹」的行为，
@@ -22,13 +22,13 @@
 ;   · **安装前先结束进程**：热键宿主是无窗口的后台进程，Windows 的重启管理器看不到它，
 ;     不主动结束的话覆盖 exe 会失败在「文件被占用」上。
 
-; 应用的中文名。它就是快捷方式名、控制面板里的显示名，
+; 应用名。它就是快捷方式名、控制面板里的显示名，
 ; 也是任务栏上显示的窗口标题（两处必须一致，否则用户会看到两个名字）。
-#define AppName "文件夹管理器"
-#define AppExeName "files-gpui.exe"
+#define AppName "Pagefold"
+#define AppExeName "pagefold.exe"
 #define AppVersion "0.1.0"
 #define AppVersionQuad "0.1.0.0"
-#define AppPublisher "Files GPUI"
+#define AppPublisher "Pagefold"
 
 ; 载荷与图标：路径相对本脚本所在目录解析。
 #define SourceExe "..\target\release\" + AppExeName
@@ -37,13 +37,13 @@
 [Setup]
 ; AppId 是升级与卸载的唯一定位依据，**发布之后绝不能再改**，
 ; 否则新版本会被当成另一个程序、与旧版本并存。下面的值是随机生成的固定值。
-AppId={{8F3A5C21-6D4E-4B77-9C02-5E1D7A3B9F14}
+AppId={{0C19383B-C097-44EB-8360-FC08FDFA3853}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
 VersionInfoVersion={#AppVersionQuad}
-DefaultDirName={localappdata}\Programs\Files
+DefaultDirName={localappdata}\Programs\Pagefold
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 ; 只有一个可选的安装目录（就是上面那个），没有让用户改的必要，直接跳过。
@@ -55,7 +55,7 @@ MinVersion=10.0
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist
-OutputBaseFilename=Files-{#AppVersion}-x64-setup
+OutputBaseFilename=Pagefold-{#AppVersion}-x64-setup
 SetupIconFile={#SourceIcon}
 UninstallDisplayIcon={app}\{#AppExeName}
 UninstallDisplayName={#AppName}
@@ -96,7 +96,7 @@ Filename: "{app}\{#AppExeName}"; Description: "立即启动 {#AppName}"; Flags: 
 [UninstallRun]
 ; 顺序不可调换：
 ; 1) 先结束进程，否则下一步的程序无法启动、且后续删除文件会被占用；
-Filename: "{cmd}"; Parameters: "/C taskkill /IM {#AppExeName} /F >NUL 2>&1"; Flags: runhidden waituntilterminated; RunOnceId: "StopFilesGPUI"
+Filename: "{cmd}"; Parameters: "/C taskkill /IM {#AppExeName} /F >NUL 2>&1"; Flags: runhidden waituntilterminated; RunOnceId: "StopPagefold"
 ; 2) 再用程序自己的命令还原全部 shell 改动（右键菜单项 + 默认打开程序 + 安装标记）；
 Filename: "{app}\{#AppExeName}"; Parameters: "--restore-folder-integration"; Flags: runhidden waituntilterminated; RunOnceId: "RestoreFolderIntegration"
 
@@ -139,7 +139,7 @@ var
 begin
   if CurUninstallStep = usPostUninstall then
   begin
-    ConfigDir := ExpandConstant('{userappdata}\files-gpui');
+    ConfigDir := ExpandConstant('{userappdata}\pagefold');
     if DirExists(ConfigDir) then
     begin
       // MB_DEFBUTTON2 让**默认按钮是「否」**。这不是随手选的：

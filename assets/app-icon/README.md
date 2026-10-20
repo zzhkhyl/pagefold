@@ -1,4 +1,4 @@
-# 文件夹管理器 · 应用图标（设计稿 C 方案）
+# Pagefold · 应用图标（设计稿 C 方案）
 
 本目录的全部位图与容器文件都由 `tools/icon-gen` **从矢量源生成**，不要手工编辑产物：
 改设计参数 → 重新生成，是唯一允许的修改路径。
@@ -189,7 +189,7 @@ ICO 目录自洽、ICNS 数据块自洽、主图集 PNG 头与文件名一致、
   （已是 `gpui-pre` 的 build-dependency，故未新增依赖）编译 `windows/icon.rc`，
   产物经 `cargo:rustc-link-arg-bins` 交给链接器。图标因此烘焙进 PE 资源段，
   **产物仍是单文件，运行期没有新增依赖**；已核实 `.ico` 的 7 个尺寸全部出现在
-  debug 与 release 的 `files-gpui.exe` 中。
+  debug 与 release 的 `pagefold.exe` 中。
 
   两处容易被踩到的地方，改动时请留意：
   1. `rc.exe` 解析相对路径的基准是**调用者的工作目录**（Cargo 跑 build.rs 时是 crate 根），
