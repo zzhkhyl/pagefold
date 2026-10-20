@@ -1,0 +1,5 @@
+# 文本文件统一按内容自动识别并规范化换行；二进制资源不做文本转换。
+* text=auto
+*.png binary
+*.ico binary
+*.icns binary

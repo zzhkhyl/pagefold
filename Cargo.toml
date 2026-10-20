@@ -2,7 +2,7 @@
 #
 # 构建方式：Windows 原生 MSVC，不加 --target，不使用任何 MinGW/gcc linker。
 # 因此本文件与 .cargo/config.toml 中都不允许出现 [target.x86_64-pc-windows-gnu] 之类的配置
-# ——PLAN.md 中记录的交叉编译方案已废弃，详见 README.md 的「构建与运行」章节。
+# ——早期规划的交叉编译方案已废弃，详见 README.md 的「构建与运行」章节。
 
 [workspace]
 resolver = "2"
@@ -13,6 +13,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
+description = "面向 Windows 的桌面文件资源管理器（GPUI 实现）"
+repository = "https://github.com/zzhkhyl/files-gpui"
 publish = false
 
 [workspace.dependencies]

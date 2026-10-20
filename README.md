@@ -3,7 +3,6 @@
 面向 Windows 的现代桌面文件资源管理器，中文名「文件夹管理器」，
 界面按 `design/` 下的设计稿实现（设计稿里用的代号是「叠页」，指同一件东西），
 Fluent Design / Windows 11 原生观感，参考 Files 项目。
-需求基线见 [`.codebuddy/plans/PLAN.md`](./.codebuddy/plans/PLAN.md)。
 
 ---
 
@@ -512,12 +511,12 @@ Windows **没有「默认文件管理器」这个可设置的项**（设置 → 
 
 ## Phase 0' 决策记录（原生 Windows 构建链路重验证）
 
-原 `PLAN.md` 记录的是「Linux 交叉编译到 `x86_64-pc-windows-gnu`」路线，该路线已废弃。
+早期规划记录过「Linux 交叉编译到 `x86_64-pc-windows-gnu`」的路线，该路线已废弃。
 本节记录改用 **Windows 原生 MSVC 构建** 后的重新验证结论。
 
 ### 决策 1：不创建 `vendor/` 补丁
 
-`PLAN.md` 原方案要求 vendor `gpui-pre-windows-0.3.5` 并对 `directx_renderer.rs` 打补丁，用于绕开两个缺陷。
+早期规划的原方案要求 vendor `gpui-pre-windows-0.3.5` 并对 `directx_renderer.rs` 打补丁，用于绕开两个缺陷。
 经核实，**这两个缺陷的成因都是「构建脚本运行在 Linux 上」，在原生 Windows 下均不成立**：
 
 | 原缺陷                                                     | 成因                                                                                                                          | 原生 Windows 下的实际情况                        |
@@ -546,7 +545,7 @@ Windows **没有「默认文件管理器」这个可设置的项**（设置 → 
 
 ### 决策 3：已废弃、不得照搬的配置
 
-以下来自原 `PLAN.md` 交叉编译方案的内容已全部失效，**照抄会直接导致构建失败**：
+以下来自早期规划（交叉编译方案）的内容已全部失效，**照抄会直接导致构建失败**：
 
 - `.cargo/config.toml` 中的 `[target.x86_64-pc-windows-gnu] linker = "x86_64-w64-mingw32-gcc"` 与 `ar`
 - 构建命令中的 `--target x86_64-pc-windows-gnu`
@@ -606,7 +605,6 @@ RUST_LOG=info cargo run --release -- "$(pwd)/$BENCH"
 
 ```text
 file-manager/
-├── .codebuddy/plans/PLAN.md  # 需求基线与阶段记录
 ├── design/              # 设计稿（主界面 / 设置页 / 应用图标），界面取值的唯一依据
 ├── assets/app-icon/     # 应用图标交付物（75 个文件，见该目录 README）
 ├── tools/icon-gen/      # 图标生成器：设计参数 → SVG / PNG / ICO / ICNS（独立 workspace）

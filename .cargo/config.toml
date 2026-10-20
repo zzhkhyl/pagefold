@@ -1,12 +1,15 @@
 # 工程级 cargo 配置（仅影响本 workspace，不改动 ~/.cargo/config.toml）。
 #
 # ⚠️ 红线：本文件**禁止**出现任何 linker / ar 配置。
-# PLAN.md 记录的 [target.x86_64-pc-windows-gnu] linker = "x86_64-w64-mingw32-gcc"
+# 早期规划记录的 [target.x86_64-pc-windows-gnu] linker = "x86_64-w64-mingw32-gcc"
 # 属于已废弃的交叉编译方案；当前为 Windows 原生 MSVC 构建，写入会直接导致构建失败。
 #
 # 依赖获取：源码走 USTC 稀疏索引 + USTC crate 下载源（国内镜像）。
 # USTC 的 config.json 中 dl = https://mirrors.ustc.edu.cn/crates.io/api/v1/crates
 # 即索引与包体都落在国内，避免直连 crates.io 的网络抖动。
+#
+# 不在中国大陆、或该镜像不可用时：删除下面的 [source.crates-io] 与 [source.ustc]
+# 两段，cargo 会直接使用 crates.io（README「依赖获取」一节有同样说明）。
 
 [source.crates-io]
 replace-with = "ustc"
