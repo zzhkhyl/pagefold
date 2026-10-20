@@ -12,11 +12,11 @@ use std::rc::Rc;
 use fm_core::{Entry, Location, ViewMode};
 use fm_services::clipboard::ClipboardMode;
 use fm_views::{
-    AreaMenuBuilder, SelectHandler, breakpoints, computer, details_table, empty_state, icon_grid,
-    metrics, preview_panel, virtual_rows, widgets,
+    AreaMenuBuilder, DragSelectHandler, SelectHandler, breakpoints, computer, details_table,
+    empty_state, icon_grid, metrics, preview_panel, virtual_rows, widgets,
 };
 use gpui::{
-    AnyElement, App, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    AnyElement, App, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, Window, div, px, prelude::FluentBuilder as _,
 };
 use gpui_component::menu::ContextMenuExt as _;
@@ -164,8 +164,18 @@ impl ShellView {
         // 行上的右键会在 `fm_views::context_menu` 的外层包装里被截断。
         let area_menu = crate::context_menu::area_menu_builder(cx);
 
+        // 左键抬起（含在内容区外抬起）时结束框选。
+        let end_rubber_band: Rc<dyn Fn(&mut Window, &mut App)> = {
+            let view = cx.entity().downgrade();
+            Rc::new(move |_window, cx: &mut App| {
+                if view.update(cx, |view, _cx| view.end_rubber_band()).is_err() {
+                    tracing::debug!("框选结束时视图已销毁");
+                }
+            })
+        };
+
         children.push(body);
-        content_column(children, &area_menu)
+        content_column(children, &area_menu, end_rubber_band)
     }
 
     /// 选中项操作条（设计稿的 `.batch`）。
@@ -376,6 +386,7 @@ impl ShellView {
         let select = select_handler(cx);
         let menu = crate::context_menu::entry_menu_builder(cx);
         let right_press = crate::context_menu::right_press_handler(cx);
+        let (drag_start, drag_move) = drag_handlers(cx);
         let list = virtual_rows(
             "details-list",
             &self.details_scroll,
@@ -416,6 +427,8 @@ impl ShellView {
                     &select,
                     &menu,
                     &right_press,
+                    &drag_start,
+                    &drag_move,
                 )
             },
         )
@@ -459,6 +472,7 @@ impl ShellView {
         let select = select_handler(cx);
         let menu = crate::context_menu::entry_menu_builder(cx);
         let right_press = crate::context_menu::right_press_handler(cx);
+        let (drag_start, drag_move) = drag_handlers(cx);
         let list = virtual_rows(
             "icon-grid",
             &self.grid_scroll,
@@ -496,6 +510,8 @@ impl ShellView {
                     &select,
                     &menu,
                     &right_press,
+                    &drag_start,
+                    &drag_move,
                 )
             },
         )
@@ -657,6 +673,37 @@ pub(crate) fn select_handler(cx: &Context<ShellView>) -> SelectHandler {
     )
 }
 
+/// 构造「框选开始 / 框选经过」处理器，两个视图共用。
+///
+/// 两个处理器都要拿到鼠标坐标：阈值判断靠它区分「单击」与「框选」。
+pub(crate) fn drag_handlers(cx: &Context<ShellView>) -> (DragSelectHandler, DragSelectHandler) {
+    let start_view = cx.entity().downgrade();
+    let start: DragSelectHandler = Rc::new(
+        move |index: usize, position, _window: &mut Window, cx: &mut App| {
+            if start_view
+                .update(cx, |view, _cx| view.begin_rubber_band(index, position))
+                .is_err()
+            {
+                tracing::debug!("框选起始时视图已销毁，本次操作被忽略");
+            }
+        },
+    );
+
+    let drag_view = cx.entity().downgrade();
+    let drag: DragSelectHandler = Rc::new(
+        move |index: usize, position, _window: &mut Window, cx: &mut App| {
+            if drag_view
+                .update(cx, |view, cx| view.update_rubber_band(index, position, cx))
+                .is_err()
+            {
+                tracing::debug!("框选时视图已销毁，本次操作被忽略");
+            }
+        },
+    );
+
+    (start, drag)
+}
+
 /// 内容区容器：统一裁剪与最小高度，避免长内容把状态栏顶出窗口。
 ///
 /// 接受一组**纵向排列**的子元素，而不是单个元素：这样「选中条 + 表头 + 列表」
@@ -670,8 +717,11 @@ pub(crate) fn select_handler(cx: &Context<ShellView>) -> SelectHandler {
 fn content_column(
     children: impl IntoIterator<Item = AnyElement>,
     menu: &AreaMenuBuilder,
+    end_rubber_band: Rc<dyn Fn(&mut Window, &mut App)>,
 ) -> AnyElement {
     let menu = menu.clone();
+    let end_up = Rc::clone(&end_rubber_band);
+    let end_out = Rc::clone(&end_rubber_band);
     div()
         .id("content-area")
         .flex()
@@ -681,6 +731,14 @@ fn content_column(
         .min_h(px(0.0))
         .h_full()
         .overflow_hidden()
+        // 左键抬起即结束框选。`on_mouse_up_out` 兜住在内容区外松开的情况
+        // （例如一路拖进侧边栏才松手）——那一次的鼠标抬起不会命中内容区本身。
+        .on_mouse_up(MouseButton::Left, move |_event, window, cx| {
+            (*end_up)(window, cx);
+        })
+        .on_mouse_up_out(MouseButton::Left, move |_event, window, cx| {
+            (*end_out)(window, cx);
+        })
         .children(children)
         .context_menu(move |popup, window, cx| (*menu)(popup, window, cx))
         .into_any_element()

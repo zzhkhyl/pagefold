@@ -14,13 +14,19 @@
 //! 待补：标签过多时的横向滚动与左右箭头（当前是压缩标签宽度直到最小宽度）。
 
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, WindowControlArea, div, px,
+    AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, WindowControlArea, div, px,
     prelude::FluentBuilder as _,
 };
+use gpui_component::button::{
+    Button, ButtonCustomVariant, ButtonVariant, ButtonVariants as _, DropdownButton,
+};
+use gpui_component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_component::{Icon, Sizable as _};
 use gpui_kit_assets::IconName;
 
+use fm_core::TabId;
 use fm_views::metrics;
 
 use crate::shell::ShellView;
@@ -89,6 +95,18 @@ impl ShellView {
                 .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                     this.select_tab(id, cx);
                 }))
+                // 中键关闭标签（与浏览器一致）。阻止冒泡，否则会顺带触发左键点击的选中。
+                .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.close_tab(id, cx);
+                }))
+                // 拖拽排序：左键按下记起始，滑过其它标签时把被拖的标签移到它的位置。
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, _cx| {
+                    this.begin_tab_drag(id, event.position);
+                }))
+                .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                    this.drag_tab_over(id, event.position, cx);
+                }))
                 .when(!is_active, |element| {
                     element.hover(move |style| style.bg(hover_fill).text_color(foreground))
                 })
@@ -144,6 +162,8 @@ impl ShellView {
                         )
                         .child(close),
                 )
+                // 右键菜单：与「更多」按钮同一份，但「关闭其它/右侧」以本标签为参照。
+                .context_menu(tab_menu_builder(cx, Some(id)))
                 .into_any_element()
         }).collect();
 
@@ -213,7 +233,9 @@ impl ShellView {
                         cx.listener(|this, _: &ClickEvent, _window, cx| {
                             this.open_tab(cx);
                         }),
-                    )),
+                    ))
+                    // 「更多」：标签页操作菜单（新建 / 重新打开 / 关闭其他 / 关闭右侧）。
+                    .child(tab_more_button(tokens, cx)),
             )
             // 拖拽段：品牌栏删掉之后，这是窗口**唯一**的拖动区域。
             // 只能挂在这一段空白上——挂在整栏会抢在标签与窗口按钮之前命中
@@ -229,6 +251,104 @@ impl ShellView {
                     .window_control_area(WindowControlArea::Drag),
             )
             .child(window_actions)
+            // 左键抬起（含在标签条外抬起）结束拖拽排序。
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _window, _cx| {
+                this.end_tab_drag();
+            }))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _window, _cx| {
+                this.end_tab_drag();
+            }))
             .into_any_element()
+    }
+}
+
+/// 标签页操作菜单里的动作。
+#[derive(Clone, Copy)]
+enum TabCommand {
+    New,
+    ReopenClosed,
+    /// 关闭其它标签页。`Some(id)` 以该标签为参照（右键菜单），`None` 用当前标签（「更多」按钮）。
+    CloseOthers(Option<TabId>),
+    /// 关闭右侧标签页。参照同 [`TabCommand::CloseOthers`]。
+    CloseRight(Option<TabId>),
+}
+
+/// 标签条「更多」按钮（设计稿的 `#tabMore`）。
+///
+/// 用 `DropdownButton` 承载弹出层，与命令条「新建」复用同一套定位 / Esc 关闭 /
+/// 上下键导航机制。触发按钮配色走 `ButtonCustomVariant`，与旁边手绘的「＋」按钮
+/// 用同一套设计令牌，视觉上是一组。
+fn tab_more_button(tokens: &fm_views::Tokens, cx: &mut Context<ShellView>) -> impl IntoElement {
+    DropdownButton::new("tab-more")
+        .button(
+            Button::new("tab-more-trigger")
+                .with_variant(ButtonVariant::Custom(
+                    ButtonCustomVariant::new(cx)
+                        .color(gpui::transparent_black())
+                        .foreground(tokens.muted_fg)
+                        .hover(tokens.hover)
+                        .active(tokens.accent_soft),
+                ))
+                .icon(Icon::new(IconName::Ellipsis).with_size(px(16.0)))
+                .tooltip("标签页操作")
+                // 与「＋」按钮同高，视觉上并排一组。
+                .w(px(30.0))
+                .h(px(32.0)),
+        )
+        .dropdown_menu(tab_menu_builder(cx, None))
+}
+
+/// 构造标签页操作菜单的内容。
+fn tab_menu_builder(
+    cx: &Context<ShellView>,
+    target: Option<TabId>,
+) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+    let shell = cx.entity().downgrade();
+    move |menu, _window, _cx| {
+        let mut menu = menu;
+        menu = menu.item(
+            PopupMenuItem::new("新建标签页")
+                .icon(Icon::new(IconName::Plus))
+                // 设 action 让组件库在右侧渲染绑定的键位（Ctrl+T）。
+                .action(Box::new(crate::actions::NewTab))
+                .on_click(tab_command_handler(&shell, TabCommand::New)),
+        );
+        menu = menu.item(
+            PopupMenuItem::new("重新打开关闭的标签页")
+                .icon(Icon::new(IconName::RotateCcw))
+                .action(Box::new(crate::actions::ReopenClosedTab))
+                .on_click(tab_command_handler(&shell, TabCommand::ReopenClosed)),
+        );
+        menu = menu.separator();
+        menu = menu.item(
+            PopupMenuItem::new("关闭其他标签页")
+                .icon(Icon::new(IconName::X))
+                .on_click(tab_command_handler(&shell, TabCommand::CloseOthers(target))),
+        );
+        menu = menu.item(
+            PopupMenuItem::new("关闭右侧标签页")
+                .icon(Icon::new(IconName::X))
+                .on_click(tab_command_handler(&shell, TabCommand::CloseRight(target))),
+        );
+        menu
+    }
+}
+
+/// 标签页操作菜单项的回调。
+fn tab_command_handler(
+    shell: &WeakEntity<ShellView>,
+    command: TabCommand,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+    let shell = shell.clone();
+    move |_event: &ClickEvent, _window: &mut Window, cx: &mut App| {
+        let applied = shell.update(cx, |view, cx| match command {
+            TabCommand::New => view.open_tab(cx),
+            TabCommand::ReopenClosed => view.reopen_closed_tab(cx),
+            TabCommand::CloseOthers(target) => view.close_others(target, cx),
+            TabCommand::CloseRight(target) => view.close_right(target, cx),
+        });
+        if applied.is_err() {
+            tracing::debug!("执行标签页操作时视图已销毁");
+        }
     }
 }

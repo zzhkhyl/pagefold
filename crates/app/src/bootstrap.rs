@@ -13,8 +13,9 @@ use fm_platform::{FileSystem, SingleInstance, activate_window, platform_file_sys
 use fm_services::config::Config;
 use fm_services::directory::DirectoryService;
 use fm_shell::ShellView;
+use fm_shell::actions::*;
 use fm_views::metrics;
-use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+use gpui::{App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
 
 /// 主窗口的初始尺寸。
@@ -89,6 +90,33 @@ pub fn run() {
         .with_assets(gpui_kit_assets::AllAssets)
         .run(|cx: &mut App| {
             gpui_component::init(cx);
+
+            // 全局快捷键。键位以设计稿的 keydown 为准，另加 Ctrl+L 与 Ctrl+1/2/3。
+            // 处理器挂在 ShellView 的根元素上（见 `ShellView::apply_shortcuts`）。
+            cx.bind_keys([
+                KeyBinding::new("ctrl-t", NewTab, None),
+                KeyBinding::new("ctrl-w", CloseTab, None),
+                KeyBinding::new("ctrl-shift-t", ReopenClosedTab, None),
+                KeyBinding::new("alt-left", GoBack, None),
+                KeyBinding::new("alt-right", GoForward, None),
+                KeyBinding::new("backspace", GoUp, None),
+                KeyBinding::new("f5", Refresh, None),
+                KeyBinding::new("ctrl-l", FocusAddressBar, None),
+                KeyBinding::new("ctrl-1", SetViewDetails, None),
+                KeyBinding::new("ctrl-2", SetViewIcons, None),
+                KeyBinding::new("ctrl-3", ToggleTheme, None),
+                KeyBinding::new("ctrl-a", SelectAll, None),
+                KeyBinding::new("ctrl-c", CopyItems, None),
+                KeyBinding::new("ctrl-x", CutItems, None),
+                KeyBinding::new("ctrl-v", PasteItems, None),
+                KeyBinding::new("f2", RenameItem, None),
+                KeyBinding::new("delete", DeleteItems, None),
+                KeyBinding::new("enter", OpenItem, None),
+                KeyBinding::new("up", MoveCursorUp, None),
+                KeyBinding::new("down", MoveCursorDown, None),
+                KeyBinding::new("shift-up", ExtendCursorUp, None),
+                KeyBinding::new("shift-down", ExtendCursorDown, None),
+            ]);
 
             // 平台实现与目录服务在整个进程内共享一份：
             // 这既省内存，也让扩展名句柄在全局唯一。

@@ -28,8 +28,8 @@ use std::rc::Rc;
 
 use fm_core::Entry;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, ElementId, Render, Styled as _, UniformListScrollHandle,
-    Window, px, uniform_list,
+    AnyElement, App, ClickEvent, Context, ElementId, Pixels, Point, Render, Styled as _,
+    UniformListScrollHandle, Window, px, uniform_list,
 };
 
 /// 单击选中项的三种语义，与资源管理器一致。
@@ -69,6 +69,14 @@ pub type OpenHandler = Rc<dyn Fn(Entry, &mut Window, &mut App)>;
 
 /// 「单击选中」回调。参数是条目在当前可视列表中的下标与选择语义。
 pub type SelectHandler = Rc<dyn Fn(usize, SelectMode, &mut Window, &mut App)>;
+
+/// 「框选」回调。参数是条目在可视列表中的下标，以及鼠标的窗口坐标。
+///
+/// 坐标用于「拖动阈值」判断（见 `ShellView` 里的 `RUBBER_BAND_THRESHOLD`）：
+/// 拿不到坐标就无法区分「单击」与「框选」，单击时的微小抖动会把 Ctrl / Shift
+/// 点击的语义破坏掉。用下标而不是坐标定位条目，是因为虚拟化列表拿不到滚动偏移，
+/// 逐行命中测试让每一行**自己**报出下标，彻底绕开坐标换算。
+pub type DragSelectHandler = Rc<dyn Fn(usize, Point<Pixels>, &mut Window, &mut App)>;
 
 /// 用 `uniform_list` 做虚拟化的通用封装。
 ///

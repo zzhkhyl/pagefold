@@ -67,6 +67,18 @@ impl Selection {
         self.anchor = (len > 0).then_some(0);
     }
 
+    /// 橡皮筋框选：把选中集**替换**为 `start..=end` 这段区间。
+    ///
+    /// 与 [`Selection::select_range`] 的区别是后者只追加：框选是「矩形盖到哪就
+    /// 选到哪」，往回拖必须把之前盖到的取消，追加会让选中越拖越多。
+    /// 锚点落到 `start`，这样紧接着的 Shift 点击仍能按「从这段的头开始」的直觉扩选。
+    pub fn select_span(&mut self, start: usize, end: usize) {
+        let (start, end) = if start <= end { (start, end) } else { (end, start) };
+        self.indices.clear();
+        self.indices.extend(start..=end);
+        self.anchor = Some(start);
+    }
+
     pub fn contains(&self, index: usize) -> bool {
         self.indices.contains(&index)
     }
@@ -167,5 +179,18 @@ mod tests {
         selection.select_all(0);
         assert!(selection.is_empty());
         assert_eq!(selection.anchor(), None);
+    }
+
+    #[test]
+    fn select_span_replaces_instead_of_accumulating() {
+        let mut selection = Selection::default();
+        selection.select_single(0);
+        selection.select_span(3, 6);
+        assert_eq!(selection.iter().collect::<Vec<_>>(), vec![3, 4, 5, 6]);
+
+        // 往回拖必须把之前盖到的取消，而不是越拖越多。
+        selection.select_span(5, 4);
+        assert_eq!(selection.iter().collect::<Vec<_>>(), vec![4, 5]);
+        assert_eq!(selection.anchor(), Some(4));
     }
 }

@@ -21,9 +21,9 @@ use fm_services::ops::{self, NewItem, OpResult};
 use fm_views::preview_panel::{EntrySummary, PreviewContent};
 use fm_views::{Tokens, widgets};
 use gpui::{
-    Anchor, App, AppContext as _, ClipboardItem, Context, Entity, Focusable as _, IntoElement,
-    ParentElement as _, Render, ScrollStrategy, SharedString, Styled as _, Subscription, Task,
-    UniformListScrollHandle, Window, div, px,
+    Anchor, App, AppContext as _, ClipboardItem, Context, Entity, Focusable as _,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Point, Render, ScrollStrategy,
+    SharedString, Styled as _, Subscription, Task, UniformListScrollHandle, Window, div, px,
 };
 use gpui_component::button::ButtonVariant;
 use gpui_component::dialog::DialogButtonProps;
@@ -32,6 +32,37 @@ use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme as _, Edges, Theme, ThemeMode, WindowExt as _};
 
 use crate::layout::Viewport;
+
+use crate::actions::{
+    CloseTab, CopyItems, CutItems, DeleteItems, ExtendCursorDown, ExtendCursorUp, FocusAddressBar,
+    GoBack, GoForward, GoUp, MoveCursorDown, MoveCursorUp, NewTab, OpenItem, PasteItems, Refresh,
+    RenameItem, ReopenClosedTab, SelectAll, SetViewDetails, SetViewIcons, ToggleTheme,
+};
+
+/// 把「动作 → 视图方法」的绑定接到根元素上。
+///
+/// `on_action` 的监听器签名是 `Fn(&A, &mut Window, &mut App)`，拿不到
+/// `&mut Context<ShellView>`，因此统一走 `WeakEntity::update` 回到视图，
+/// 再由 `action` 执行（`action` 能拿到 `window`，供需要窗口的方法用）。
+///
+/// 用函数而不是宏：`action` 的闭包参数类型由 `impl Fn(...)` 的签名直接推断，
+/// 调用点无需逐个标注，也避开了 `macro_rules!` 的标识符卫生问题。
+fn bind_shortcut<A: gpui::Action>(
+    root: gpui::Div,
+    view: &gpui::WeakEntity<ShellView>,
+    action: impl Fn(&mut ShellView, &mut Window, &mut Context<ShellView>) + 'static,
+) -> gpui::Div {
+    let view = view.clone();
+    root.on_action(move |_: &A, window, cx: &mut App| {
+        let _ = view.update(cx, |this, cx| {
+            // 文本输入框聚焦时让位：文字编辑的按键优先于全局快捷键。
+            if this.editing_input() {
+                return;
+            }
+            action(this, window, cx);
+        });
+    })
+}
 
 /// 主窗口外壳。
 ///
@@ -58,6 +89,14 @@ pub struct ShellView {
     pub(crate) selection: Selection,
     /// 焦点项下标（设计稿的 `.is-cur`）：与「选中」分开，为后续键盘导航留位。
     pub(crate) cursor: Option<usize>,
+    /// 框选（橡皮筋）会话：左键按下未抬起时存在。
+    ///
+    /// 选中集的替换由 `update_rubber_band` 在鼠标滑过每一行时执行，抬起时由
+    /// `end_rubber_band` 清空。锚点**只记不选**——立即选中会破坏 Ctrl / Shift
+    /// 点击的语义（mousedown 先清掉多选，再被 click 的 toggle 覆盖）。
+    pub(crate) rubber_band: Option<RubberBand>,
+    /// 标签拖拽排序会话：左键按下未抬起时存在。
+    pub(crate) tab_drag: Option<TabDrag>,
     /// 搜索关键词。
     pub(crate) query: String,
     /// 右侧预览面板是否展开（宽屏下的持久化开关）。
@@ -184,6 +223,8 @@ impl ShellView {
             error: None,
             selection: Selection::default(),
             cursor: None,
+            rubber_band: None,
+            tab_drag: None,
             query: String::new(),
             preview_open,
             sidebar_overlay: false,
@@ -340,6 +381,33 @@ pub(crate) struct RenameState {
     /// 但回车与失焦都没反应」——与地址栏那个坑同源。
     _subscription: Subscription,
 }
+
+/// 一次框选（橡皮筋）会话。
+pub(crate) struct RubberBand {
+    /// 锚点下标（`visible()` 坐标）。
+    pub(crate) anchor: usize,
+    /// 按下时的窗口坐标，用来算「是否真的拖动了」。
+    start: Point<Pixels>,
+    /// 是否已超过拖动阈值。超过后才真正开始替换选中——否则一次普通的单击
+    /// （鼠标几乎不动）也会因为微小的抖动被当成框选，破坏 Ctrl / Shift 点击的语义。
+    active: bool,
+}
+
+/// 框选的拖动阈值（px）。低于它的一律按单击处理。
+const RUBBER_BAND_THRESHOLD: f32 = 4.0;
+
+/// 一次标签拖拽排序会话。
+pub(crate) struct TabDrag {
+    /// 被拖拽的标签。
+    pub(crate) tab: TabId,
+    /// 按下时的窗口坐标，用来算「是否真的拖动了」。
+    start: Point<Pixels>,
+    /// 是否已超过拖动阈值。超过后才真正开始重排——否则一次单击也会被当成拖拽。
+    active: bool,
+}
+
+/// 标签拖拽的阈值（px）。低于它的一律按单击处理。
+const TAB_DRAG_THRESHOLD: f32 = 4.0;
 
 /// 写操作：新建、复制、剪切、粘贴、重命名、移入回收站。
 ///
@@ -1212,6 +1280,27 @@ impl ShellView {
         self.reload(cx);
     }
 
+    /// 恢复最近关闭的标签并切过去（Ctrl+Shift+T）。栈空时不做事。
+    pub(crate) fn reopen_closed_tab(&mut self, cx: &mut Context<Self>) {
+        if self.tabs.reopen_closed().is_some() {
+            self.reload(cx);
+        }
+    }
+
+    /// 关闭除 `id`（缺省为当前标签）之外的所有标签。
+    pub(crate) fn close_others(&mut self, id: Option<TabId>, cx: &mut Context<Self>) {
+        let id = id.unwrap_or_else(|| self.tabs.active().id());
+        self.tabs.close_others(id);
+        self.reload(cx);
+    }
+
+    /// 关闭 `id`（缺省为当前标签）右侧的所有标签。
+    pub(crate) fn close_right(&mut self, id: Option<TabId>, cx: &mut Context<Self>) {
+        let id = id.unwrap_or_else(|| self.tabs.active().id());
+        self.tabs.close_right(id);
+        self.reload(cx);
+    }
+
     /// 切换标签。已经处于激活状态时不做任何事，避免无谓的重扫。
     pub(crate) fn select_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
         if self.tabs.active().id() == id {
@@ -1226,6 +1315,62 @@ impl ShellView {
     pub(crate) fn navigate_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.tabs.active_state_mut().navigate_to(path);
         self.reload(cx);
+    }
+
+    /// 是否有文本输入框正在接收键盘（地址栏 / 搜索框 / 内联重命名）。
+    ///
+    /// 全局快捷键此时必须**让位**：否则「在搜索框里打字时按 Ctrl+C」会一边
+    /// 复制文本、一边又复制文件，F2 / Delete / 方向键更是会直接误伤。
+    /// 与设计稿 keydown 里的 `if(inField)return` 同义。
+    fn editing_input(&self) -> bool {
+        self.address_editing || self.search_editing || self.renaming.is_some()
+    }
+
+    /// 键盘方向键移动焦点项并同步选中（设计稿的 ArrowUp / ArrowDown）。
+    ///
+    /// `extend` 对应 Shift 区间扩选。无焦点项时从列表两端进入：向下从首项、
+    /// 向上从末项（设计稿 `i<0?0:items.length-1`）。移动后把该项滚进视野。
+    pub(crate) fn move_cursor(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
+        let len = self.visible().len();
+        if len == 0 {
+            return;
+        }
+        let next = match self.cursor {
+            None => {
+                if delta > 0 {
+                    0
+                } else {
+                    len - 1
+                }
+            }
+            Some(index) => {
+                let target = index as isize + delta;
+                target.clamp(0, len as isize - 1) as usize
+            }
+        };
+        if extend {
+            self.selection.select_range(next, len);
+        } else {
+            self.selection.select_single(next);
+        }
+        self.cursor = Some(next);
+        self.scroll_into_view(next);
+        cx.notify();
+    }
+
+    /// 打开焦点项（Enter）：目录进入，文件与回收站条目不做任何事（与双击同规则）。
+    pub(crate) fn open_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(index) = self.cursor.or_else(|| self.selection.single()) else {
+            return;
+        };
+        let Some(entry) = self.visible().get(index).cloned() else {
+            return;
+        };
+        if !entry.is_dir() || self.in_recycle_bin() {
+            return;
+        }
+        let path = entry.path.as_ref().clone();
+        self.navigate_to(path, cx);
     }
 
     /// 在当前标签内进入「此电脑」（驱动器总览）。
@@ -1411,6 +1556,88 @@ impl ShellView {
         }
         self.cursor = Some(index);
         cx.notify();
+    }
+
+    /// 框选开始：只记锚点与起始坐标，不改选中（选中交给 `on_click` 或 `update_rubber_band`）。
+    pub(crate) fn begin_rubber_band(&mut self, index: usize, position: Point<Pixels>) {
+        self.rubber_band = Some(RubberBand {
+            anchor: index,
+            start: position,
+            active: false,
+        });
+    }
+
+    /// 框选进行中：超过拖动阈值后，把选中集替换为「锚点..当前」的区间。
+    pub(crate) fn update_rubber_band(
+        &mut self,
+        index: usize,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(rubber) = self.rubber_band.as_mut() else {
+            return;
+        };
+        if !rubber.active {
+            let dx = (position.x - rubber.start.x).abs();
+            let dy = (position.y - rubber.start.y).abs();
+            // 还没拖够阈值：当作单击，不动选中。
+            if dx < px(RUBBER_BAND_THRESHOLD) && dy < px(RUBBER_BAND_THRESHOLD) {
+                return;
+            }
+            rubber.active = true;
+        }
+        self.selection.select_span(rubber.anchor, index);
+        self.cursor = Some(index);
+        cx.notify();
+    }
+
+    /// 框选结束：清空会话。左键抬起时调用（含在容器外抬起）。
+    pub(crate) fn end_rubber_band(&mut self) {
+        self.rubber_band = None;
+    }
+
+    /// 标签拖拽开始：只记被拖的标签与起始坐标。
+    pub(crate) fn begin_tab_drag(&mut self, id: TabId, position: Point<Pixels>) {
+        self.tab_drag = Some(TabDrag {
+            tab: id,
+            start: position,
+            active: false,
+        });
+    }
+
+    /// 拖拽经过另一个标签：超过阈值后，把被拖的标签移到它的位置。
+    pub(crate) fn drag_tab_over(
+        &mut self,
+        hovered: TabId,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.tab_drag.as_mut() else {
+            return;
+        };
+        if drag.tab == hovered {
+            return;
+        }
+        if !drag.active {
+            let dx = (position.x - drag.start.x).abs();
+            let dy = (position.y - drag.start.y).abs();
+            if dx < px(TAB_DRAG_THRESHOLD) && dy < px(TAB_DRAG_THRESHOLD) {
+                return;
+            }
+            drag.active = true;
+        }
+        let from = drag.tab;
+        // `drag` 的借用到此为止（NLL 会在最后一次使用后结束它），
+        // 下面才能借用 `self.tabs` 去重排。
+        if let Some(to) = self.tabs.index_of(hovered) {
+            self.tabs.move_tab(from, to);
+        }
+        cx.notify();
+    }
+
+    /// 标签拖拽结束。
+    pub(crate) fn end_tab_drag(&mut self) {
+        self.tab_drag = None;
     }
 
     /// 表头勾选框：全选 / 全不选。
@@ -1621,6 +1848,79 @@ pub(crate) fn truncate(text: &str, max_chars: usize) -> String {
     result
 }
 
+impl ShellView {
+    /// 给根元素挂上全部全局快捷键。
+    ///
+    /// 挂在根元素而不是窗口级：GPUI 无焦点时会把动作派发到根节点
+    /// （`focus_node_id_in_rendered_frame` 用 `root_node_id` 兜底），
+    /// 因此无论焦点在哪都能命中；输入框自己的按键（复制文本、回车提交）在更深
+    /// 的节点就被消费，不会到这里。`editing_input` 的守卫再兜住剩下漏进来的按键。
+    fn apply_shortcuts(&self, root: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        let view = cx.entity().downgrade();
+        let mut root = root;
+
+        root = bind_shortcut::<NewTab>(root, &view, |this, _w, cx| this.open_tab(cx));
+        root = bind_shortcut::<CloseTab>(root, &view, |this, _w, cx| {
+            let id = this.tabs.active().id();
+            this.close_tab(id, cx);
+        });
+        root = bind_shortcut::<ReopenClosedTab>(root, &view, |this, _w, cx| {
+            this.reopen_closed_tab(cx);
+        });
+        root = bind_shortcut::<GoBack>(root, &view, |this, _w, cx| {
+            this.go_back(cx);
+        });
+        root = bind_shortcut::<GoForward>(root, &view, |this, _w, cx| {
+            this.go_forward(cx);
+        });
+        root = bind_shortcut::<GoUp>(root, &view, |this, _w, cx| {
+            this.go_up(cx);
+        });
+        root = bind_shortcut::<Refresh>(root, &view, |this, _w, cx| this.reload(cx));
+        root = bind_shortcut::<FocusAddressBar>(root, &view, |this, w, cx| {
+            this.begin_address_edit(w, cx);
+        });
+        root = bind_shortcut::<SetViewDetails>(root, &view, |this, _w, cx| {
+            this.set_view_mode(ViewMode::Details, cx);
+        });
+        root = bind_shortcut::<SetViewIcons>(root, &view, |this, _w, cx| {
+            this.set_view_mode(ViewMode::Icons, cx);
+        });
+        root = bind_shortcut::<ToggleTheme>(root, &view, |this, w, cx| this.toggle_theme(w, cx));
+        root = bind_shortcut::<SelectAll>(root, &view, |this, _w, cx| {
+            this.toggle_select_all(true, cx);
+        });
+        root = bind_shortcut::<CopyItems>(root, &view, |this, w, cx| {
+            this.clip_selection(ClipboardMode::Copy, w, cx);
+        });
+        root = bind_shortcut::<CutItems>(root, &view, |this, w, cx| {
+            this.clip_selection(ClipboardMode::Cut, w, cx);
+        });
+        root = bind_shortcut::<PasteItems>(root, &view, |this, w, cx| this.paste(w, cx));
+        root = bind_shortcut::<RenameItem>(root, &view, |this, w, cx| {
+            this.rename_selected(w, cx);
+        });
+        root = bind_shortcut::<DeleteItems>(root, &view, |this, w, cx| {
+            this.delete_selection(w, cx);
+        });
+        root = bind_shortcut::<OpenItem>(root, &view, |this, _w, cx| this.open_selected(cx));
+        root = bind_shortcut::<MoveCursorUp>(root, &view, |this, _w, cx| {
+            this.move_cursor(-1, false, cx);
+        });
+        root = bind_shortcut::<MoveCursorDown>(root, &view, |this, _w, cx| {
+            this.move_cursor(1, false, cx);
+        });
+        root = bind_shortcut::<ExtendCursorUp>(root, &view, |this, _w, cx| {
+            this.move_cursor(-1, true, cx);
+        });
+        root = bind_shortcut::<ExtendCursorDown>(root, &view, |this, _w, cx| {
+            this.move_cursor(1, true, cx);
+        });
+
+        root
+    }
+}
+
 impl Render for ShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 令牌每帧刷新一次：主题、密度、缩放三者的变化都会在这里被吸收，
@@ -1668,7 +1968,7 @@ impl Render for ShellView {
             body = body.child(scrim);
         }
 
-        div()
+        let root = div()
             .size_full()
             .flex()
             .flex_col()
@@ -1694,7 +1994,9 @@ impl Render for ShellView {
             // 放在最后 = 画在最上层；两层自身都是 `absolute().inset_0()`，
             // 不参与上面的 flex 布局，因此不影响任何区块的尺寸。
             .children(gpui_component::Root::render_notification_layer(window, cx))
-            .children(gpui_component::Root::render_dialog_layer(window, cx))
+            .children(gpui_component::Root::render_dialog_layer(window, cx));
+
+        self.apply_shortcuts(root, cx)
     }
 }
 

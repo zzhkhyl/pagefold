@@ -9,8 +9,9 @@
 //! 悬停浅灰底、选中强调色浅底加描边，与详情视图共用同一套语义。
 
 use gpui::{
-    AnyElement, ClickEvent, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, px, prelude::FluentBuilder as _,
+    AnyElement, ClickEvent, Entity, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px,
+    prelude::FluentBuilder as _,
 };
 use gpui_component::input::InputState;
 use gpui_component::{Icon, Sizable as _};
@@ -18,7 +19,7 @@ use gpui_component::{Icon, Sizable as _};
 use fm_core::Entry;
 
 use crate::tokens::{Tokens, metrics};
-use crate::{EntryMenuBuilder, OpenHandler, RightPressHandler, SelectHandler};
+use crate::{DragSelectHandler, EntryMenuBuilder, OpenHandler, RightPressHandler, SelectHandler};
 
 /// 单元格内名称区的高度：两行 12px / 1.35 行高。
 ///
@@ -100,6 +101,8 @@ pub fn row(
     select: &SelectHandler,
     menu: &EntryMenuBuilder,
     right_press: &RightPressHandler,
+    drag_start: &DragSelectHandler,
+    drag_move: &DragSelectHandler,
 ) -> AnyElement {
     let height = cell_height(cell_width);
 
@@ -125,6 +128,8 @@ pub fn row(
                 select,
                 menu,
                 right_press,
+                drag_start,
+                drag_move,
             ),
             // 末行不足时补等高空占位：行高不一致会让 uniform_list 的滚动计算失准。
             None => div()
@@ -165,6 +170,8 @@ fn cell(
     select: &SelectHandler,
     menu: &EntryMenuBuilder,
     right_press: &RightPressHandler,
+    drag_start: &DragSelectHandler,
+    drag_move: &DragSelectHandler,
 ) -> AnyElement {
     let icon = crate::widgets::entry_icon(entry, extension);
     let thumb_size = (cell_width - metrics::CELL_PADDING * 2.0).max(16.0);
@@ -176,6 +183,8 @@ fn cell(
     let opened = std::rc::Rc::clone(open);
     let target = entry.clone();
     let selecting = std::rc::Rc::clone(select);
+    let drag_start = std::rc::Rc::clone(drag_start);
+    let drag_move = std::rc::Rc::clone(drag_move);
     let selected_hover = crate::tokens::with_alpha(tokens.fg, 0.1);
 
     let cell = div()
@@ -204,6 +213,13 @@ fn cell(
         })
         .when(current, |element| {
             element.border_color(accent_line)
+        })
+        // 框选：与详情视图同理——左键按下记锚点，滑过每个单元格按区间替换选中。
+        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+            (*drag_start)(index, event.position, window, cx);
+        })
+        .on_mouse_move(move |event, window, cx| {
+            (*drag_move)(index, event.position, window, cx);
         })
         .when(editing.is_none(), |element| element.cursor_pointer())
         // 编辑态下单元格不再响应点击：点击会**冒泡**到单元格上，

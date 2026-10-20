@@ -50,7 +50,17 @@ pub struct TabsState {
     ///
     /// 存 `Location` 而不是 `PathBuf`：默认落点也可能是一个虚拟位置（例如「此电脑」）。
     default_location: Location,
+    /// 已关闭标签的栈（最近关闭的在最后），供 Ctrl+Shift+T 恢复。
+    ///
+    /// 有界（见 [`MAX_CLOSED_TABS`]）：否则长时间运行的进程会为每个关闭过的
+    /// 标签留一份状态，纯属浪费内存。
+    closed: Vec<Tab>,
 }
+
+/// 「重新打开关闭的标签页」最多能回退多少步。
+///
+/// 16 是对齐浏览器标签恢复的惯例量级；超过这个深度时最早关闭的会被挤出栈。
+const MAX_CLOSED_TABS: usize = 16;
 
 impl TabsState {
     /// 创建只含一个标签的集合。
@@ -64,6 +74,7 @@ impl TabsState {
             active: 0,
             next_id: 1,
             default_location,
+            closed: Vec::new(),
         }
     }
 
@@ -151,6 +162,10 @@ impl TabsState {
             return self.active().id();
         };
 
+        // 先记下被关的标签，供 Ctrl+Shift+T 恢复。连「关闭最后一个标签触发的
+        // 重置」也记：那一刻被替换掉的标签同样是「用户关掉的东西」。
+        self.record_closed(self.tabs[index].clone());
+
         if self.tabs.len() == 1 {
             let fresh = TabId(self.next_id);
             self.next_id += 1;
@@ -177,6 +192,81 @@ impl TabsState {
     pub fn close_active(&mut self) -> TabId {
         let id = self.active().id();
         self.close(id)
+    }
+
+    /// 关闭除 `id` 之外的所有标签，`id` 成为唯一剩余并保持选中。
+    ///
+    /// `id` 不存在时不做任何改动。
+    pub fn close_others(&mut self, id: TabId) {
+        let Some(keep) = self.index_of(id) else {
+            return;
+        };
+        // 从右往左删、跳过要保留的那一个：这样删除不会让未处理的下标前移错位。
+        for index in (0..self.tabs.len()).rev() {
+            if index == keep {
+                continue;
+            }
+            let removed = self.tabs.remove(index);
+            self.record_closed(removed);
+        }
+        // 删除后只剩保留的那一个，它必然落在下标 0。
+        self.active = 0;
+    }
+
+    /// 把 `id` 标签移动到下标 `to` 的位置（拖拽排序）。
+    ///
+    /// 激活标签的 id 在移动前记下、移动后重查，因此无论被移的是不是激活标签，
+    /// 激活状态都跟着它走、保持正确。
+    pub fn move_tab(&mut self, id: TabId, to: usize) {
+        let Some(from) = self.index_of(id) else {
+            return;
+        };
+        let to = to.min(self.tabs.len() - 1);
+        if from == to {
+            return;
+        }
+        let active_id = self.active().id();
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active = self.index_of(active_id).expect("激活标签不应在拖拽中消失");
+    }
+
+    /// 关闭 `id` 右侧的所有标签，`id` 及其左侧保持不变。
+    ///
+    /// 原激活标签若落在被删的右侧区间，则落到 `id` 上（此刻它是新的最右端）。
+    pub fn close_right(&mut self, id: TabId) {
+        let Some(index) = self.index_of(id) else {
+            return;
+        };
+        // 反复删掉最右端，直到 `id` 成为最右端为止。
+        while self.tabs.len() > index + 1 {
+            let last = self.tabs.len() - 1;
+            let removed = self.tabs.remove(last);
+            self.record_closed(removed);
+        }
+        if self.active > index {
+            self.active = index;
+        }
+    }
+
+    /// 恢复最近关闭的标签并选中它；栈空时返回 `None`。
+    ///
+    /// 复用标签原来的 id：id 一旦分配就永不复用（`next_id` 只增不减），
+    /// 此刻它不在 `tabs` 里，重新放回是安全的。
+    pub fn reopen_closed(&mut self) -> Option<TabId> {
+        let tab = self.closed.pop()?;
+        let id = tab.id();
+        self.tabs.push(tab);
+        self.active = self.tabs.len() - 1;
+        Some(id)
+    }
+
+    /// 记录一个刚被关闭的标签，并把栈裁剪到 [`MAX_CLOSED_TABS`]。
+    fn record_closed(&mut self, tab: Tab) {
+        self.closed.push(tab);
+        if self.closed.len() > MAX_CLOSED_TABS {
+            self.closed.remove(0);
+        }
     }
 }
 
@@ -296,5 +386,75 @@ mod tests {
         let before = tabs.active().id();
         assert_eq!(tabs.close(TabId(9999)), before);
         assert_eq!(tabs.len(), 1);
+    }
+
+    #[test]
+    fn closed_tabs_reopen_in_reverse_order() {
+        let mut tabs = TabsState::new(r"C:\home");
+        let a = tabs.open_at(r"C:\a");
+        let b = tabs.open_at(r"C:\b");
+        tabs.close(b);
+        tabs.close(a);
+
+        // 后关的先回来。
+        let reopened = tabs.reopen_closed().expect("应当能恢复 a");
+        assert_eq!(reopened, a);
+        assert_eq!(tabs.active().id(), a);
+        assert_eq!(tabs.len(), 2);
+
+        let reopened = tabs.reopen_closed().expect("应当能恢复 b");
+        assert_eq!(reopened, b);
+        assert_eq!(tabs.len(), 3);
+    }
+
+    #[test]
+    fn close_others_keeps_only_the_given_tab() {
+        let mut tabs = TabsState::new(r"C:\home");
+        let a = tabs.open_at(r"C:\a");
+        tabs.open_at(r"C:\b");
+
+        tabs.close_others(a);
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs.active().id(), a);
+    }
+
+    #[test]
+    fn close_right_removes_only_tabs_to_the_right() {
+        let mut tabs = TabsState::new(r"C:\home");
+        let home = tabs.active().id();
+        let a = tabs.open_at(r"C:\a");
+        let b = tabs.open_at(r"C:\b");
+        // 顺序：home, a, b；激活标签是 b。
+
+        tabs.close_right(a);
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs.index_of(home), Some(0));
+        assert_eq!(tabs.index_of(a), Some(1));
+        assert_eq!(tabs.index_of(b), None, "b 在 a 右侧，应被关闭");
+        assert_eq!(tabs.active().id(), a, "激活标签落到 a 上");
+    }
+
+    #[test]
+    fn move_tab_reorders_and_keeps_active() {
+        let mut tabs = TabsState::new(r"C:\home");
+        let a = tabs.open_at(r"C:\a");
+        let b = tabs.open_at(r"C:\b");
+        // 顺序：home, a, b；active = b（下标 2）。
+
+        tabs.move_tab(a, 0);
+        assert_eq!(tabs.index_of(a), Some(0));
+        assert_eq!(tabs.index_of(b), Some(2));
+        assert_eq!(tabs.active().id(), b, "移动非激活标签不应改变激活");
+    }
+
+    #[test]
+    fn move_active_tab_keeps_it_active() {
+        let mut tabs = TabsState::new(r"C:\home");
+        tabs.open_at(r"C:\a");
+        let b = tabs.open_at(r"C:\b");
+        // 把激活的 b（下标 2）移到最前。
+        tabs.move_tab(b, 0);
+        assert_eq!(tabs.index_of(b), Some(0));
+        assert_eq!(tabs.active().id(), b);
     }
 }

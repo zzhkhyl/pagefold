@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use fm_core::{Entry, SortDirection, SortKey, format_size};
 use gpui::{
-    AnyElement, App, ClickEvent, Entity, Hsla, InteractiveElement as _, IntoElement,
+    AnyElement, App, ClickEvent, Entity, Hsla, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
     prelude::FluentBuilder as _,
 };
@@ -22,7 +22,7 @@ use gpui_kit_assets::IconName;
 
 use crate::tokens::{Tokens, breakpoints, metrics};
 use crate::widgets;
-use crate::{EntryMenuBuilder, OpenHandler, RightPressHandler, SelectHandler, SelectMode};
+use crate::{DragSelectHandler, EntryMenuBuilder, OpenHandler, RightPressHandler, SelectHandler, SelectMode};
 
 /// 点击列名排序的回调。
 ///
@@ -209,6 +209,8 @@ pub fn row(
     select: &SelectHandler,
     menu: &EntryMenuBuilder,
     right_press: &RightPressHandler,
+    drag_start: &DragSelectHandler,
+    drag_move: &DragSelectHandler,
 ) -> AnyElement {
     // 目录的「大小」没有意义（系统给出的目录 metadata.len() 与内容无关），显示为破折号。
     let size = if entry.is_dir() {
@@ -228,6 +230,8 @@ pub fn row(
     let target = entry.clone();
     let row_select = Rc::clone(select);
     let checkbox_select = Rc::clone(select);
+    let drag_start = Rc::clone(drag_start);
+    let drag_move = Rc::clone(drag_move);
 
     // 勾选框在未选中且未悬停时隐藏（设计稿的 `.row:hover .cbxwrap input`）。
     // 每个行是独立的 group，避免悬停一行时所有行的勾选框一起冒出来。
@@ -308,6 +312,15 @@ pub fn row(
         .when(selected, |element| element.bg(accent_soft))
         .when(current, |element| {
             element.border_1().border_color(accent_line)
+        })
+        // 框选：左键按下记锚点，滑过每一行按「锚点..当前」替换选中。
+        // 锚点只记不选（见 `ShellView::begin_rubber_band`），因此不与下方的
+        // 单击 / 双击冲突——单击仍走 on_click，双击仍走打开。
+        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+            (*drag_start)(index, event.position, window, cx);
+        })
+        .on_mouse_move(move |event, window, cx| {
+            (*drag_move)(index, event.position, window, cx);
         })
         // 编辑态下整行不再响应点击：输入框就在行内，而点击会**冒泡**到行上，
         // 那会顺带改变选中集（把用户正在改的那一项取消选中），

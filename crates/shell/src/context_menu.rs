@@ -13,15 +13,13 @@
 //! 配角（菜单底面、悬停底色、圆角）来自组件库主题，而
 //! [`crate::shell::apply_component_theme`] 已把它们同步到设计令牌，故深浅色自动跟随。
 //!
-//! # 与设计稿的两处刻意差异
+//! # 与设计稿的刻意差异
 //!
-//! 设计稿的 `.ctx-item` 还定义了两样东西，本版本没有照搬：
+//! 设计稿的 `.ctx-item` 定义了两样东西：
 //!
-//! - **快捷键提示**（`kbd`：Ctrl+C / F2 / Delete / F5 / Ctrl+V）。
-//!   `crates/app/src/actions.rs` 目前是空壳，全局键位一个都没注册
-//!   （README「已知缺口」也记着「目前所有操作都需要鼠标」）。照搬这些提示
-//!   等于向用户承诺一组按下去毫无反应的快捷键，比不显示更糟。
-//!   待键位接入后，把 hint 加回 [`MenuItemSpec`] 即可。
+//! - **快捷键提示**（`kbd`：Ctrl+C / F2 / Delete / F5 / Ctrl+V）——已照搬，
+//!   但不是手写字符串，而是给 [`PopupMenuItem`] 设置 `action`，让组件库
+//!   从当前键位自动解析出提示（见 [`MenuAction::shortcut`]）。键位改一处即可。
 //! - **危险项配色**（`.is-danger` 的红色）。组件库的菜单项渲染没有危险态变体，
 //!   而为了这一项改成自绘会连带丢掉「图标列对齐、勾选态、禁用态」等现成能力，
 //!   不划算。风险的提示改由**确认对话框**承担：点「移到回收站」不会立刻删，
@@ -35,7 +33,7 @@ use std::rc::Rc;
 use fm_core::{Entry, EntryKind, SortKey, ViewMode};
 use fm_services::clipboard::ClipboardMode;
 use fm_services::ops::NewItem;
-use gpui::{App, ClickEvent, Context, WeakEntity, Window};
+use gpui::{Action, App, ClickEvent, Context, WeakEntity, Window};
 use gpui_component::Icon;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit_assets::IconName;
@@ -76,6 +74,30 @@ pub(crate) enum MenuAction {
     /// 留一个显式的「没有动作」变体，而不是借一个真实动作当占位：
     /// 借来的动作会在单测与将来的重构里被当成真的，那是最难查的一类错。
     NotImplemented,
+}
+
+impl MenuAction {
+    /// 该菜单项对应的全局快捷键 [`Action`]。
+    ///
+    /// 返回 `Some` 时，`build_menu` 会把它设到 [`PopupMenuItem::action`]，
+    /// 组件库便会在菜单项右侧自动渲染当前绑定的键位提示（`Kbd`）——键位改了
+    /// 提示跟着变，不需要手写两份字符串。返回 `None` 表示没有快捷键
+    /// （新建、排序、切换视图这类鼠标动作）。
+    fn shortcut(&self) -> Option<Box<dyn Action>> {
+        use crate::actions::{CopyItems, CutItems, DeleteItems, OpenItem, PasteItems, Refresh, RenameItem};
+
+        let action: Box<dyn Action> = match self {
+            MenuAction::Open => Box::new(OpenItem),
+            MenuAction::Refresh => Box::new(Refresh),
+            MenuAction::Clip(ClipboardMode::Copy) => Box::new(CopyItems),
+            MenuAction::Clip(ClipboardMode::Cut) => Box::new(CutItems),
+            MenuAction::Paste => Box::new(PasteItems),
+            MenuAction::Rename => Box::new(RenameItem),
+            MenuAction::DeleteToRecycleBin => Box::new(DeleteItems),
+            _ => return None,
+        };
+        Some(action)
+    }
 }
 
 /// 一个菜单节点。
@@ -348,6 +370,10 @@ fn build_menu(
                     .icon(Icon::new(spec.icon))
                     .disabled(spec.disabled)
                     .checked(spec.checked);
+                // 有全局快捷键的项，让组件库在右侧渲染键位提示（Ctrl+C / F2 …）。
+                if let Some(action) = spec.action.shortcut() {
+                    item = item.action(action);
+                }
                 // 禁用项不挂回调：组件库虽然也会拦住禁用项的点击，
                 // 但少挂一个闭包就不会有「被绕过的回调」这种可能性。
                 if !spec.disabled {
