@@ -12,7 +12,7 @@ use std::time::Duration;
 use fm_core::naming;
 use fm_core::{
     Column, Density, Entry, EntryKind, IconZoom, Location, Selection, SortKey, TabId, TabsState,
-    ViewMode,
+    UndoAction, UndoStack, ViewMode,
 };
 use fm_platform::{Drive, OpReport};
 use fm_services::clipboard::{Clipboard, ClipboardMode, PastePlan};
@@ -20,6 +20,7 @@ use fm_services::config::Config;
 use fm_services::directory::{DEFAULT_BATCH, DirectoryService, ScanBatch, SortSpec};
 use fm_services::ops::{self, NewItem, OpResult};
 use fm_services::session::SessionSnapshot;
+use fm_services::watch::DirectoryWatcher;
 use fm_views::preview_panel::{EntrySummary, PreviewContent};
 use fm_views::{Tokens, widgets};
 use gpui::{
@@ -36,10 +37,10 @@ use gpui_component::{ActiveTheme as _, Edges, Theme, ThemeMode, WindowExt as _};
 use crate::layout::Viewport;
 
 use crate::actions::{
-    CloseTab, CopyItems, CutItems, DeleteItems, ExtendCursorDown, ExtendCursorUp, FocusAddressBar,
-    GoBack, GoForward, GoUp, MoveCursorDown, MoveCursorUp, NewTab, OpenHelp, OpenItem, OpenSettings,
-    PasteItems, Refresh, RenameItem, ReopenClosedTab, SelectAll, SetViewDetails, SetViewIcons,
-    ToggleTheme,
+    CloseTab, CopyItems, CutItems, DeleteItems, DeletePermanently, ExtendCursorDown,
+    ExtendCursorUp, FocusAddressBar, GoBack, GoForward, GoUp, MoveCursorDown, MoveCursorUp, NewTab,
+    OpenHelp, OpenItem, OpenSettings, PasteItems, Refresh, RenameItem, ReopenClosedTab, SelectAll,
+    SetViewDetails, SetViewIcons, ToggleTheme, Undo,
 };
 
 /// 把「动作 → 视图方法」的绑定接到根元素上。
@@ -106,6 +107,9 @@ pub struct ShellView {
     /// `config.detail_columns`——因此拖动期间的重绘读到的永远是最新值，
     /// 松开后保存的也正是屏幕上那一条。
     pub(crate) column_drag: Option<ColumnDrag>,
+    /// 撤销栈。**不持久化**：它是本次会话内的操作记录，
+    /// 跨重启复活一个「可撤销的粘贴」没有对应的磁盘状态。
+    pub(crate) undo: UndoStack,
     /// 搜索关键词。
     pub(crate) query: String,
     /// 右侧预览面板是否展开（宽屏下的持久化开关）。
@@ -167,6 +171,20 @@ pub struct ShellView {
     /// **必须持有**：`Task` 一旦被 drop 就会取消，若只把它丢掉，
     /// 扫描会在发起后立刻中止，表现为「永远停在加载中」。
     scan_task: Option<Task<()>>,
+    /// 当前目录的变更监听。切换位置时由 `reload_inner` 替换或停止。
+    watcher: DirectoryWatcher,
+    /// 「环境轮询」任务：把外部世界的两种信号搬进 UI。
+    ///
+    /// 搬的是两件事：目录变更（自动刷新）与重复启动转发来的位置（IPC）。
+    /// 两者都是「低频、无回调可用」的事件，合成一个 400ms 的轮询比开两条通道简单。
+    /// **必须持有**：`Task` 被 drop 即取消，表现为「再也不自动刷新」。
+    ambient_task: Option<Task<()>>,
+    /// 上一次写盘的会话快照。
+    ///
+    /// 有了它，`persist_session` 就能跳过重复写：自动刷新会让 `reload` 每秒
+    /// 被调用若干次，而会话内容绝大多数时候没变——没有比较的话，
+    /// 一次解压就会在几十秒内往 `%APPDATA%` 写上百次同样的文件。
+    persisted_session: Option<SessionSnapshot>,
     /// 当前帧使用的设计令牌。每帧渲染前刷新一次，子渲染函数只读。
     pub(crate) tokens: Tokens,
     /// 详情表与网格各自的滚动句柄。
@@ -259,6 +277,10 @@ impl ShellView {
             rubber_band: None,
             tab_drag: None,
             column_drag: None,
+            watcher: DirectoryWatcher::new(),
+            ambient_task: None,
+            persisted_session: None,
+            undo: UndoStack::new(),
             query: String::new(),
             preview_open,
             sidebar_overlay: false,
@@ -294,13 +316,65 @@ impl ShellView {
         }
 
         this.reload(cx);
+        this.start_ambient_loop(cx);
         this
+    }
+
+    /// 启动「环境轮询」循环（见 [`ShellView::ambient_tick`]）。
+    ///
+    /// 用 `cx.spawn`（App 级）而不是 `spawn_in`：这个循环只改状态、
+    /// 不直接碰窗口，因此可以活到视图销毁为止。任务句柄必须留在
+    /// `ambient_task` 里——`Task` 一被丢弃就会被取消。
+    fn start_ambient_loop(&mut self, cx: &mut Context<Self>) {
+        const TICK_MS: u64 = 400;
+        self.ambient_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(TICK_MS))
+                    .await;
+                // 视图已销毁（窗口关闭）时 `update` 失败，循环随之结束。
+                if this
+                    .update(cx, |view, cx| view.ambient_tick(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
     }
 
     /// 刷新设计令牌。渲染的第一件事，保证子渲染函数读到的是当前主题的色值。
     pub(crate) fn refresh_tokens(&mut self, cx: &App) {
         self.tokens = build_tokens(&self.config, cx);
     }
+}
+
+/// 由粘贴计划与回执推出「每个源实际落在了哪里」，**只取成功的那些**。
+///
+/// 目标路径优先看 `report.renamed`（重名改过名的那部分），其余按
+/// 「目标目录 + 原文件名」推导。这与平台层 `resolve_target` 的规则一致，
+/// 但撤销栈不该为此去调用一次文件系统：此刻文件已经存在，路径是确定的。
+fn resolved_targets(
+    sources: &[PathBuf],
+    dest_dir: &Path,
+    report: &OpReport,
+) -> Vec<(PathBuf, PathBuf)> {
+    let failed: std::collections::HashSet<&std::path::Path> =
+        report.failed.iter().map(|(path, _)| path.as_path()).collect();
+
+    sources
+        .iter()
+        .filter(|source| !failed.contains(source.as_path()))
+        .map(|source| {
+            let target = report
+                .renamed
+                .iter()
+                .find(|(from, _)| from == source)
+                .map(|(_, target)| target.clone())
+                .unwrap_or_else(|| dest_dir.join(source.file_name().unwrap_or_default()));
+            (source.clone(), target)
+        })
+        .collect()
 }
 
 /// 从配置与组件库主题推导令牌。
@@ -576,6 +650,9 @@ impl ShellView {
         }
         self.service.begin_scan();
         self.loading = false;
+        // 刚建出来的这一条已经在列表里了，这次文件系统变更不用再触发一轮扫描；
+        // 更要紧的是：那轮扫描会清空列表，正好打断马上要打开的重命名输入框。
+        self.watcher.take_change();
 
         let sort = {
             let tab = self.tabs.active();
@@ -583,6 +660,11 @@ impl ShellView {
         };
         self.service
             .insert_sorted(&mut self.entries, entry, sort);
+
+        // 新建是「这一秒才存在」的东西：撤销它就是永久删除（不必进回收站）。
+        // 与随后的重命名分成两步记，因此 `Ctrl+Z` 会先撤名字、再撤创建——
+        // 这正是用户按下撤销两次时期待的顺序。
+        self.undo.push(UndoAction::Create { path: path.clone() });
 
         // 选中新建的这一条，并**先把它滚进视野**：它的位置由排序决定，
         // 完全可能落在视野之外——那样即便输入框已经拉起，用户也看不见。
@@ -706,10 +788,39 @@ impl ShellView {
                 // 剪贴板怎么收尾的规则（剪切只在**全部成功**时失效，
                 // 部分失败留着重试）在 `Clipboard::complete` 里，那条规则有单测。
                 self.clipboard.complete(plan, &report);
+                self.record_paste_undo(plan, &report);
                 self.notice_report(window, cx, verb, &report);
                 self.refresh_after_write(cx);
             }
             Err(reason) => window.push_notification(Notification::error(reason), cx),
+        }
+    }
+
+    /// 把一次粘贴记进撤销栈。
+    ///
+    /// 只记**成功**的条目：失败的那些本来就没动过，把它们也算进去会让撤销
+    /// 去删一个不存在的路径，报出一串「找不到文件」。
+    fn record_paste_undo(&mut self, plan: &PastePlan, report: &OpReport) {
+        match plan {
+            PastePlan::Copy { sources, dest_dir } => {
+                let created: Vec<PathBuf> = resolved_targets(sources, dest_dir, report)
+                    .into_iter()
+                    .map(|(_, target)| target)
+                    .collect();
+                if !created.is_empty() {
+                    self.undo.push(UndoAction::Copy { created });
+                }
+            }
+            PastePlan::Move { sources, dest_dir } => {
+                // 记成「(现在的位置, 原来的位置)」：撤销时按目标搬回各自的源目录。
+                let moved: Vec<(PathBuf, PathBuf)> = resolved_targets(sources, dest_dir, report)
+                    .into_iter()
+                    .map(|(source, target)| (target, source))
+                    .collect();
+                if !moved.is_empty() {
+                    self.undo.push(UndoAction::Move { moved });
+                }
+            }
         }
     }
 
@@ -785,13 +896,14 @@ impl ShellView {
 
         self.renaming = Some(RenameState {
             index,
-            path,
+            path: path.clone(),
             input: input.clone(),
             _subscription: subscription,
         });
 
         let handle = input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
+        tracing::debug!(path = %path.display(), "开始内联重命名");
         cx.notify();
     }
 
@@ -814,6 +926,11 @@ impl ShellView {
         // 两种情况都算「用户没改」：清空（设计稿的 `if(!name){renderList();return}`
         // 就是放弃），以及与原文相同。此时不该弹提示——他什么也没做，
         // 一句「已重命名为 X」只会让人以为是系统改的。
+        tracing::debug!(
+            typed = %typed,
+            old = %old_name,
+            "提交内联重命名"
+        );
         if trimmed.is_empty() || trimmed == old_name {
             // 用户什么也没改。但列表可能停在半截（新建时作废过一次在途扫描），
             // 那种情况下欠他一次刷新——否则他会一直看着一个不完整的目录，
@@ -828,6 +945,8 @@ impl ShellView {
 
         let fs = Arc::clone(self.service.file_system());
         let path = renaming.path.clone();
+        // 撤销需要知道「从哪改到哪」，而 `path` 会被移进后台任务。
+        let original_path = path.clone();
         // 输入的名字既要在后台线程里当参数，又要作为「拿不到文件名」时的兜底，
         // 因此先克隆一份留给收尾闭包。
         let fallback_name = typed.clone();
@@ -845,9 +964,17 @@ impl ShellView {
                         .map(|name| name.to_string_lossy().into_owned())
                         .unwrap_or(fallback_name);
                     // 文案与设计稿的 `toast('已重命名为「X」')` 一致。
-                    // 设计稿还带一个「撤销」按钮，那需要一套撤销栈，属后续增量。
-                    window
-                        .push_notification(Notification::success(format!("已重命名为「{name}」")), cx);
+                    // 设计稿还带一个「撤销」按钮：组件库的 Notification 没有
+                    // 动作按钮位，因此改成把键位写进文案——撤销入口是 `Ctrl+Z`，
+                    // 在这里告诉用户比让他去猜要可靠。
+                    window.push_notification(
+                        Notification::success(format!("已重命名为「{name}」（Ctrl+Z 撤销）")),
+                        cx,
+                    );
+                    view.undo.push(UndoAction::Rename {
+                        from: original_path,
+                        to: new_path.clone(),
+                    });
                     view.pending_select = Some(new_path);
                     view.refresh_after_write(cx);
                 }
@@ -940,6 +1067,127 @@ impl ShellView {
             });
         }));
     }
+
+    /// 永久删除选中项。**与「移到回收站」分开的确认框。**
+    ///
+    /// 两个动作的确认文案必须不同：一个是「可以从回收站拿回来」，
+    /// 另一个是「没有回头路」。共用一套文案，用户就没有机会在读字的时候
+    /// 意识到自己按的是哪一个。
+    pub(crate) fn delete_selection_forever(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let paths = self.selected_paths();
+        if paths.is_empty() || self.current_dir().is_none() {
+            return;
+        }
+
+        let subject = if paths.len() == 1 {
+            paths[0]
+                .file_name()
+                .map(|name| format!("「{}」", name.to_string_lossy()))
+                .unwrap_or_else(|| String::from("该项目"))
+        } else {
+            format!("这 {} 个项目", paths.len())
+        };
+
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _window, _cx| {
+            let view = view.clone();
+            let paths = paths.clone();
+
+            alert
+                .title("永久删除")
+                .description(format!(
+                    "永久删除{subject}？\n此操作无法撤销，也不会进入回收站。"
+                ))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("永久删除")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("取消")
+                        .show_cancel(true),
+                )
+                .on_ok(move |_event, window, cx| {
+                    let _ = view.update(cx, |view, cx| {
+                        view.start_forever_delete(paths.clone(), window, cx);
+                    });
+                    true
+                })
+        });
+    }
+
+    /// 真正发起永久删除（用户确认之后）。
+    fn start_forever_delete(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let fs = Arc::clone(self.service.file_system());
+
+        self.op_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { ops::delete_forever(&*fs, &paths) })
+                .await;
+
+            let _ = this.update_in(cx, move |view, window, cx| match result {
+                Ok(report) => {
+                    view.notice_report(window, cx, "删除", &report);
+                    view.refresh_after_write(cx);
+                }
+                Err(reason) => window.push_notification(Notification::error(reason), cx),
+            });
+        }));
+    }
+
+    /// 撤销上一步写操作（`Ctrl+Z`）。
+    ///
+    /// 撤销**不记录自己**：没有「重做」入口的情况下，把撤销压回栈里
+    /// 只会让 `Ctrl+Z` 在两个状态之间来回横跳。
+    pub(crate) fn undo_last(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(action) = self.undo.pop() else {
+            window.push_notification(Notification::warning("没有可撤销的操作"), cx);
+            return;
+        };
+
+        let label = action.describe();
+        let fs = Arc::clone(self.service.file_system());
+
+        self.op_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { ops::undo(&*fs, &action) })
+                .await;
+
+            let _ = this.update_in(cx, move |view, window, cx| match result {
+                Ok(report) if report.has_failures() => {
+                    // 部分失败：如实报出条数，而不是笼统地说「撤销失败」——
+                    // 用户需要知道哪些东西没还原回去。
+                    view.notice_report(window, cx, "撤销", &report);
+                    view.refresh_after_write(cx);
+                }
+                Ok(_) => {
+                    window.push_notification(
+                        Notification::success(format!("已撤销：{label}")),
+                        cx,
+                    );
+                    view.refresh_after_write(cx);
+                }
+                Err(reason) => {
+                    // 撤销失败是**要紧**的：用户以为回到原样了，实际没有。
+                    window.push_notification(
+                        Notification::error(format!("撤销失败：{reason}")),
+                        cx,
+                    );
+                    // 列表仍要刷新：可能已经改了一半（例如改名成功、搬回失败）。
+                    view.refresh_after_write(cx);
+                }
+            });
+        }));
+    }
 }
 
 /// 扫描与虚拟位置加载。
@@ -962,11 +1210,23 @@ impl ShellView {
     /// 例外是「新建」：那条路径会显式调 [`ShellView::clear_filter`]，
     /// 因为刚建出来的项目很可能不匹配当前关键词（设计稿也这么做）。
     pub(crate) fn refresh_after_write(&mut self, cx: &mut Context<Self>) {
+        // 这次变化是我们自己造成的，紧接着就会重扫；把监听的计数一并消费掉，
+        // 免得 400ms 后再触发一次完全重复的刷新（那次刷新还会打断正在进行的输入）。
+        self.watcher.take_change();
         self.reload_inner(cx, false);
     }
 
     /// 刷新的共同实现。`clear_filter` 决定要不要顺带清掉搜索条件。
     fn reload_inner(&mut self, cx: &mut Context<Self>, clear_filter: bool) {
+        // 内联重命名会话锚在「当前列表的第 N 项」上，而刷新会把整份列表换掉。
+        // 会话若留下来，它指向的条目已经不在原处：输入框不再渲染，
+        // 但 `editing_input()` 仍然是真——**所有全局快捷键都会被吞掉**，
+        // 表现为「按回车什么也没发生」。因此刷新一律结束该会话，
+        // 而不是把一个看不见的会话留在那里。
+        if self.renaming.is_some() {
+            tracing::debug!("列表刷新，结束进行中的内联重命名");
+            self.renaming = None;
+        }
         let tab = self.tabs.active();
         let location = tab.state().location().clone();
         let sort = SortSpec::new(tab.state().sort_key(), tab.state().sort_direction());
@@ -976,6 +1236,13 @@ impl ShellView {
         self.clear_selection_state();
         if clear_filter {
             self.clear_filter();
+        }
+
+        // 监听目标跟随当前位置：只有真实目录需要监听，虚拟位置直接停掉。
+        // 同一目录的刷新（F5、写操作后）不会重建线程——见 `DirectoryWatcher::watch`。
+        match &location {
+            Location::Directory(dir) => self.watcher.watch(dir),
+            _ => self.watcher.stop(),
         }
 
         match location {
@@ -1001,6 +1268,45 @@ impl ShellView {
         self.persist_session();
     }
 
+    /// 环境轮询：把外部世界的两种信号搬进界面。
+    ///
+    /// 1. **重复启动转发来的位置**（命名管道）：有就开一个新标签并跳过去。
+    /// 2. **当前目录的外部变更**：有就重新扫描一次。
+    ///
+    /// 两者都在 400ms 的节奏上检查（见 `ShellView::new` 里的循环）：
+    /// 目录监听的事件可能每秒来几千次，直接在事件线程里刷新会把渲染打满；
+    /// 400ms 把最坏情况压到每秒 2.5 次刷新，而人眼对「外部改动出现」的
+    /// 容忍度远大于 400ms。
+    pub(crate) fn ambient_tick(&mut self, cx: &mut Context<Self>) {
+        if let Some(raw) = fm_platform::take_pending_open() {
+            // 主实例可能正停在设置页，此时 IPC 请求要开一个新标签而不是替换当前页。
+            // `from_shell_argument` 不认识的东西会退回「此电脑」，因此这里不再额外校验。
+            let location = Location::from_shell_argument(&raw);
+            self.tabs.open_at(location);
+            self.reload(cx);
+            return;
+        }
+
+        // 正在内联重命名时**不自动刷新**。新建一个项目会立刻触发一次文件系统变更，
+        // 而重命名的输入框正是在这一刻打开的：400ms 后若来一次刷新，
+        // 列表会被清空重建，输入框随之消失，用户刚敲的字也一起没了。
+        // 变化计数不消费，等重命名结束后下一次轮询自然会补上这次刷新。
+        if self.renaming.is_some() {
+            return;
+        }
+
+        // 扫描在途时跳过：这一批结束后本来就会是最新内容，
+        // 此刻再插一次刷新只会把当前扫描取消掉。
+        if self.loading {
+            return;
+        }
+
+        if self.watcher.take_change() {
+            tracing::debug!("检测到目录变更，重新扫描当前目录");
+            self.reload(cx);
+        }
+    }
+
     /// 当前会话的快照。
     fn session_snapshot(&self) -> SessionSnapshot {
         SessionSnapshot::new(
@@ -1017,8 +1323,15 @@ impl ShellView {
     ///
     /// 同步写，与 `Config::save` 同一策略：快照是 KB 级 JSON，
     /// 而异步去抖会引入「关窗瞬间丢掉最后一次导航」这条只在特定时序下出现的边界。
-    fn persist_session(&self) {
-        self.session_snapshot().save();
+    ///
+    /// 与上次内容相同则跳过：自动刷新会频繁触发 `reload`，而会话本身几乎不变。
+    fn persist_session(&mut self) {
+        let snapshot = self.session_snapshot();
+        if self.persisted_session.as_ref() == Some(&snapshot) {
+            return;
+        }
+        snapshot.save();
+        self.persisted_session = Some(snapshot);
     }
 
     /// 扫描结束后，把 `pending_select` 指向的条目选中。
@@ -1139,12 +1452,27 @@ impl ShellView {
                     if !view.service.is_current(batch_generation) {
                         return;
                     }
+                    // 隐藏 / 系统文件在这里过滤，而不是在平台层 `scan` 里：
+                    // 「有没有隐藏属性」是平台事实，「要不要显示」是用户偏好。
+                    // 在载入时过滤还能保证 `entries` 与 `visible()` 共用同一份下标空间，
+                    // 选中集、框选与右键菜单都不必再关心隐藏文件是否混在里面。
+                    let mut entries = entries;
+                    if !view.config.show_hidden {
+                        entries.retain(|entry| !entry.hidden);
+                    }
                     view.entries.extend(entries);
                     // 已有筛选条件时才重算：无筛选时 `filtered` 恒为 None，
                     // 每批都克隆一次整表会白白吃掉大目录的性能预算。
                     view.refresh_filter();
                     if is_last {
                         view.loading = false;
+                        // 可见条目数与扫描产出可能不同（隐藏文件被过滤掉），
+                        // 这个数字是排查「文件明明在、列表里却没有」的第一手信息。
+                        tracing::debug!(
+                            visible = view.entries.len(),
+                            show_hidden = view.config.show_hidden,
+                            "目录载入完成"
+                        );
                         // 扫描跑完最后一批 = 列表已经完整。
                         view.list_incomplete = false;
                         // 写操作之后的重新选中只能等到这里：在此之前新条目
@@ -1309,6 +1637,7 @@ impl ShellView {
                     path: entry.path.as_ref().clone(),
                     is_dir: entry.is_dir(),
                     icon: widgets::entry_icon(entry, self.extension_label(entry).as_deref()),
+                    icon_id: entry.icon,
                 }))
             }
             _ => PreviewContent::Multiple {
@@ -1647,6 +1976,18 @@ impl ShellView {
         self.config.show_ext = !self.config.show_ext;
         self.config.save();
         cx.notify();
+    }
+
+    /// 切换「显示隐藏和系统文件」并重新加载。
+    ///
+    /// 必须重新加载而不能就地过滤：隐藏属性是在扫描时从文件系统读到的，
+    /// 而过滤发生在批次并入的那一步（见 `begin_load`）——重扫才能让
+    /// 「被过滤掉的条目」重新出现在 `entries` 里。20k 条目的重扫约 44ms，
+    /// 对一个用户偶尔才按一次的开关是可以接受的代价。
+    pub(crate) fn toggle_show_hidden(&mut self, cx: &mut Context<Self>) {
+        self.config.show_hidden = !self.config.show_hidden;
+        self.config.save();
+        self.reload(cx);
     }
 
     /// 把当前选中项滚回可视区（预览面板的「在列表中定位」）。
@@ -2117,7 +2458,38 @@ impl ShellView {
         root = bind_shortcut::<DeleteItems>(root, &view, |this, w, cx| {
             this.delete_selection(w, cx);
         });
-        root = bind_shortcut::<OpenItem>(root, &view, |this, _w, cx| this.open_selected(cx));
+        root = bind_shortcut::<DeletePermanently>(root, &view, |this, w, cx| {
+            this.delete_selection_forever(w, cx);
+        });
+        root = bind_shortcut::<Undo>(root, &view, |this, w, cx| {
+            this.undo_last(w, cx);
+        });
+        // 回车是唯一一个「要看上下文才知道该做什么」的键，因此单独接：
+        // - 内联重命名进行中 → 提交改名；
+        // - 地址栏 / 搜索框编辑中 → 让位（它们自己的输入框处理）；
+        // - 其余情况 → 打开选中项。
+        //
+        // 为什么不能走 `bind_shortcut`：它一进编辑态就整体让位，而重命名的提交
+        // 恰恰依赖回车。更重要的是**输入框自己的 `Enter` 绑定不一定生效**——
+        // `Enter` 在组件库里是一个带 `Input` 上下文的 keybinding，而根元素上的
+        // 无上下文绑定同样匹配 `enter`；一旦前者没被选中（实测在虚拟列表里的
+        // 内联输入框上就是如此），按键会直接落到根元素。此时若这里只是「让位」，
+        // 回车就成了一个彻底没人接的键：输入框看着能编辑，回车却毫无反应。
+        //
+        // `commit_rename` 是幂等的（先 `take`，空会话直接返回），
+        // 因此即使两条路径都到，也不会提交两次。
+        {
+            let view = view.clone();
+            root = root.on_action(move |_: &OpenItem, window, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    if this.renaming.is_some() {
+                        this.commit_rename(window, cx);
+                    } else if !this.editing_input() {
+                        this.open_selected(cx);
+                    }
+                });
+            });
+        }
         root = bind_shortcut::<MoveCursorUp>(root, &view, |this, _w, cx| {
             this.move_cursor(-1, false, cx);
         });

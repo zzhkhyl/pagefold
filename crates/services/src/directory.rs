@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use fm_core::{Entry, EntryKind, SortDirection, SortKey};
 use fm_platform::FileSystem;
 
-use crate::icon::{ExtInterner, extension_of};
+use crate::icon::{ExtInterner, IconCache, extension_of};
 
 /// 默认批次大小。
 ///
@@ -61,6 +61,9 @@ pub struct ScanBatch {
 pub struct DirectoryService {
     file_system: Arc<dyn FileSystem>,
     interner: ExtInterner,
+    /// 系统图标缓存（按扩展名）。与驻留表同样**进程内唯一**，
+    /// 这样同一扩展名只向 shell 要一次图标。
+    icons: IconCache,
     /// 当前有效的扫描代数。后台线程每批回传前比对此值。
     generation: AtomicU64,
 }
@@ -70,6 +73,7 @@ impl DirectoryService {
         Self {
             file_system,
             interner: ExtInterner::new(),
+            icons: IconCache::new(),
             generation: AtomicU64::new(0),
         }
     }
@@ -89,7 +93,7 @@ impl DirectoryService {
     /// 暴露出来是为了「新建之后立刻显示」这条路径：新条目不是扫描来的，
     /// 但它同样需要句柄——否则类型列与图标会与扫描出来的同类条目不一致。
     pub fn attach_extension(&self, entry: &mut Entry) {
-        attach_extension(&self.interner, entry);
+        attach_extras(&self.interner, &self.icons, entry);
     }
 
     /// 把一个新条目按给定排序插进列表的正确位置。
@@ -134,7 +138,7 @@ impl DirectoryService {
         self.file_system.scan(dir, batch, &mut |raw| {
             let mut raw = raw;
             for entry in &mut raw {
-                attach_extension(&self.interner, entry);
+                attach_extras(&self.interner, &self.icons, entry);
             }
             entries.append(&mut raw);
             // 返回 false 会让 FileSystem 立即停止后续 IO：
@@ -180,7 +184,7 @@ impl DirectoryService {
         // 扩展名句柄在这一层统一补：类型图标与「类型」列都依赖它，
         // 回收站条目也不例外（`$I` 里没有扩展名信息）。
         for entry in &mut entries {
-            attach_extension(&self.interner, entry);
+            attach_extras(&self.interner, &self.icons, entry);
         }
 
         // 与目录扫描一致：代数失效就整批丢弃，连排序都省掉。
@@ -245,6 +249,26 @@ impl DirectoryService {
             }
         }
     }
+}
+
+/// 补上扩展名句柄与系统图标句柄。
+///
+/// 两件事放在一起，是因为它们共用同一个键（扩展名）且都发生在扫描阶段：
+/// 分散成两趟会让「类型列与图标不一致」成为可能（例如句柄已补、图标没补）。
+///
+/// 驱动器与符号链接不取系统图标：前者要真实盘符才能拿到正确的卷图标，
+/// 后者在资源管理器里是「带箭头的目标」，都不是扩展名能表达的，
+/// 继续用内置 SVG。
+fn attach_extras(interner: &ExtInterner, icons: &IconCache, entry: &mut Entry) {
+    attach_extension(interner, entry);
+    entry.icon = match entry.kind {
+        EntryKind::Directory => icons.id_for(None, true),
+        EntryKind::File { ext } => {
+            let extension = ext.and_then(|id| interner.resolve(id));
+            icons.id_for(extension.as_deref(), false)
+        }
+        EntryKind::Drive | EntryKind::Symlink => return,
+    };
 }
 
 /// 为文件条目补上扩展名句柄。
@@ -523,6 +547,7 @@ mod tests {
             size: 0,
             modified: None,
             icon: fm_core::IconId(0),
+            hidden: false,
         }
     }
 }

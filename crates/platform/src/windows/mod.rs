@@ -5,11 +5,13 @@
 //! 否则平台边界会被击穿，后续补 Linux/macOS 后端时必须回头改 UI 层。
 
 pub mod clipboard;
+pub mod dir_watch;
 pub mod drives;
 pub mod folder_association;
 pub mod fs_ops;
 pub mod hotkey_host;
 pub mod icon;
+pub mod ipc;
 pub mod known_folders;
 pub mod recycle_bin;
 pub mod shell_menu;
@@ -17,12 +19,27 @@ pub mod single_instance;
 pub mod time;
 
 use std::fs;
+use std::os::windows::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use fm_core::{Entry, EntryKind, IconId};
 
 use crate::fs::{Drive, FileSystem, OpReport};
+
+/// `FILE_ATTRIBUTE_HIDDEN`：文件名以点开头在 Windows 上**不算**隐藏，
+/// 只有真正打上这个属性才算。
+const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+/// `FILE_ATTRIBUTE_SYSTEM`：`desktop.ini`、`pagefile.sys` 这类系统文件。
+const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+
+/// 是否带「隐藏」或「系统」属性。
+///
+/// 刻意不用 `windows` crate 的常量：这两个值是 Win32 的稳定 ABI，
+/// 而 `std::fs::MetadataExt` 已经把手伸到属性位了，没必要为此多开一个 feature。
+fn is_hidden(metadata: &fs::Metadata) -> bool {
+    metadata.file_attributes() & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0
+}
 
 /// Windows 上的 [`FileSystem`] 实现。
 ///
@@ -123,6 +140,10 @@ impl FileSystem for WindowsFileSystem {
     fn move_to_recycle_bin(&self, paths: &[PathBuf]) -> anyhow::Result<usize> {
         recycle_bin::move_to_recycle_bin(paths)
     }
+
+    fn delete_permanently(&self, paths: &[PathBuf]) -> anyhow::Result<OpReport> {
+        Ok(fs_ops::delete_permanently(paths))
+    }
 }
 
 /// 由 `DirEntry` 构造条目。
@@ -135,7 +156,10 @@ fn entry_from_dir_entry(item: &fs::DirEntry) -> Option<Entry> {
     let metadata = item.metadata().ok();
 
     let size = metadata.as_ref().map_or(0, |meta| meta.len());
-    let modified = metadata.and_then(|meta| meta.modified().ok());
+    let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
+    // metadata 取不到时按「不隐藏」处理：宁可多显示一行，也不要因为一次失败
+    // 让一个本该可见的条目凭空消失。
+    let hidden = metadata.as_ref().is_some_and(is_hidden);
     let name: Arc<str> = item.file_name().to_string_lossy().into_owned().into();
 
     let kind = if file_type.is_symlink() {
@@ -155,6 +179,7 @@ fn entry_from_dir_entry(item: &fs::DirEntry) -> Option<Entry> {
         size,
         modified,
         icon: IconId(0),
+        hidden,
     })
 }
 
@@ -182,5 +207,6 @@ fn entry_from_metadata(path: std::path::PathBuf, metadata: &fs::Metadata) -> Ent
         size: metadata.len(),
         modified: metadata.modified().ok(),
         icon: IconId(0),
+        hidden: is_hidden(metadata),
     }
 }

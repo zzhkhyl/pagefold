@@ -6,11 +6,13 @@
 
 pub mod fs;
 pub mod mock;
+pub mod watch;
 
 #[cfg(target_os = "windows")]
 pub mod windows;
 
 pub use fs::{Drive, DriveKind, FileSystem, OpReport};
+pub use watch::{Watcher, watch_directory};
 
 /// 返回当前平台的 [`FileSystem`] 实现。
 ///
@@ -60,6 +62,21 @@ pub fn describe_error(error: &anyhow::Error) -> String {
     error.to_string()
 }
 
+/// 按扩展名取系统图标（32×32 RGBA）。
+///
+/// `None` 表示取不到（无扩展名、shell 未初始化、或当前平台没有系统图标），
+/// 调用方应退回内置 SVG 图标。
+#[cfg(target_os = "windows")]
+pub fn system_icon(extension: Option<&str>, directory: bool) -> Option<fm_core::RasterIcon> {
+    windows::icon::system_icon(extension, directory)
+}
+
+/// 非 Windows 平台没有系统图标。
+#[cfg(not(target_os = "windows"))]
+pub fn system_icon(_extension: Option<&str>, _directory: bool) -> Option<fm_core::RasterIcon> {
+    None
+}
+
 /// 单实例守卫：保证同一登录会话内只有一个进程实例。
 #[cfg(target_os = "windows")]
 pub use windows::single_instance::SingleInstance;
@@ -67,6 +84,34 @@ pub use windows::single_instance::SingleInstance;
 /// 把标题匹配的窗口带到前台，返回是否成功。
 #[cfg(target_os = "windows")]
 pub use windows::single_instance::activate_window;
+
+/// 启动单实例命令行转发的监听（**只应由主实例调用一次**）。
+#[cfg(target_os = "windows")]
+pub use windows::ipc::start_open_server;
+
+/// 把位置参数转发给已运行的实例，返回是否送达。
+#[cfg(target_os = "windows")]
+pub use windows::ipc::forward_open_request;
+
+/// 取出待处理的位置参数（主实例的 UI 轮询）。
+#[cfg(target_os = "windows")]
+pub use windows::ipc::take_pending_open;
+
+/// 非 Windows 平台没有单实例转发。
+#[cfg(not(target_os = "windows"))]
+pub fn start_open_server() {}
+
+/// 非 Windows 平台没有单实例转发。
+#[cfg(not(target_os = "windows"))]
+pub fn forward_open_request(_argument: &str) -> bool {
+    false
+}
+
+/// 非 Windows 平台永远不会有待处理的位置。
+#[cfg(not(target_os = "windows"))]
+pub fn take_pending_open() -> Option<String> {
+    None
+}
 
 /// 非 Windows 平台不做实例数限制。
 #[cfg(not(target_os = "windows"))]

@@ -66,7 +66,19 @@ pub fn run() {
     let _guard: Option<SingleInstance> = match SingleInstance::acquire(INSTANCE_MUTEX) {
         Ok(Some(guard)) => Some(guard),
         Ok(None) => {
-            // 已有实例：把它的窗口带到前台，然后本进程直接退出。
+            // 已有实例：先把命令行位置转发过去，再激活它的窗口，然后本进程退出。
+            // 顺序不能反：激活窗口是异步生效的，先转发才能让主实例在
+            // 「用户看到窗口的时候」已经把新标签打开。
+            if let Some(argument) = std::env::args_os().nth(1) {
+                let text = argument.to_string_lossy().into_owned();
+                if fm_platform::forward_open_request(&text) {
+                    tracing::info!(%text, "已把位置参数转发给运行中的实例");
+                } else {
+                    // 主实例可能还在启动（管道未就绪），或它是不带转发的旧版本。
+                    // 退化为「只激活窗口」——好过什么都不发生。
+                    tracing::warn!(%text, "位置参数转发失败，仅激活已有窗口");
+                }
+            }
             if activate_window(WINDOW_TITLE) {
                 tracing::info!("已有实例在运行，已将其窗口带到前台");
             } else {
@@ -81,6 +93,12 @@ pub fn run() {
             None
         }
     };
+
+    // 主实例才起管道监听。互斥体创建失败会退化成「允许多实例」，
+    // 那种情况下再起监听会让两个实例抢同一条管道，因此用 `_guard` 判断。
+    if _guard.is_some() {
+        fm_platform::start_open_server();
+    }
 
     gpui_platform::application()
         // 用 AllAssets 而不是 Assets：Assets 只嵌入 default-icons.txt 里的默认子集，
@@ -114,6 +132,10 @@ pub fn run() {
                 KeyBinding::new("ctrl-v", PasteItems, None),
                 KeyBinding::new("f2", RenameItem, None),
                 KeyBinding::new("delete", DeleteItems, None),
+                // 永久删除：与回收站删除只差一个修饰键，与资源管理器一致。
+                // 两个动作的确认框文案不同，因此误按也不会删错东西。
+                KeyBinding::new("shift-delete", DeletePermanently, None),
+                KeyBinding::new("ctrl-z", Undo, None),
                 KeyBinding::new("enter", OpenItem, None),
                 KeyBinding::new("up", MoveCursorUp, None),
                 KeyBinding::new("down", MoveCursorDown, None),

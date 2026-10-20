@@ -37,6 +37,12 @@ pub struct Config {
     pub zoom: IconZoom,
     /// 是否显示文件扩展名。
     pub show_ext: bool,
+    /// 是否显示隐藏与系统文件（对齐资源管理器默认：不显示）。
+    ///
+    /// 只影响**读取时是否过滤**：扫描仍然照常遍历目录，过滤发生在把批次并入
+    /// `entries` 的那一步（见 `ShellView` 的 `begin_load`），因为隐藏与否是平台
+    /// 属性，而要不要显示是用户偏好——两者不该混在平台层的 `scan` 里。
+    pub show_hidden: bool,
     /// 详情表里手动拖动过的列宽。
     ///
     /// `None` = 没拖过，用断点默认值。三列各自独立，因此窄屏隐藏某列时
@@ -54,6 +60,8 @@ impl Default for Config {
             density: Density::Normal,
             zoom: IconZoom::Medium,
             show_ext: true,
+            // 与资源管理器一致：默认不显示隐藏与系统文件。
+            show_hidden: false,
             detail_columns: ColumnWidths::default(),
         }
     }
@@ -164,6 +172,7 @@ mod tests {
             density: Density::Cozy,
             zoom: IconZoom::Large,
             show_ext: false,
+            show_hidden: true,
             detail_columns: ColumnWidths {
                 date: Some(150.0),
                 kind: None,

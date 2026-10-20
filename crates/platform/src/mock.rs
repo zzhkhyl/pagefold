@@ -27,6 +27,8 @@ pub enum MockWrite {
     Copy { sources: Vec<PathBuf>, dest_dir: PathBuf },
     Move { sources: Vec<PathBuf>, dest_dir: PathBuf },
     Recycle { paths: Vec<PathBuf> },
+    /// 永久删除。撤销「新建 / 复制」时会走到这里，因此必须可观测。
+    DeletePermanently { paths: Vec<PathBuf> },
 }
 
 /// 返回固定伪造数据的 [`FileSystem`]。
@@ -101,6 +103,7 @@ impl FileSystem for MockFileSystem {
                 size: (index as u64) * 1024,
                 modified: None,
                 icon: IconId(index as u32),
+                hidden: false,
             });
 
             if buffer.len() == batch {
@@ -155,12 +158,25 @@ impl FileSystem for MockFileSystem {
             size: 0,
             modified: None,
             icon: IconId(0),
+            hidden: false,
         })
     }
 
     fn recycle_bin(&self) -> anyhow::Result<Vec<Entry>> {
         // 桩实现没有回收站：返回空表，上层会走「回收站为空」的空态。
         Ok(Vec::new())
+    }
+
+    fn delete_permanently(&self, paths: &[PathBuf]) -> anyhow::Result<OpReport> {
+        // 桩实现不碰磁盘：按「全部成功」回执，供跨平台单测验证调用链。
+        self.record(MockWrite::DeletePermanently {
+            paths: paths.to_vec(),
+        });
+        Ok(OpReport {
+            done: paths.len(),
+            renamed: Vec::new(),
+            failed: Vec::new(),
+        })
     }
 
     // ── 写操作 ──────────────────────────────────────────────────────

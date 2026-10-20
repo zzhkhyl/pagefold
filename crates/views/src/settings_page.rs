@@ -64,6 +64,7 @@ pub struct SettingsSnapshot {
     pub density: Density,
     pub zoom: IconZoom,
     pub show_ext: bool,
+    pub show_hidden: bool,
     pub show_preview: bool,
     pub view_mode: ViewMode,
     /// 配置文件的绝对路径；取不到时为 `None`（环境缺 `APPDATA`）。
@@ -90,6 +91,7 @@ pub struct SettingsHandlers {
     pub set_density: Setter<Density>,
     pub set_zoom: Setter<IconZoom>,
     pub toggle_ext: Toggle,
+    pub toggle_hidden: Toggle,
     pub toggle_preview: Toggle,
     pub set_view_mode: Setter<ViewMode>,
     /// 复制配置文件路径到剪贴板。
@@ -241,7 +243,7 @@ fn appearance_card(
             ),
             setting_row(
                 "图标缩放",
-                "图标视图的单元格边长：122 / 152 / 192px",
+                zoom_hint(snapshot.view_mode),
                 zoom,
                 false,
                 tokens,
@@ -273,6 +275,16 @@ fn view_card(
         )
     };
 
+    let hidden = {
+        let handler = Rc::clone(&handlers.toggle_hidden);
+        widgets::switch(
+            "setting-show-hidden",
+            snapshot.show_hidden,
+            tokens,
+            move |_: &ClickEvent, window, cx| handler(window, cx),
+        )
+    };
+
     let view_mode = widgets::segmented(
         [ViewMode::Details, ViewMode::Icons]
             .into_iter()
@@ -298,6 +310,13 @@ fn view_card(
                 "显示预览面板",
                 "宽屏为右侧第三栏，窄于 1100px 时改为浮层",
                 preview,
+                false,
+                tokens,
+            ),
+            setting_row(
+                "显示隐藏和系统文件",
+                "带隐藏或系统属性的条目；点号开头的文件在 Windows 上不算隐藏",
+                hidden,
                 false,
                 tokens,
             ),
@@ -520,17 +539,33 @@ fn card_header(title: &'static str, description: &'static str, tokens: &Tokens) 
         .into_any_element()
 }
 
+/// 图标缩放的说明文字，随当前视图变化。
+///
+/// 缩放只作用于图标网格：在详细信息视图下改它，界面上不会有任何反馈。
+/// 与其让用户以为设置没生效，不如把「要切到图标视图」写在说明里——
+/// 这是设置页唯一能提供的即时解释。
+fn zoom_hint(view_mode: ViewMode) -> SharedString {
+    match view_mode {
+        ViewMode::Icons => "图标视图的单元格边长：122 / 152 / 192px".into(),
+        ViewMode::Details => {
+            "仅影响图标视图。当前标签是详细信息视图，按 Ctrl+2 切换后可见（边长 122 / 152 / 192px）"
+                .into()
+        }
+    }
+}
+
 /// 一行设置项：左侧标签 + 说明，右侧控件固定右对齐。
 ///
 /// 行高随密度变化（基准 44px，即 `row_height + 12`）：设置页与列表用同一个
 /// 密度档位，用户切换密度时整页的节奏也跟着变，而不是只有列表在变。
 fn setting_row(
     label: &'static str,
-    hint: &'static str,
+    hint: impl Into<SharedString>,
     control: AnyElement,
     last: bool,
     tokens: &Tokens,
 ) -> AnyElement {
+    let hint = hint.into();
     div()
         .flex()
         .flex_row()
@@ -613,6 +648,17 @@ mod tests {
     }
 
     #[test]
+    fn zoom_hint_only_mentions_the_view_switch_in_details_mode() {
+        // 图标视图下不需要解释；详细信息视图下必须给出「怎么才能看到效果」。
+        assert!(!zoom_hint(ViewMode::Icons).contains("Ctrl+2"));
+        assert!(zoom_hint(ViewMode::Details).contains("Ctrl+2"));
+        // 两档都要写清具体边长，否则用户不知道三档到底差多少。
+        for mode in [ViewMode::Icons, ViewMode::Details] {
+            assert!(zoom_hint(mode).contains("122 / 152 / 192"));
+        }
+    }
+
+    #[test]
     fn snapshot_and_handler_types_are_constructible() {
         // 编译期契约：shell 侧拼装这两个结构时不需要额外的 trait 实现。
         let snapshot = SettingsSnapshot {
@@ -620,6 +666,7 @@ mod tests {
             density: Density::Normal,
             zoom: IconZoom::Medium,
             show_ext: true,
+            show_hidden: false,
             show_preview: true,
             view_mode: ViewMode::Details,
             config_path: None,
@@ -632,6 +679,7 @@ mod tests {
             set_density: Rc::new(|_, _, _| {}),
             set_zoom: Rc::new(|_, _, _| {}),
             toggle_ext: Rc::new(|_, _| {}),
+            toggle_hidden: Rc::new(|_, _| {}),
             toggle_preview: Rc::new(|_, _| {}),
             set_view_mode: Rc::new(|_, _, _| {}),
             copy_config_path: Rc::new(|_, _| {}),

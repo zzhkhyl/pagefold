@@ -137,6 +137,16 @@ pub trait FileSystem: Send + Sync + 'static {
     /// **失败即报错**（不像复制那样逐条吞掉）：回收站是「我以为删掉了」的最后一道
     /// 心理防线，部分失败必须让用户看见，而不是弹一句「已删除 3 项」了事。
     fn move_to_recycle_bin(&self, paths: &[PathBuf]) -> anyhow::Result<usize>;
+
+    /// **永久删除**若干条目，逐条回执。
+    ///
+    /// 与 [`FileSystem::move_to_recycle_bin`] 的差别只有一条：**不能反悔**。
+    /// 因此调用方必须为它准备单独的确认文案（「此操作无法撤销」），
+    /// 并把它绑定到与回收站删除不同的入口（`Shift+Delete`）。
+    ///
+    /// 只读属性会被清掉后重试：确认框已经问过一次，删除时再失败一次
+    /// 等于让用户在两个地方回答同一个问题。
+    fn delete_permanently(&self, paths: &[PathBuf]) -> anyhow::Result<OpReport>;
 }
 
 /// 一次写操作的回执。

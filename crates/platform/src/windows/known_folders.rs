@@ -38,6 +38,7 @@ pub fn quick_access() -> Vec<Entry> {
                 size: 0,
                 modified: None,
                 icon: IconId(0),
+                hidden: false,
             })
         })
         .collect()

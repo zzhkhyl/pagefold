@@ -714,6 +714,7 @@ impl ShellView {
             density: self.config.density,
             zoom: self.config.zoom,
             show_ext: self.config.show_ext,
+            show_hidden: self.config.show_hidden,
             // 用运行期的面板状态而不是配置里的值：两者在窄屏浮层下可能短暂不同步。
             show_preview: self.preview_open,
             view_mode: self.tabs.active_state().view_mode(),
@@ -764,6 +765,17 @@ impl ShellView {
                         .is_err()
                     {
                         tracing::debug!("切换扩展名显示时视图已销毁");
+                    }
+                })
+            },
+            toggle_hidden: {
+                let view = cx.entity().downgrade();
+                Rc::new(move |_window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| view.toggle_show_hidden(cx))
+                        .is_err()
+                    {
+                        tracing::debug!("切换隐藏文件显示时视图已销毁");
                     }
                 })
             },

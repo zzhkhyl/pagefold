@@ -33,7 +33,12 @@ actions!(
         CutItems,
         PasteItems,
         RenameItem,
+        /// 移到回收站。
         DeleteItems,
+        /// 永久删除（不进回收站，不可撤销）。
+        DeletePermanently,
+        /// 撤销上一步可逆的写操作。
+        Undo,
         OpenItem,
         MoveCursorUp,
         MoveCursorDown,

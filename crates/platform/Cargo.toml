@@ -22,6 +22,11 @@ windows = { version = "0.62", features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    # CancelIoEx：打断阻塞中的 ReadDirectoryChangesW，否则关闭窗口后
+    # 监听线程会一直停在调用里。
+    "Win32_System_IO",
+    # 单实例命令行转发用的命名管道。
+    "Win32_System_Pipes",
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
     "Win32_System_Threading",

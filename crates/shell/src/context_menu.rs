@@ -69,6 +69,10 @@ pub(crate) enum MenuAction {
     Rename,
     /// 移到回收站（先弹确认框）。
     DeleteToRecycleBin,
+    /// 永久删除（不进回收站，先弹确认框，且确认文案与上面那条不同）。
+    DeletePermanently,
+    /// 撤销上一步可逆的写操作。
+    Undo,
     /// 占位：菜单里保留位置但禁用，因此永远不会被派发。
     ///
     /// 留一个显式的「没有动作」变体，而不是借一个真实动作当占位：
@@ -84,7 +88,10 @@ impl MenuAction {
     /// 提示跟着变，不需要手写两份字符串。返回 `None` 表示没有快捷键
     /// （新建、排序、切换视图这类鼠标动作）。
     fn shortcut(&self) -> Option<Box<dyn Action>> {
-        use crate::actions::{CopyItems, CutItems, DeleteItems, OpenItem, PasteItems, Refresh, RenameItem};
+        use crate::actions::{
+            CopyItems, CutItems, DeleteItems, DeletePermanently, OpenItem, PasteItems, Refresh,
+            RenameItem, Undo,
+        };
 
         let action: Box<dyn Action> = match self {
             MenuAction::Open => Box::new(OpenItem),
@@ -94,6 +101,8 @@ impl MenuAction {
             MenuAction::Paste => Box::new(PasteItems),
             MenuAction::Rename => Box::new(RenameItem),
             MenuAction::DeleteToRecycleBin => Box::new(DeleteItems),
+            MenuAction::DeletePermanently => Box::new(DeletePermanently),
+            MenuAction::Undo => Box::new(Undo),
             _ => return None,
         };
         Some(action)
@@ -250,6 +259,14 @@ pub(crate) fn entry_menu_spec(
             IconName::Trash,
             MenuAction::DeleteToRecycleBin,
         )));
+        // 永久删除必须与回收站删除**分成两项**：它们的确认文案、可逆性、
+        // 快捷键都不同，合成一个「按 Shift 改变行为」的隐式动作，
+        // 用户就没有地方读到「这一下删了捡不回来」。
+        nodes.push(MenuNode::Item(MenuItemSpec::new(
+            "永久删除",
+            IconName::Eraser,
+            MenuAction::DeletePermanently,
+        )));
     }
 
     nodes
@@ -294,6 +311,7 @@ pub(crate) fn area_menu_spec(
     sort_key: SortKey,
     writable: bool,
     can_paste: bool,
+    undo_label: Option<&str>,
 ) -> Vec<MenuNode> {
     let view_node = |label: &str, icon: IconName, mode: ViewMode| {
         MenuNode::Item(
@@ -305,6 +323,19 @@ pub(crate) fn area_menu_spec(
     };
 
     let mut nodes = Vec::new();
+
+    // 撤销放在最顶上：它是「我刚才做错了」的第一反应，
+    // 也是唯一一个在**任意目录**都有意义的写操作。
+    // 没有可撤销的东西时整项隐藏（而不是禁用）：禁用意味着「以后会有」，
+    // 而这里只是「现在没有」。
+    if let Some(label) = undo_label {
+        nodes.push(MenuNode::Item(MenuItemSpec::new(
+            format!("撤销 {label}"),
+            IconName::Undo2,
+            MenuAction::Undo,
+        )));
+        nodes.push(MenuNode::Separator);
+    }
 
     if writable {
         nodes.push(MenuNode::Item(MenuItemSpec::new(
@@ -468,6 +499,8 @@ fn dispatch(
             }
         }
         MenuAction::DeleteToRecycleBin => view.delete_selection(window, cx),
+        MenuAction::DeletePermanently => view.delete_selection_forever(window, cx),
+        MenuAction::Undo => view.undo_last(window, cx),
         MenuAction::NotImplemented => {}
     });
 
@@ -526,7 +559,7 @@ pub(crate) fn area_menu_builder(cx: &Context<ShellView>) -> fm_views::AreaMenuBu
             return menu;
         }
 
-        let Ok((view_mode, sort_key, writable, can_paste)) =
+        let Ok((view_mode, sort_key, writable, can_paste, undo_label)) =
             shell.read_with(&**cx, |view: &ShellView, _| {
                 let tab = view.tabs.active_state();
                 (
@@ -535,13 +568,21 @@ pub(crate) fn area_menu_builder(cx: &Context<ShellView>) -> fm_views::AreaMenuBu
                     // 「此电脑」与回收站都不是真实目录，那里无处落笔。
                     view.current_dir().is_some(),
                     !view.clipboard.is_empty(),
+                    // 菜单里直接写出「要撤哪一步」，避免用户按下去才知道。
+                    view.undo.peek().map(|action| action.describe()),
                 )
             })
         else {
             return menu;
         };
 
-        let nodes = area_menu_spec(view_mode, sort_key, writable, can_paste);
+        let nodes = area_menu_spec(
+            view_mode,
+            sort_key,
+            writable,
+            can_paste,
+            undo_label.as_deref(),
+        );
         build_menu(menu, &nodes, None, &shell, window, cx)
     })
 }
@@ -645,6 +686,7 @@ mod tests {
             size: 0,
             modified: Some(SystemTime::UNIX_EPOCH),
             icon: fm_core::IconId(0),
+            hidden: false,
         }
     }
 
@@ -677,12 +719,58 @@ mod tests {
             ("剪切", MenuAction::Clip(ClipboardMode::Cut)),
             ("重命名", MenuAction::Rename),
             ("移到回收站", MenuAction::DeleteToRecycleBin),
+            ("永久删除", MenuAction::DeletePermanently),
         ];
         for (label, action) in expected {
             let spec = find(nodes, label).unwrap_or_else(|| panic!("{label} 不该被删掉"));
             assert!(!spec.disabled, "{label} 已实现，不能再是禁用态");
             assert_eq!(spec.action, action, "{label} 指向了错误的动作");
         }
+    }
+
+    /// 回收站删除与永久删除必须是**两个独立项**。
+    ///
+    /// 合成一个「按 Shift 改变行为」的隐式动作是常见的省事做法，代价是
+    /// 用户没有地方读到「这一下删了捡不回来」——而这两件事的后果差别极大。
+    #[test]
+    fn recycle_and_permanent_delete_are_separate_entries() {
+        let nodes = entry_menu_spec(&file("报告.docx"), 1, Some(Path::new("C:\\dir")));
+        let recycle = find(&nodes, "移到回收站").expect("应有「移到回收站」");
+        let permanent = find(&nodes, "永久删除").expect("应有「永久删除」");
+
+        assert_ne!(recycle.action, permanent.action);
+        assert_eq!(permanent.action, MenuAction::DeletePermanently);
+        assert!(!permanent.disabled);
+        // 两项都带快捷键提示（Delete / Shift+Delete），否则用户只会用其中一种。
+        assert!(recycle.action.shortcut().is_some());
+        assert!(permanent.action.shortcut().is_some());
+    }
+
+    #[test]
+    fn drives_offer_neither_kind_of_delete() {
+        let nodes = entry_menu_spec(&drive("C:"), 1, Some(Path::new("C:\\")));
+        assert!(find(&nodes, "移到回收站").is_none());
+        assert!(find(&nodes, "永久删除").is_none(), "驱动器不能被删除");
+    }
+
+    #[test]
+    fn undo_is_listed_only_when_something_can_be_undone() {
+        // 空栈：整项隐藏。禁用态会让人以为「以后会有」，而这里只是「现在没有」。
+        let empty = area_menu_spec(ViewMode::Details, SortKey::Name, true, true, None);
+        assert!(find(&empty, "撤销").is_none());
+
+        // 有可撤销操作时，菜单里直接写出「撤的是哪一步」。
+        let nodes = area_menu_spec(
+            ViewMode::Details,
+            SortKey::Name,
+            true,
+            true,
+            Some("重命名「报告.docx」"),
+        );
+        let spec = find(&nodes, "撤销 重命名「报告.docx」").expect("应出现带描述的撤销项");
+        assert_eq!(spec.action, MenuAction::Undo);
+        assert!(!spec.disabled);
+        assert!(spec.action.shortcut().is_some(), "撤销应当提示 Ctrl+Z");
     }
 
     #[test]
@@ -787,7 +875,7 @@ mod tests {
 
     #[test]
     fn area_menu_marks_the_current_view_mode_and_sort_key() {
-        let nodes = area_menu_spec(ViewMode::Icons, SortKey::Size, true, true);
+        let nodes = area_menu_spec(ViewMode::Icons, SortKey::Size, true, true, None);
 
         let icons = find(&nodes, "图标视图").expect("应当有图标视图");
         let details = find(&nodes, "详细信息视图").expect("应当有详细信息视图");
@@ -816,7 +904,7 @@ mod tests {
 
     #[test]
     fn area_menu_offers_the_create_actions_in_a_writable_directory() {
-        let nodes = area_menu_spec(ViewMode::Details, SortKey::Name, true, false);
+        let nodes = area_menu_spec(ViewMode::Details, SortKey::Name, true, false, None);
 
         let refresh = find(&nodes, "刷新").expect("刷新应当存在");
         assert!(!refresh.disabled, "刷新是已实现能力，不能禁用");
@@ -839,7 +927,7 @@ mod tests {
 
     #[test]
     fn area_menu_enables_paste_once_the_clipboard_has_content() {
-        let nodes = area_menu_spec(ViewMode::Details, SortKey::Name, true, true);
+        let nodes = area_menu_spec(ViewMode::Details, SortKey::Name, true, true, None);
         let paste = find(&nodes, "粘贴").expect("粘贴应当存在");
         assert!(!paste.disabled);
         assert_eq!(paste.action, MenuAction::Paste);
@@ -849,7 +937,7 @@ mod tests {
     fn area_menu_drops_the_write_group_outside_a_real_directory() {
         // 「此电脑」与回收站都不是真实目录：那里无处落笔，
         // 与其摆一排禁用项让人猜，不如整组不出现（资源管理器也是这样）。
-        let nodes = area_menu_spec(ViewMode::Details, SortKey::Name, false, true);
+        let nodes = area_menu_spec(ViewMode::Details, SortKey::Name, false, true, None);
 
         for label in ["新建文件夹", "新建文本文档", "粘贴"] {
             assert!(find(&nodes, label).is_none(), "{label} 不该出现在虚拟位置");
@@ -933,10 +1021,19 @@ mod tests {
         assert!(!matches!(nodes.first(), Some(MenuNode::Separator)));
         assert!(!matches!(nodes.last(), Some(MenuNode::Separator)));
 
-        // 最后一项是危险动作「移到回收站」。
-        assert!(matches!(
-            nodes.last(),
-            Some(MenuNode::Item(MenuItemSpec { label, .. })) if label == "移到回收站"
-        ));
+        // 末尾两项是危险动作，顺序是「轻的在前、重的在后」：
+        // 回收站可反悔，永久删除不可——把它放在最后，误触需要多按一次。
+        let labels: Vec<&str> = nodes
+            .iter()
+            .filter_map(|node| match node {
+                MenuNode::Item(spec) => Some(spec.label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            &labels[labels.len() - 2..],
+            &["移到回收站", "永久删除"],
+            "危险动作的排列顺序变了：{labels:?}"
+        );
     }
 }

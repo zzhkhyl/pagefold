@@ -41,6 +41,12 @@ pub struct Entry {
     pub size: u64,
     pub modified: Option<SystemTime>,
     pub icon: IconId,
+    /// 是否带「隐藏」或「系统」属性。
+    ///
+    /// 两类合并成一个字段，而不是 `hidden` + `system` 两个布尔值：资源管理器的
+    /// 「隐藏的项目」把这两类一起管，用户也从来没有「只看系统文件」的需求。
+    /// 过滤发生在**载入列表时**（见 `ShellView`），因此下标与选中集始终一致。
+    pub hidden: bool,
 }
 
 impl Entry {

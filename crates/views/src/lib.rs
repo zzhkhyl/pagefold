@@ -16,6 +16,7 @@ pub mod context_menu;
 pub mod details_table;
 pub mod empty_state;
 pub mod icon_grid;
+pub mod icon_image;
 pub mod preview_panel;
 pub mod settings_page;
 pub mod tokens;

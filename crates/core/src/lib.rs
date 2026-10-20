@@ -7,19 +7,23 @@
 pub mod appearance;
 pub mod command;
 pub mod entry;
+pub mod icon;
 pub mod location;
 pub mod naming;
 pub mod selection;
 pub mod tab;
 pub mod tabs;
+pub mod undo;
 pub mod util;
 
 pub use appearance::{Column, ColumnWidths, Density, IconZoom};
 pub use command::Command;
 pub use entry::{Entry, EntryKind, ExtId, IconId, SortDirection, SortKey, ViewMode};
+pub use icon::RasterIcon;
 pub use location::Location;
 pub use naming::{NameError, unique_name, validate};
 pub use selection::Selection;
 pub use tab::{TabSnapshot, TabState};
+pub use undo::{UNDO_LIMIT, UndoAction, UndoStack};
 pub use tabs::{Tab, TabId, TabsState};
 pub use util::format_size;

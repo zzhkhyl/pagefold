@@ -9,8 +9,10 @@ use fm_core::{Entry, IconZoom, Location, ViewMode, format_size};
 use fm_views::metrics;
 use gpui::{
     AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px, prelude::FluentBuilder as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    prelude::FluentBuilder as _,
 };
+use gpui_component::tooltip::Tooltip;
 
 use crate::layout::Viewport;
 use crate::shell::ShellView;
@@ -96,7 +98,12 @@ impl ShellView {
                             "详细信息视图"
                         }),
                 )
-                .child(zoom_control(self.config.zoom, tokens, on_zoom));
+                .child(zoom_control(
+                    self.config.zoom,
+                    tokens,
+                    icons_view,
+                    on_zoom,
+                ));
         }
 
         bar.into_any_element()
@@ -108,19 +115,32 @@ impl ShellView {
 /// 设计稿用的是一个三档 `input[type=range]`。这里改成三个可点的小格：
 /// 三档是离散值，用滑块既表达不出「只能停在三档」，也要额外维护拖动状态；
 /// 点选小格同样是三档调节，命中更准，也不需要一套拖动状态。
+///
+/// **`enabled` 只表示「当前视图下这个控件有没有效果」**：缩放只作用于图标网格，
+/// 详细信息视图下行高由「界面密度」控制，与它无关。早先这里始终可点，
+/// 结果是在详情视图里点它毫无反馈——看起来像坏了。现在详情视图下置灰并给出
+/// tooltip，把「为什么没用」直接说出来。
 fn zoom_control(
     current: IconZoom,
     tokens: &fm_views::Tokens,
+    enabled: bool,
     on_pick: ZoomHandler,
 ) -> AnyElement {
     let hover = tokens.hover;
     let accent = tokens.accent;
     let border = tokens.border;
+    let hint: SharedString = if enabled {
+        "缩略图大小：小 / 中 / 大".into()
+    } else {
+        // 明确指出「怎么才能用」而不是只说「不可用」。
+        "缩略图大小仅作用于图标视图；按 Ctrl+2 切换后可用".into()
+    };
 
     let steps = IconZoom::ALL.iter().map(|zoom| {
         let zoom = *zoom;
         let active = zoom == current;
         let pick = Rc::clone(&on_pick);
+        let tooltip = hint.clone();
         div()
             .id(("zoom-step", zoom.index()))
             .flex_none()
@@ -130,9 +150,18 @@ fn zoom_control(
             .border_1()
             .border_color(if active { accent } else { border })
             .when(active, |element| element.bg(accent))
-            .cursor_pointer()
-            .hover(move |style| style.bg(hover))
-            .on_click(move |_event: &ClickEvent, window, cx| pick(zoom, window, cx))
+            .when(enabled, |element| {
+                element
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(hover))
+                    .on_click(move |_event: &ClickEvent, window, cx| {
+                        pick(zoom, window, cx)
+                    })
+            })
+            // 置灰用整体透明度：三档各自的「选中态」仍然可见——
+            // 用户需要知道当前设的是哪一档，哪怕此刻改不了。
+            .when(!enabled, |element| element.opacity(0.4))
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             .into_any_element()
     });
 
@@ -142,7 +171,12 @@ fn zoom_control(
         .flex_row()
         .items_center()
         .gap(px(4.0))
-        .child(div().flex_none().child("缩放"))
+        .child(
+            div()
+                .flex_none()
+                .when(!enabled, |element| element.opacity(0.4))
+                .child("缩放"),
+        )
         .children(steps)
         .into_any_element()
 }
@@ -176,6 +210,7 @@ mod tests {
             size,
             modified: None,
             icon: IconId(0),
+            hidden: false,
         }
     }
 

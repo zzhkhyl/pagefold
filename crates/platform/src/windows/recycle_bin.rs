@@ -229,6 +229,9 @@ fn collect_volume(bin: &Path, out: &mut Vec<Entry>) {
                 // 「什么时候删的」也是更有用的那一列。
                 modified: Some(parsed.deleted_at),
                 icon: IconId(0),
+                // 回收站条目一律按可见处理：它们已经被删掉，「隐藏」在这里
+                // 只会让用户找不到自己刚删的东西。
+                hidden: false,
             });
         }
     }

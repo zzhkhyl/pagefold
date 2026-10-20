@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use fm_core::Entry;
+use fm_core::UndoAction;
 use fm_core::naming::{self, NameError};
 use fm_platform::{FileSystem, OpReport, describe_error};
 
@@ -128,6 +129,65 @@ pub fn paste(fs: &dyn FileSystem, plan: &PastePlan) -> OpResult<OpReport> {
 pub fn recycle(fs: &dyn FileSystem, paths: &[PathBuf]) -> OpResult<usize> {
     fs.move_to_recycle_bin(paths)
         .map_err(|error| describe_error(&error))
+}
+
+/// 永久删除若干条目（不进回收站）。
+pub fn delete_forever(fs: &dyn FileSystem, paths: &[PathBuf]) -> OpResult<OpReport> {
+    fs.delete_permanently(paths)
+        .map_err(|error| describe_error(&error))
+}
+
+/// 撤销一步写操作。
+///
+/// 每种动作的逆操作都是**一次系统调用**，没有「先备份再恢复」的中间态：
+/// 这也意味着撤销失败时磁盘上不会留下半成品，用户看到的是一句原因，
+/// 而不是一个既不像原来、也不像现在的目录。
+///
+/// 撤销本身**不入栈**（没有重做）：目前没有「重做」的入口，
+/// 把撤销也记进栈只会让 `Ctrl+Z` 变成来回横跳。
+pub fn undo(fs: &dyn FileSystem, action: &UndoAction) -> OpResult<OpReport> {
+    match action {
+        UndoAction::Rename { from, to } => {
+            let Some(name) = from.file_name().map(|name| name.to_string_lossy().into_owned())
+            else {
+                return Err(String::from("原路径没有文件名，无法撤销重命名"));
+            };
+            fs.rename(to, &name).map_err(|error| describe_error(&error))?;
+            Ok(OpReport {
+                done: 1,
+                ..OpReport::default()
+            })
+        }
+        UndoAction::Create { path } => {
+            fs.delete_permanently(std::slice::from_ref(path))
+                .map_err(|error| describe_error(&error))
+        }
+        UndoAction::Copy { created } => fs
+            .delete_permanently(created)
+            .map_err(|error| describe_error(&error)),
+        UndoAction::Move { moved } => {
+            // 逐项搬回原目录：不同条目的原目录可能不同（一次跨目录的多选剪切），
+            // 因此不能像粘贴那样「一次 move_into 到一个目标」。
+            let mut total = OpReport::default();
+            for (current, original) in moved {
+                let Some(parent) = original.parent() else {
+                    total
+                        .failed
+                        .push((current.clone(), String::from("原位置没有父目录")));
+                    continue;
+                };
+                match fs.move_into(std::slice::from_ref(current), parent) {
+                    Ok(report) => {
+                        total.done += report.done;
+                        total.renamed.extend(report.renamed);
+                        total.failed.extend(report.failed);
+                    }
+                    Err(error) => total.failed.push((current.clone(), describe_error(&error))),
+                }
+            }
+            Ok(total)
+        }
+    }
 }
 
 /// 把回执翻译成一句面向用户的话（成功与部分失败共用）。
@@ -367,5 +427,98 @@ mod tests {
         assert_eq!(NewItem::Folder.default_name(), "新建文件夹");
         assert_eq!(NewItem::TextFile.default_name(), "新建文本文档.txt");
         assert_eq!(NewItem::MarkdownFile.default_name(), "新建文档.md");
+    }
+
+    #[test]
+    fn undo_of_a_rename_moves_the_name_back() {
+        let fs = MockFileSystem::new(0);
+        let action = UndoAction::Rename {
+            from: dir().join("报告.docx"),
+            to: dir().join("报告 (2).docx"),
+        };
+
+        let report = undo(&fs, &action).unwrap();
+        assert_eq!(report.done, 1);
+        assert_eq!(
+            fs.writes(),
+            vec![MockWrite::Rename {
+                path: dir().join("报告 (2).docx"),
+                new_name: String::from("报告.docx"),
+            }],
+            "撤销改名应当把「新名字」改回「旧名字」"
+        );
+    }
+
+    #[test]
+    fn undo_of_a_create_deletes_the_new_item() {
+        let fs = MockFileSystem::new(0);
+        let path = dir().join("新建文件夹");
+        let action = UndoAction::Create { path: path.clone() };
+
+        let report = undo(&fs, &action).unwrap();
+        assert_eq!(report.done, 1);
+        // 新建的东西是这一秒才存在的，撤销它就是永久删除（不进回收站）。
+        assert_eq!(
+            fs.writes(),
+            vec![MockWrite::DeletePermanently { paths: vec![path] }]
+        );
+    }
+
+    #[test]
+    fn undo_of_a_paste_deletes_every_created_entry() {
+        let fs = MockFileSystem::new(0);
+        let created = vec![dir().join("a.txt"), dir().join("b.txt")];
+        let report = undo(&fs, &UndoAction::Copy {
+            created: created.clone(),
+        })
+        .unwrap();
+
+        assert_eq!(report.done, 2);
+        assert_eq!(
+            fs.writes(),
+            vec![MockWrite::DeletePermanently { paths: created }]
+        );
+    }
+
+    #[test]
+    fn undo_of_a_move_moves_each_entry_back_to_its_own_parent() {
+        let fs = MockFileSystem::new(0);
+        // 两条来自不同目录的条目，撤销时不能都搬进同一个目标目录。
+        let action = UndoAction::Move {
+            moved: vec![
+                (dir().join("a.txt"), PathBuf::from(r"C:\one\a.txt")),
+                (dir().join("b.txt"), PathBuf::from(r"C:\two\b.txt")),
+            ],
+        };
+
+        let report = undo(&fs, &action).unwrap();
+        assert_eq!(report.done, 2);
+        assert_eq!(
+            fs.writes(),
+            vec![
+                MockWrite::Move {
+                    sources: vec![dir().join("a.txt")],
+                    dest_dir: PathBuf::from(r"C:\one"),
+                },
+                MockWrite::Move {
+                    sources: vec![dir().join("b.txt")],
+                    dest_dir: PathBuf::from(r"C:\two"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn delete_forever_reports_every_entry() {
+        let fs = MockFileSystem::new(0);
+        let paths = vec![dir().join("a.txt"), dir().join("b.txt")];
+        let report = delete_forever(&fs, &paths).unwrap();
+        assert_eq!(report.done, 2);
+        assert!(!report.has_failures());
+        assert_eq!(
+            fs.writes(),
+            vec![MockWrite::DeletePermanently { paths }],
+            "永久删除必须走 delete_permanently，而不是回收站那条路"
+        );
     }
 }

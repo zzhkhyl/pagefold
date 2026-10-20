@@ -39,7 +39,10 @@ pub struct EntrySummary {
     pub location: SharedString,
     pub path: PathBuf,
     pub is_dir: bool,
+    /// SVG 兜底图标。
     pub icon: IconName,
+    /// 系统图标句柄（`IconId(0)` = 没有，用 `icon` 兜底）。
+    pub icon_id: fm_core::IconId,
 }
 
 /// 预览面板要展示的内容。
@@ -243,15 +246,16 @@ fn single(
             .border_1()
             .border_color(tokens.border)
             .bg(tokens.bg)
-            .child(
-                Icon::new(summary.icon)
-                    .with_size(px(44.0))
-                    .text_color(if summary.is_dir {
-                        tokens.accent
-                    } else {
-                        tokens.muted_fg
-                    }),
-            ),
+            .child(crate::widgets::glyph(
+                summary.icon_id,
+                summary.icon,
+                44.0,
+                if summary.is_dir {
+                    tokens.accent
+                } else {
+                    tokens.muted_fg
+                },
+            )),
     );
 
     let mut rows: Vec<(&'static str, String)> = vec![

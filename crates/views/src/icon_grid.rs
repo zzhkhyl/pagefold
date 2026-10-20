@@ -14,7 +14,6 @@ use gpui::{
     prelude::FluentBuilder as _,
 };
 use gpui_component::input::InputState;
-use gpui_component::{Icon, Sizable as _};
 
 use fm_core::Entry;
 
@@ -249,11 +248,16 @@ fn cell(
                 .border_1()
                 .border_color(border)
                 .overflow_hidden()
-                .child(
-                    Icon::new(icon)
-                        .with_size(px(thumb_size * 0.44))
-                        .text_color(if entry.is_dir() { tokens.accent } else { tokens.muted_fg }),
-                ),
+                .child(crate::widgets::glyph(
+                    entry.icon,
+                    icon,
+                    thumb_size * 0.44,
+                    if entry.is_dir() {
+                        tokens.accent
+                    } else {
+                        tokens.muted_fg
+                    },
+                )),
         )
         .child(match editing {
             // 编辑态：名称区改放输入框。外层补一层 flex_row 是为了让

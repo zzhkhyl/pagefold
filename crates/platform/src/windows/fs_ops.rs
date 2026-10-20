@@ -100,6 +100,80 @@ pub fn move_into(sources: &[PathBuf], dest_dir: &Path) -> Result<OpReport> {
     Ok(report)
 }
 
+/// 永久删除若干条目（不进回收站），逐条回执。
+///
+/// 逐条而不是「一失败就整体放弃」：批量删除里有一个文件被占用，
+/// 不该让另外九个白做——更重要的是，那样用户无法知道到底删掉了什么。
+pub fn delete_permanently(paths: &[PathBuf]) -> OpReport {
+    let mut report = OpReport::default();
+
+    for path in paths {
+        match delete_one(path) {
+            Ok(()) => report.done += 1,
+            Err(error) => report.failed.push((path.clone(), describe(&error))),
+        }
+    }
+
+    report
+}
+
+/// 删除单个条目。只读属性导致的失败会被清属性后重试一次。
+fn delete_one(path: &Path) -> Result<()> {
+    let target = extended(path);
+    let metadata = fs::symlink_metadata(&target)?;
+    let is_dir = metadata.is_dir();
+
+    let remove = || {
+        if is_dir {
+            fs::remove_dir_all(&target)
+        } else {
+            fs::remove_file(&target)
+        }
+    };
+
+    match remove() {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            // 只读文件、以及「目录里有只读文件」都会走到这里。
+            // 确认框已经问过一次了，这里不再把决定权交回用户。
+            clear_readonly(&target, is_dir)?;
+            remove().with_context(|| format!("无法删除「{}」", path.display()))?;
+            Ok(())
+        }
+    }
+}
+
+/// 递归清掉只读属性。
+///
+/// 只处理 `FILE_ATTRIBUTE_READONLY`（Rust 的 `Permissions::set_readonly` 映射的
+/// 就是这一位）；隐藏/系统属性不动——那是用户刻意设置的标记，与「能不能删」无关。
+///
+/// `set_readonly(false)` 的 clippy 警告针对的是 Unix 语义（会变成全局可写），
+/// 而本模块只在 Windows 下编译：那里的「非只读」就是普通文件，不存在这个风险。
+#[allow(clippy::permissions_set_readonly_false)]
+fn clear_readonly(path: &Path, is_dir: bool) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    let mut permissions = metadata.permissions();
+    if permissions.readonly() {
+        permissions.set_readonly(false);
+        fs::set_permissions(path, permissions)
+            .with_context(|| format!("无法清除只读属性：{}", path.display()))?;
+    }
+
+    if is_dir {
+        for entry in fs::read_dir(path)? {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            // 出错就跳过这一项：清属性是「尽力而为」，真正的判据是随后那次删除
+            // 是否成功——它会把失败原因如实带回给用户。
+            let nested_is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+            let _ = clear_readonly(&entry.path(), nested_is_dir);
+        }
+    }
+    Ok(())
+}
+
 /// 新建条目并按需改名，返回最终路径。
 fn create_unique(
     parent: &Path,
@@ -309,6 +383,52 @@ fn describe_code(code: Option<i32>) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 用一个进程内唯一的临时目录跑真实 IO。
+    ///
+    /// 名字带 pid 与调用方给的标记：并行测试不会互相踩，失败时也能看出是谁留下的。
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("pagefold-test-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn permanent_delete_removes_a_tree_with_readonly_files() {
+        let root = scratch_dir("perm-delete");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        let readonly = root.join("sub").join("readonly.txt");
+        fs::write(&readonly, b"x").unwrap();
+        let mut permissions = fs::metadata(&readonly).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&readonly, permissions).unwrap();
+
+        let report = delete_permanently(std::slice::from_ref(&root));
+
+        assert_eq!(
+            report.done, 1,
+            "含只读文件的目录也应被删除（会先清属性再重试）：{:?}",
+            report.failed
+        );
+        assert!(!root.exists(), "目录应已被删除");
+    }
+
+    #[test]
+    fn permanent_delete_reports_a_missing_path_instead_of_failing_the_batch() {
+        let root = scratch_dir("perm-delete-missing");
+        let real = root.join("real.txt");
+        fs::write(&real, b"x").unwrap();
+        let missing = root.join("missing.txt");
+
+        let report = delete_permanently(&[real.clone(), missing.clone()]);
+
+        assert_eq!(report.done, 1, "存在的那一条必须被删掉");
+        assert_eq!(report.failed.len(), 1, "不存在的那一条要如实报错");
+        assert_eq!(report.failed[0].0, missing);
+        assert!(!real.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn extended_prefixes_absolute_paths() {

@@ -471,6 +471,26 @@ pub fn shared<F>(callback: F) -> Rc<F> {
 ///
 /// `extension` 由调用方经扩展名驻留表解析后传入——视图层不认识驻留表，
 /// 只做「扩展名 → 图标」的映射。
+/// 条目图标：优先用系统图标位图，取不到时退回内置 SVG。
+///
+/// 两条路径的形态必须一致（同一尺寸、同一位置、`flex_none`），否则同一列表里
+/// 「有系统图标的文件」与「没有的文件」会差出一两个像素，滚动时看得见。
+///
+/// `color` 只作用于 SVG 兜底：位图自带颜色，不该被前景色染色。
+pub fn glyph(icon_id: fm_core::IconId, fallback: IconName, size: f32, color: Hsla) -> AnyElement {
+    if let Some(source) = crate::icon_image::image_for(icon_id) {
+        return gpui::img(source)
+            .flex_none()
+            .w(px(size))
+            .h(px(size))
+            .into_any_element();
+    }
+    Icon::new(fallback)
+        .with_size(px(size))
+        .text_color(color)
+        .into_any_element()
+}
+
 pub fn entry_icon(entry: &Entry, extension: Option<&str>) -> IconName {
     match entry.kind {
         EntryKind::Directory => IconName::Folder,
@@ -484,8 +504,10 @@ pub fn entry_icon(entry: &Entry, extension: Option<&str>) -> IconName {
 /// 按扩展名挑选文件图标。
 ///
 /// 分组与设计稿的 `ICON_OF` 一致，只是换成了 Lucide 里同名或近义的图标。
-/// 这里刻意不做「真正的系统图标」（那需要 `SHGetFileInfoW`，属平台层的后续工作），
-/// 但分组粒度与设计稿对齐，视觉上不会跑偏。
+///
+/// 这是**兜底**路径：能取到系统图标时走 [`glyph`] 的位图分支，
+/// 只有驱动器、符号链接与「shell 取不到图」的扩展名才落到这里。
+/// 分组粒度与设计稿对齐，所以两条路径的观感不会跑偏。
 pub fn file_icon(extension: Option<&str>) -> IconName {
     match extension {
         Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" | "heic") => IconName::Image,

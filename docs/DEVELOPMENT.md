@@ -222,7 +222,7 @@ target\innosetup-6.7.3.exe /PORTABLE=1 /VERYSILENT /SUPPRESSMSGBOXES /NORESTART 
 | 依赖解析           | 828 个包，经 USTC 镜像全部拉取成功                                                                                                                     |
 | debug 构建         | 通过                                                                                                                                                   |
 | debug 本地运行     | 通过：窗口存活满 15 秒；日志显示`Using GPU: Intel(R) Graphics`、`Created device with Direct3D 11.1 feature level`、`Use Microsoft YaHei UI as UI font` |
-| 单元测试           | `cargo test --workspace` 210 项全部通过（1 项标记 ignored），零警告                                                                                     |
+| 单元测试           | `cargo test --workspace` 241 项全部通过（1 项标记 ignored），零警告                                                                                     |
 | release 构建       | 通过：`Finished release profile [optimized] target(s) in 4m 54s`，0 错误，产物 `target/release/pagefold.exe`（17.8 MB）                              |
 | release 产物子系统 | 通过：`PE32+ executable for MS Windows 6.00 (GUI), x86-64`，不弹控制台                                                                                 |
 | release 本地运行   | 通过：进程存活满 10 秒；构建期由`fxc.exe` 编译的内嵌着色器字节码可用                                                                                   |
@@ -280,8 +280,8 @@ file-manager/
     ├── shell/     # 标题栏、标签条、命令条、侧边栏、状态栏、响应式布局与内容区
     ├── views/     # 设计令牌、通用控件、面包屑、图标网格、详情表格、空状态、预览面板、驱动器总览
     ├── core/      # Entry / TabState / Selection / Command / Density / IconZoom（不依赖 gpui 与 Windows API）
-    ├── services/  # 目录流式扫描、图标缓存、配置、会话持久化、监听占位
-    └── platform/  # FileSystem trait 及 windows / mock 实现
+    ├── services/  # 目录流式扫描、图标缓存、配置、会话持久化、目录变更监听编排
+    └── platform/  # FileSystem trait 及 windows / mock 实现（含目录监听、命名管道、热键宿主）
 ```
 
 界面与图标的关键字：
@@ -295,6 +295,12 @@ file-manager/
 | 设置页的内容与分组           | `crates/views/src/settings_page.rs`（纯展示）+ `crates/shell/src/layout.rs` 的 `render_settings`（状态绑定） |
 | 会话恢复（标签 / 历史）      | `crates/services/src/session.rs` + `crates/core/src/tab.rs` 的 `TabSnapshot` |
 | 列宽偏好与钳制规则           | `crates/core/src/appearance.rs` 的 `ColumnWidths`；渲染侧在 `crates/views/src/details_table.rs` |
+| 目录变更自动刷新的节奏       | `crates/services/src/watch.rs`（换目录/去抖基准）+ `crates/shell/src/shell.rs` 的 `ambient_tick` 与 `TICK_MS`（400ms） |
+| 重复启动的位置转发           | `crates/platform/src/windows/ipc.rs`（管道名 `Pagefold.Open.v1`）+ `crates/app/src/bootstrap.rs` 的副本分支 |
+| 隐藏/系统文件的判定          | `crates/platform/src/windows/mod.rs` 的 `is_hidden`；过滤点在 `ShellView::begin_load`（按 `config.show_hidden`） |
+| 系统图标的提取与渲染         | 提取：`crates/platform/src/windows/icon.rs`；缓存：`crates/services/src/icon.rs` 的 `IconCache`；渲染：`crates/views/src/icon_image.rs` + `widgets::glyph` |
+| 撤销栈与逆操作               | `crates/core/src/undo.rs`（记录什么）+ `crates/services/src/ops.rs` 的 `undo`（怎么返回）+ `ShellView::undo_last`（入口与提示） |
+| 永久删除                     | `crates/platform/src/windows/fs_ops.rs` 的 `delete_permanently`（含只读清属性）+ `ShellView::delete_selection_forever`（独立确认框） |
 | 应用图标的几何与配色         | `tools/icon-gen/src/design.rs`，改完重新生成（见 `assets/app-icon/README.md`） |
 
 用户数据的两个落点（都在 `%APPDATA%\pagefold\`，损坏时都只告警并回退默认）：

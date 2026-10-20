@@ -304,11 +304,16 @@ pub fn row(
         .items_center()
         .gap(px(9.0))
         .overflow_hidden()
-        .child(
-            Icon::new(icon)
-                .with_size(px(16.0))
-                .text_color(if entry.is_dir() { tokens.accent } else { muted }),
-        )
+        .child(widgets::glyph(
+            entry.icon,
+            icon,
+            16.0,
+            if entry.is_dir() {
+                tokens.accent
+            } else {
+                muted
+            },
+        ))
         // 重命名时**只替换名称文本，图标留着**：与设计稿的标记一致
         // （`<span class="ic">` 在编辑态里保留），也让用户仍能一眼看出
         // 自己改的是哪一项，而不是失去所有视觉参照。
