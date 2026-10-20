@@ -144,6 +144,112 @@ pub fn segmented(children: Vec<AnyElement>, tokens: &Tokens) -> AnyElement {
         .into_any_element()
 }
 
+/// 文字分段控件里的单个分段（设置页的「浅色 / 深色」这类二选一、三选一）。
+///
+/// 与 [`icon_button_with_size`] 的区别只在内容：图标与文字都要与
+/// [`segmented`] 外壳的 2px 内边距对齐，因此高度取 24（外壳 28）。
+/// 选中态用「强调色浅底 + 强调色描边」，与侧边栏选中项同一套语义。
+pub fn text_segment<F>(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    active: bool,
+    tokens: &Tokens,
+    on_click: F,
+) -> AnyElement
+where
+    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+{
+    let foreground = tokens.fg;
+    let muted = tokens.muted_fg;
+    let hover = tokens.hover;
+    let accent_soft = tokens.accent_soft;
+    let accent_line = tokens.accent_line;
+
+    div()
+        .id(id)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(24.0))
+        .px(px(10.0))
+        .rounded(px(metrics::RENAME_RADIUS))
+        .text_size(px(metrics::FONT_SM))
+        .text_color(if active { foreground } else { muted })
+        .when(active, |element| {
+            element
+                .bg(accent_soft)
+                .border_1()
+                .border_color(accent_line)
+                .font_weight(gpui::FontWeight::MEDIUM)
+        })
+        .when(!active, |element| {
+            element
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover).text_color(foreground))
+        })
+        .on_click(on_click)
+        .child(label)
+        .into_any_element()
+}
+
+/// 开关（设置页的「显示文件扩展名」这类布尔项）。
+///
+/// 右侧同时给出「开 / 关」文字：只靠轨道的深浅表达状态对色觉障碍用户不可用，
+/// 而这里又不像列表勾选框那样有「选中行高亮」作为第二重提示。
+pub fn switch<F>(id: impl Into<ElementId>, on: bool, tokens: &Tokens, on_click: F) -> AnyElement
+where
+    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+{
+    const TRACK_WIDTH: f32 = 34.0;
+    const TRACK_HEIGHT: f32 = 18.0;
+    const KNOB: f32 = 14.0;
+
+    let accent = tokens.accent;
+    let track_off = crate::tokens::with_alpha(tokens.fg, 0.22);
+    let surface = tokens.surface;
+
+    let track = div()
+        .id(id)
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .w(px(TRACK_WIDTH))
+        .h(px(TRACK_HEIGHT))
+        .p(px(2.0))
+        .rounded_full()
+        .bg(if on { accent } else { track_off })
+        .cursor_pointer()
+        .when(on, |element| element.justify_end())
+        .on_click(on_click)
+        .child(
+            div()
+                .flex_none()
+                .w(px(KNOB))
+                .h(px(KNOB))
+                .rounded_full()
+                .bg(surface),
+        );
+
+    div()
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .child(track)
+        .child(
+            div()
+                .flex_none()
+                .w(px(14.0))
+                .text_size(px(metrics::FONT_XS))
+                .text_color(tokens.muted_fg)
+                .child(if on { "开" } else { "关" }),
+        )
+        .into_any_element()
+}
+
 /// 与可见性无关的勾选框：15×15 圆角方块，选中时用强调色填充并画对勾。
 ///
 /// 手绘而不用组件库的 `Checkbox`：后者需要独立的实体状态并能获得焦点，

@@ -14,12 +14,12 @@ pub mod tab;
 pub mod tabs;
 pub mod util;
 
-pub use appearance::{Density, IconZoom};
+pub use appearance::{Column, ColumnWidths, Density, IconZoom};
 pub use command::Command;
 pub use entry::{Entry, EntryKind, ExtId, IconId, SortDirection, SortKey, ViewMode};
 pub use location::Location;
 pub use naming::{NameError, unique_name, validate};
 pub use selection::Selection;
-pub use tab::TabState;
+pub use tab::{TabSnapshot, TabState};
 pub use tabs::{Tab, TabId, TabsState};
 pub use util::format_size;

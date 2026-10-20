@@ -26,25 +26,28 @@ impl ShellView {
 
         // 「此电脑」展示的是驱动器而不是文件条目，统计口径完全不同。
         // 不分开算的话会显示成「共 0 项 · 0 字节」，看起来像出了故障。
-        let left: String = if matches!(self.tabs.active_state().location(), Location::Computer) {
-            format!("{} 个驱动器 · 此电脑", self.drives.len())
-        } else {
-            let (count, total_bytes) = summarize(self.visible());
-            let mut text = format!("{count} 个项目 · 共 {}", format_size(total_bytes));
-            if self.loading {
-                // 扫描期间给出「已到达多少」比一个转圈更有信息量。
-                text.push_str(&format!(" · 正在读取（已加载 {count} 项）"));
+        // 设置页同理：它不是文件夹，条目统计在那里没有意义。
+        let left: String = match self.tabs.active_state().location() {
+            Location::Computer => format!("{} 个驱动器 · 此电脑", self.drives.len()),
+            Location::Settings => String::from("外观与偏好 · 设置"),
+            _ => {
+                let (count, total_bytes) = summarize(self.visible());
+                let mut text = format!("{count} 个项目 · 共 {}", format_size(total_bytes));
+                if self.loading {
+                    // 扫描期间给出「已到达多少」比一个转圈更有信息量。
+                    text.push_str(&format!(" · 正在读取（已加载 {count} 项）"));
+                }
+                if !self.selection.is_empty() {
+                    text.push_str(&format!(
+                        " · 已选 {} 项 · {}",
+                        self.selection.len(),
+                        format_size(self.selection_size())
+                    ));
+                }
+                text.push_str(" · ");
+                text.push_str(&self.location_label());
+                text
             }
-            if !self.selection.is_empty() {
-                text.push_str(&format!(
-                    " · 已选 {} 项 · {}",
-                    self.selection.len(),
-                    format_size(self.selection_size())
-                ));
-            }
-            text.push_str(" · ");
-            text.push_str(&self.location_label());
-            text
         };
 
         let mut bar = div()

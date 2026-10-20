@@ -1,7 +1,7 @@
 //! 多标签页集合。
 
 use crate::location::Location;
-use crate::tab::TabState;
+use crate::tab::{TabSnapshot, TabState};
 
 /// 标签页的唯一标识。
 ///
@@ -76,6 +76,40 @@ impl TabsState {
             default_location,
             closed: Vec::new(),
         }
+    }
+
+    /// 由持久化快照整体还原。任何一份快照不合法就返回 `None`。
+    ///
+    /// 全有或全无：部分还原会得到「标签数量与历史对不上」的状态，
+    /// 那种状态既不好解释，也会让 `Ctrl+Shift+T` 的关闭栈含义变得可疑。
+    /// 调用方在 `None` 时退回「单个默认标签」即可。
+    ///
+    /// 关闭栈刻意**不还原**：它是本次会话内的操作记录，
+    /// 跨重启复活一个「可以重新打开的标签」没有对应的用户动作。
+    pub fn from_snapshots(snapshots: Vec<TabSnapshot>, active: usize) -> Option<Self> {
+        if snapshots.is_empty() {
+            return None;
+        }
+        let mut tabs = Vec::with_capacity(snapshots.len());
+        for (index, snapshot) in snapshots.into_iter().enumerate() {
+            let state = TabState::from_snapshot(snapshot)?;
+            tabs.push(Tab {
+                id: TabId(index as u64),
+                state,
+            });
+        }
+        // 越界的 active 收敛到最后一个标签，而不是拒绝整份会话：
+        // 标签数量对得上而激活项越界，说明会话文件被外部改过，收敛即可用。
+        let active = active.min(tabs.len() - 1);
+        let default_location = tabs[0].state().location().clone();
+        let next_id = tabs.len() as u64;
+        Some(Self {
+            tabs,
+            active,
+            next_id,
+            default_location,
+            closed: Vec::new(),
+        })
     }
 
     pub fn tabs(&self) -> &[Tab] {
@@ -456,5 +490,57 @@ mod tests {
         tabs.move_tab(b, 0);
         assert_eq!(tabs.index_of(b), Some(0));
         assert_eq!(tabs.active().id(), b);
+    }
+
+    #[test]
+    fn snapshots_restore_order_history_and_active_tab() {
+        let mut tabs = TabsState::new(r"C:\home");
+        tabs.open_at(r"C:\a");
+        let c = tabs.open_at(r"C:\b");
+        assert!(tabs.select(c));
+
+        let snapshots: Vec<crate::TabSnapshot> =
+            tabs.tabs().iter().map(|tab| tab.state().snapshot()).collect();
+        let active = tabs.active_index();
+
+        let restored = TabsState::from_snapshots(snapshots, active).expect("应能还原会话");
+        assert_eq!(restored.len(), 3);
+        assert_eq!(restored.active_index(), 2);
+        assert_tab_dir(&restored, 0, r"C:\home");
+        assert_tab_dir(&restored, 1, r"C:\a");
+        assert_tab_dir(&restored, 2, r"C:\b");
+        // 还原出来的标签 id 必须互不相同，后续 open_at 也不能与之冲突。
+        let ids: Vec<TabId> = restored.tabs().iter().map(|tab| tab.id()).collect();
+        assert_eq!(ids.len(), 3);
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[1], ids[2]);
+    }
+
+    #[test]
+    fn restoring_rejects_empty_or_invalid_sessions() {
+        assert!(TabsState::from_snapshots(Vec::new(), 0).is_none());
+
+        // 一份坏快照会让整份会话被拒绝：宁可回到单标签，也不要半对半错的历史。
+        let good = TabsState::new(r"C:\home").active_state().snapshot();
+        let bad = crate::TabSnapshot {
+            history: Vec::new(),
+            cursor: 0,
+            view_mode: crate::ViewMode::Details,
+        };
+        assert!(TabsState::from_snapshots(vec![good, bad], 0).is_none());
+    }
+
+    #[test]
+    fn restoring_clamps_an_out_of_range_active_index() {
+        let snapshot = TabsState::new(r"C:\home").active_state().snapshot();
+        let restored = TabsState::from_snapshots(vec![snapshot], 7).expect("应能还原");
+        assert_eq!(restored.active_index(), 0);
+    }
+
+    fn assert_tab_dir(tabs: &TabsState, index: usize, expected: &str) {
+        assert_eq!(
+            tabs.tabs()[index].state().directory(),
+            Some(std::path::Path::new(expected))
+        );
     }
 }

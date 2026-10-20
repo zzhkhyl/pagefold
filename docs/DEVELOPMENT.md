@@ -222,7 +222,7 @@ target\innosetup-6.7.3.exe /PORTABLE=1 /VERYSILENT /SUPPRESSMSGBOXES /NORESTART 
 | 依赖解析           | 828 个包，经 USTC 镜像全部拉取成功                                                                                                                     |
 | debug 构建         | 通过                                                                                                                                                   |
 | debug 本地运行     | 通过：窗口存活满 15 秒；日志显示`Using GPU: Intel(R) Graphics`、`Created device with Direct3D 11.1 feature level`、`Use Microsoft YaHei UI as UI font` |
-| 单元测试           | `cargo test --workspace` 62 项全部通过，零警告                                                                                                         |
+| 单元测试           | `cargo test --workspace` 210 项全部通过（1 项标记 ignored），零警告                                                                                     |
 | release 构建       | 通过：`Finished release profile [optimized] target(s) in 4m 54s`，0 错误，产物 `target/release/pagefold.exe`（17.8 MB）                              |
 | release 产物子系统 | 通过：`PE32+ executable for MS Windows 6.00 (GUI), x86-64`，不弹控制台                                                                                 |
 | release 本地运行   | 通过：进程存活满 10 秒；构建期由`fxc.exe` 编译的内嵌着色器字节码可用                                                                                   |
@@ -280,7 +280,7 @@ file-manager/
     ├── shell/     # 标题栏、标签条、命令条、侧边栏、状态栏、响应式布局与内容区
     ├── views/     # 设计令牌、通用控件、面包屑、图标网格、详情表格、空状态、预览面板、驱动器总览
     ├── core/      # Entry / TabState / Selection / Command / Density / IconZoom（不依赖 gpui 与 Windows API）
-    ├── services/  # 目录流式扫描、图标缓存、配置、监听占位
+    ├── services/  # 目录流式扫描、图标缓存、配置、会话持久化、监听占位
     └── platform/  # FileSystem trait 及 windows / mock 实现
 ```
 
@@ -292,7 +292,17 @@ file-manager/
 | 区块尺寸与响应式判定         | `crates/shell/src/layout.rs` 的 `Viewport`                             |
 | 某个控件的形态               | `crates/views/src/widgets.rs`（图标按钮 / 分段控件 / 勾选框 / 容量条） |
 | 主题与组件库色值同步         | `crates/shell/src/shell.rs` 的 `apply_component_theme`                 |
+| 设置页的内容与分组           | `crates/views/src/settings_page.rs`（纯展示）+ `crates/shell/src/layout.rs` 的 `render_settings`（状态绑定） |
+| 会话恢复（标签 / 历史）      | `crates/services/src/session.rs` + `crates/core/src/tab.rs` 的 `TabSnapshot` |
+| 列宽偏好与钳制规则           | `crates/core/src/appearance.rs` 的 `ColumnWidths`；渲染侧在 `crates/views/src/details_table.rs` |
 | 应用图标的几何与配色         | `tools/icon-gen/src/design.rs`，改完重新生成（见 `assets/app-icon/README.md`） |
+
+用户数据的两个落点（都在 `%APPDATA%\pagefold\`，损坏时都只告警并回退默认）：
+
+| 文件 | 内容 | 归属 |
+| --- | --- | --- |
+| `config.json` | 主题、视图模式、密度、缩放、扩展名、侧边栏折叠、预览开关、`detail_columns` | `fm_services::config` |
+| `session.json` | 标签顺序、各自历史与游标、视图模式、激活下标、格式版本 | `fm_services::session` |
 
 分层约束：UI 层完全不感知平台差异，所有原生能力经 `platform` 层注入；
 `core` 只描述数据与状态流转，不依赖 gpui、Windows API 或文件系统实现。

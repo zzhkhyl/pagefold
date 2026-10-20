@@ -5,16 +5,22 @@
 //!
 //! 行高由密度决定；`uniform_list` 实测的是第一项，因此只要全表等高，换密度不会让滚动漂移。
 //!
-//! 待补：列宽拖拽、按列右键菜单。两者都需要命中测试与拖动状态，
-//! 放在后续「交互」阶段一并处理。
+//! ## 列宽拖拽的两个刻意设计
+//!
+//! 1. **可见性与宽度分离**：断点仍然决定「这一列在不在」（`Option<f32>`），
+//!    用户的拖动偏好只覆盖**可见列**的宽度。否则窄屏拖动一下就会把宽屏的布局也改掉。
+//! 2. **拖动只改样式**：拖拽期间不重排、不重扫，只更新一个 `f32` 并重绘。
+//!    行内容只依赖条目本身，列宽变化不影响虚拟化的行高。
+//!
+//! 待补：按列右键菜单（隐藏/自适应列宽）。
 
 use std::rc::Rc;
 
-use fm_core::{Entry, SortDirection, SortKey, format_size};
+use fm_core::{Column, ColumnWidths, Entry, SortDirection, SortKey, format_size};
 use gpui::{
-    AnyElement, App, ClickEvent, Entity, Hsla, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
-    prelude::FluentBuilder as _,
+    AnyElement, App, ClickEvent, CursorStyle, Entity, Hsla, InteractiveElement as _, IntoElement,
+    MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Window, div, px, prelude::FluentBuilder as _,
 };
 use gpui_component::input::InputState;
 use gpui_component::{Icon, Sizable as _};
@@ -32,6 +38,12 @@ pub type SortHandler = Rc<dyn Fn(SortKey, &mut Window, &mut App)>;
 
 /// 表头勾选框（全选 / 全不选）的回调，参数是目标选中状态。
 pub type SelectAllHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+
+/// 拖动列宽分隔线时的回调。参数是被拖的列与**按下时的窗口横坐标**。
+///
+/// 坐标而不是 delta：拖动状态（起点与起始宽度）由 shell 持有，
+/// 视图层每帧重建，把状态放在这里会每帧清零。
+pub type ColumnResizeStart = Rc<dyn Fn(Column, f32, &mut Window, &mut App)>;
 
 /// 各列的可见性与宽度。
 ///
@@ -51,42 +63,65 @@ pub struct Columns {
 
 impl Columns {
     /// 按视口宽度选择列布局，断点与设计稿的 `@media` 一致。
-    pub fn for_viewport(viewport_width: f32, tokens: &Tokens) -> Self {
+    ///
+    /// `overrides` 只覆盖**可见列**的宽度；`content_width` 用于在名称列被挤到
+    /// 180px 以下之前收敛三列之和（见 [`ColumnWidths::fitted`]）。
+    /// 两者都取「用户偏好」与「当前窗口」的实时值，因此拖动一步就能看到结果，
+    /// 不需要先把偏好写盘。
+    pub fn for_viewport(
+        viewport_width: f32,
+        tokens: &Tokens,
+        overrides: ColumnWidths,
+        content_width: f32,
+    ) -> Self {
         let row_height = tokens.row_height;
-        if viewport_width <= breakpoints::NARROW {
-            return Self {
+        // 先算断点默认值：它决定「这一列在不在」，也决定没拖过时的宽度。
+        let base = if viewport_width <= breakpoints::NARROW {
+            Self {
                 date: None,
                 kind: None,
                 size: metrics::SIZE_COLUMN_TINY,
                 row_height,
-            };
-        }
-        if viewport_width <= breakpoints::HIDE_DATE {
-            return Self {
+            }
+        } else if viewport_width <= breakpoints::HIDE_DATE {
+            Self {
                 date: None,
                 kind: None,
                 size: metrics::SIZE_COLUMN_NARROW,
                 row_height,
-            };
-        }
-        if viewport_width <= breakpoints::HIDE_TYPE {
-            return Self {
+            }
+        } else if viewport_width <= breakpoints::HIDE_TYPE {
+            Self {
                 date: Some(metrics::DATE_COLUMN_NARROW),
                 kind: None,
                 size: metrics::SIZE_COLUMN,
                 row_height,
-            };
-        }
+            }
+        } else {
+            Self {
+                date: Some(metrics::DATE_COLUMN),
+                kind: Some(metrics::TYPE_COLUMN),
+                size: metrics::SIZE_COLUMN,
+                row_height,
+            }
+        };
+
+        let fitted = overrides.fitted(content_width);
         Self {
-            date: Some(metrics::DATE_COLUMN),
-            kind: Some(metrics::TYPE_COLUMN),
-            size: metrics::SIZE_COLUMN,
+            // 隐藏列不应用偏好：`None` 保持为「不在」，而不是「宽度为某个值」。
+            date: base
+                .date
+                .map(|width| fitted.get(Column::Date).unwrap_or(width)),
+            kind: base
+                .kind
+                .map(|width| fitted.get(Column::Kind).unwrap_or(width)),
+            size: fitted.get(Column::Size).unwrap_or(base.size),
             row_height,
         }
     }
 }
 
-/// 表头：勾选框 + 可点击排序的列名。
+/// 表头：勾选框 + 可点击排序的列名 + 可拖动的列宽分隔线。
 #[allow(clippy::too_many_arguments)]
 pub fn header(
     sort_key: SortKey,
@@ -96,6 +131,7 @@ pub fn header(
     tokens: &Tokens,
     on_sort: SortHandler,
     on_select_all: SelectAllHandler,
+    on_resize: Option<ColumnResizeStart>,
 ) -> AnyElement {
     let hover = tokens.hover;
 
@@ -140,6 +176,7 @@ pub fn header(
         direction,
         tokens,
         Rc::clone(&on_sort),
+        None,
     ));
     if let Some(width) = columns.date {
         row = row.child(header_cell(
@@ -151,6 +188,7 @@ pub fn header(
             direction,
             tokens,
             Rc::clone(&on_sort),
+            on_resize.as_ref().map(|handler| (Column::Date, handler)),
         ));
     }
     if let Some(width) = columns.kind {
@@ -163,6 +201,7 @@ pub fn header(
             direction,
             tokens,
             Rc::clone(&on_sort),
+            on_resize.as_ref().map(|handler| (Column::Kind, handler)),
         ));
     }
     row = row.child(header_cell(
@@ -174,6 +213,7 @@ pub fn header(
         direction,
         tokens,
         on_sort,
+        on_resize.as_ref().map(|handler| (Column::Size, handler)),
     ));
 
     row.into_any_element()
@@ -391,6 +431,7 @@ fn header_cell(
     direction: SortDirection,
     tokens: &Tokens,
     on_sort: SortHandler,
+    resize: Option<(Column, &ColumnResizeStart)>,
 ) -> AnyElement {
     let is_active = key == active_key;
     let foreground = tokens.fg;
@@ -423,16 +464,47 @@ fn header_cell(
         .child(label)
         .children(arrow);
 
-    match width {
-        Some(width) => div()
-            .flex_none()
-            .flex()
-            .w(px(width))
-            .h_full()
-            .child(base.flex_grow(1.0).min_w(px(0.0)))
-            .into_any_element(),
-        None => base.flex_grow(1.0).min_w(px(0.0)).into_any_element(),
+    let Some(width) = width else {
+        return base.flex_grow(1.0).min_w(px(0.0)).into_any_element();
+    };
+
+    // `relative()` 是分隔线的定位基准：命中区做成**绝对定位**的 6px 竖条，
+    // 压在列的交界处。这样它不参与 flex 布局——否则每个分隔线都会把
+    // 表头的数据列整体挤窄 6px，表头与数据行就错位了。
+    let mut cell = div()
+        .relative()
+        .flex_none()
+        .flex()
+        .w(px(width))
+        .h_full()
+        .child(base.flex_grow(1.0).min_w(px(0.0)));
+
+    if let Some((column, handler)) = resize {
+        let handler = Rc::clone(handler);
+        let accent = tokens.accent;
+        // 分隔线只在悬停/拖动时可见：常驻一条竖线会让表头看起来像被切碎了。
+        cell = cell.child(
+            div()
+                .id(("th-resize", column as usize))
+                .absolute()
+                .left(px(-3.0))
+                .top_0()
+                .bottom_0()
+                .w(px(6.0))
+                .cursor(CursorStyle::ResizeLeftRight)
+                .hover(move |style| style.bg(crate::tokens::with_alpha(accent, 0.45)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    move |event, window, cx| {
+                        // 阻止冒泡：否则按在分隔线上会顺带触发这一列的排序。
+                        cx.stop_propagation();
+                        handler(column, f32::from(event.position.x), window, cx);
+                    },
+                ),
+        );
     }
+
+    cell.into_any_element()
 }
 
 /// 固定宽度 + 单行截断的文本单元格（日期 / 类型 / 大小）。

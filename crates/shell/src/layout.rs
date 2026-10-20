@@ -12,13 +12,16 @@ use std::rc::Rc;
 use fm_core::{Entry, Location, ViewMode};
 use fm_services::clipboard::ClipboardMode;
 use fm_views::{
-    AreaMenuBuilder, DragSelectHandler, SelectHandler, breakpoints, computer, details_table,
-    empty_state, icon_grid, metrics, preview_panel, virtual_rows, widgets,
+    AreaMenuBuilder, ColumnResizeStart, DragSelectHandler, RevealHandler, SelectHandler,
+    breakpoints, computer, details_table, empty_state, icon_grid, metrics, preview_panel,
+    settings_page, virtual_rows, widgets,
 };
 use gpui::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px, prelude::FluentBuilder as _,
+    Pixels, Point, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    prelude::FluentBuilder as _,
 };
+use gpui_component::WindowExt as _;
 use gpui_component::menu::ContextMenuExt as _;
 use gpui_kit_assets::IconName;
 
@@ -31,6 +34,15 @@ use crate::sidebar::{SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_WIDTH};
 /// 滚动条一出现就会把最后一列的右半边挤到可视区之外。
 /// 取 16px 对齐 Windows 11 Fluent 滚动条的默认宽度。
 const SCROLLBAR_RESERVE: f32 = 16.0;
+
+/// 结束拖动会话的回调（框选与列宽拖拽共用）。
+type ReleaseHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// 内容区的指针移动回调。
+///
+/// 之所以提到内容区这一层：列宽分隔线只有 6px 宽，鼠标一离开细线就收不到
+/// 后续的 `on_mouse_move`，拖动会「卡住」在半路上。
+type PointerMoveHandler = Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>;
 
 /// 当前视口的响应式状态。
 ///
@@ -125,6 +137,22 @@ impl ShellView {
     ) -> AnyElement {
         let tokens = &self.tokens;
 
+        // 设置页是独立的内容形态：没有条目、没有选中条、也没有空白处菜单。
+        // 单独返回而不是塞进下面那条 if/else 链——否则「未选择项目」的常驻条
+        // 与「新建 / 粘贴」菜单都会跟着出现在设置页上，而它们在那里全都不可用。
+        if self.in_settings() {
+            return div()
+                .flex()
+                .flex_col()
+                .flex_grow(1.0)
+                .min_w(px(0.0))
+                .min_h(px(0.0))
+                .h_full()
+                .overflow_hidden()
+                .child(self.render_settings(cx))
+                .into_any_element();
+        }
+
         let mut children: Vec<AnyElement> = Vec::new();
 
         // 选中条常驻（见 `render_batch_bar` 的说明：它不再随选中状态出现/消失，
@@ -164,18 +192,43 @@ impl ShellView {
         // 行上的右键会在 `fm_views::context_menu` 的外层包装里被截断。
         let area_menu = crate::context_menu::area_menu_builder(cx);
 
-        // 左键抬起（含在内容区外抬起）时结束框选。
-        let end_rubber_band: Rc<dyn Fn(&mut Window, &mut App)> = {
+        // 左键抬起（含在内容区外抬起）时结束**所有**拖动会话：
+        // 框选与列宽拖拽共用这一个出口。分成两个处理器也能工作，
+        // 但「漏掉其中一个」的后果是某一类拖动状态卡住，而那种 bug 只在
+        // 拖到内容区外松手时才会出现。
+        let release: ReleaseHandler = {
             let view = cx.entity().downgrade();
             Rc::new(move |_window, cx: &mut App| {
-                if view.update(cx, |view, _cx| view.end_rubber_band()).is_err() {
-                    tracing::debug!("框选结束时视图已销毁");
+                if view
+                    .update(cx, |view, cx| {
+                        view.end_rubber_band();
+                        view.end_column_resize(cx);
+                    })
+                    .is_err()
+                {
+                    tracing::debug!("结束拖动时视图已销毁");
+                }
+            })
+        };
+
+        // 列宽拖拽的位移在内容区这一层收：分隔线只有 6px 宽，
+        // 挂在自己的 `on_mouse_move` 上时，鼠标一离开那条细线就收不到事件了。
+        let pointer_move: PointerMoveHandler = {
+            let view = cx.entity().downgrade();
+            Rc::new(move |position, _window, cx: &mut App| {
+                if view
+                    .update(cx, |view, cx| {
+                        view.update_column_resize(f32::from(position.x), cx);
+                    })
+                    .is_err()
+                {
+                    tracing::debug!("拖动列宽时视图已销毁");
                 }
             })
         };
 
         children.push(body);
-        content_column(children, &area_menu, end_rubber_band)
+        content_column(children, &area_menu, release, pointer_move)
     }
 
     /// 选中项操作条（设计稿的 `.batch`）。
@@ -349,7 +402,28 @@ impl ShellView {
     fn render_details(&self, viewport: Viewport, cx: &mut Context<Self>) -> AnyElement {
         let tokens = &self.tokens;
         let tab = self.tabs.active_state();
-        let columns = details_table::Columns::for_viewport(viewport.width, tokens);
+        // 列宽 = 断点默认值 + 用户拖动偏好，并按内容区可用宽度收敛。
+        // 三个输入都是「当前一帧的实时值」，因此拖动一步就能看到结果。
+        let columns = details_table::Columns::for_viewport(
+            viewport.width,
+            tokens,
+            self.config.detail_columns,
+            self.content_width(viewport),
+        );
+
+        let on_resize: ColumnResizeStart = {
+            let view = cx.entity().downgrade();
+            Rc::new(move |column, x, window, cx: &mut App| {
+                if view
+                    .update(cx, |view, cx| {
+                        view.begin_column_resize(column, x, window, cx);
+                    })
+                    .is_err()
+                {
+                    tracing::debug!("开始拖动列宽时视图已销毁");
+                }
+            })
+        };
 
         let header = details_table::header(
             tab.sort_key(),
@@ -379,6 +453,7 @@ impl ShellView {
                     }
                 })
             },
+            Some(on_resize),
         );
 
         // 只有视口内的行会进入这个闭包，因此在这里做类型/时间格式化是安全的。
@@ -561,7 +636,9 @@ impl ShellView {
         viewport: Viewport,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.preview_open {
+        // 设置页隐藏预览面板：表单在 306px 的第三栏旁边会被挤成一条，
+        // 而「当前选中项的属性」在设置页也没有意义。
+        if !self.preview_open || self.in_settings() {
             return None;
         }
         let tokens = &self.tokens;
@@ -585,7 +662,22 @@ impl ShellView {
             })
         };
 
-        let inner = preview_panel::panel(&content, tokens, Some(on_open));
+        // 「在列表中定位」：选中项可能已经滚出视野（排序、筛选或键盘导航之后），
+        // 这个按钮把用户带回那一行。滚动的换算在 `ShellView::scroll_into_view` 里，
+        // 网格「下标 → 行号」的除法也在那里，这里不再重复。
+        let on_reveal: RevealHandler = {
+            let view = cx.entity().downgrade();
+            Rc::new(move |_window, cx: &mut App| {
+                if view
+                    .update(cx, |view, cx| view.reveal_selected(cx))
+                    .is_err()
+                {
+                    tracing::debug!("定位选中项时视图已销毁");
+                }
+            })
+        };
+
+        let inner = preview_panel::panel(&content, tokens, Some(on_open), Some(on_reveal));
 
         let container = div()
             .flex_none()
@@ -609,6 +701,119 @@ impl ShellView {
         } else {
             container.w(px(metrics::PREVIEW_WIDTH)).into_any_element()
         })
+    }
+
+    /// 设置页：把当前配置与一组回调交给 `fm_views::settings_page`。
+    ///
+    /// 快照是**值拷贝**：设置页每帧重建，读到的永远是这一帧的配置。
+    /// 回调统一走 `WeakEntity::update`，因为点击发生在渲染之后，
+    /// 那时不能假设视图还活着（窗口可能已经关掉）。
+    pub(crate) fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let snapshot = settings_page::SettingsSnapshot {
+            dark: self.config.dark,
+            density: self.config.density,
+            zoom: self.config.zoom,
+            show_ext: self.config.show_ext,
+            // 用运行期的面板状态而不是配置里的值：两者在窄屏浮层下可能短暂不同步。
+            show_preview: self.preview_open,
+            view_mode: self.tabs.active_state().view_mode(),
+            config_path: fm_services::config::Config::path()
+                .map(|path| path.display().to_string().into()),
+            version: env!("CARGO_PKG_VERSION").into(),
+        };
+
+        let handlers = settings_page::SettingsHandlers {
+            set_dark: {
+                let view = cx.entity().downgrade();
+                Rc::new(move |dark, window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| view.set_dark(dark, window, cx))
+                        .is_err()
+                    {
+                        tracing::debug!("设置主题时视图已销毁");
+                    }
+                })
+            },
+            set_density: {
+                let view = cx.entity().downgrade();
+                Rc::new(move |density, _window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| view.set_density(density, cx))
+                        .is_err()
+                    {
+                        tracing::debug!("设置密度时视图已销毁");
+                    }
+                })
+            },
+            set_zoom: {
+                let view = cx.entity().downgrade();
+                Rc::new(move |zoom, _window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| view.set_zoom(zoom, cx))
+                        .is_err()
+                    {
+                        tracing::debug!("设置缩放时视图已销毁");
+                    }
+                })
+            },
+            toggle_ext: {
+                let view = cx.entity().downgrade();
+                Rc::new(move |_window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| view.toggle_show_ext(cx))
+                        .is_err()
+                    {
+                        tracing::debug!("切换扩展名显示时视图已销毁");
+                    }
+                })
+            },
+            toggle_preview: {
+                let view = cx.entity().downgrade();
+                Rc::new(move |_window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| view.toggle_preview(cx))
+                        .is_err()
+                    {
+                        tracing::debug!("切换预览面板时视图已销毁");
+                    }
+                })
+            },
+            set_view_mode: {
+                let view = cx.entity().downgrade();
+                Rc::new(move |mode, _window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| view.set_view_mode(mode, cx))
+                        .is_err()
+                    {
+                        tracing::debug!("设置视图模式时视图已销毁");
+                    }
+                })
+            },
+            // 复制而不是「打开」配置文件夹：打开目录需要 `ShellExecute`，
+            // 那属平台层（P4 的「双击文件用默认程序打开」一并接入）。
+            // 复制路径已经能解决「我想看看配置文件」这个真实需求。
+            copy_config_path: Rc::new(|window, cx: &mut App| {
+                let Some(path) = fm_services::config::Config::path() else {
+                    window.push_notification(
+                        gpui_component::notification::Notification::warning(
+                            "当前环境读不到 APPDATA，没有配置文件",
+                        ),
+                        cx,
+                    );
+                    return;
+                };
+                let text = path.display().to_string();
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                window.push_notification(
+                    gpui_component::notification::Notification::success(format!(
+                        "已复制配置路径 {text}"
+                    )),
+                    cx,
+                );
+            }),
+        };
+
+        settings_page::page(&snapshot, &self.tokens, handlers)
     }
 
     /// 窄屏侧边栏浮层下的遮罩：点它即收起侧边栏。
@@ -717,11 +922,12 @@ pub(crate) fn drag_handlers(cx: &Context<ShellView>) -> (DragSelectHandler, Drag
 fn content_column(
     children: impl IntoIterator<Item = AnyElement>,
     menu: &AreaMenuBuilder,
-    end_rubber_band: Rc<dyn Fn(&mut Window, &mut App)>,
+    release: ReleaseHandler,
+    pointer_move: PointerMoveHandler,
 ) -> AnyElement {
     let menu = menu.clone();
-    let end_up = Rc::clone(&end_rubber_band);
-    let end_out = Rc::clone(&end_rubber_band);
+    let end_up = Rc::clone(&release);
+    let end_out = Rc::clone(&release);
     div()
         .id("content-area")
         .flex()
@@ -731,7 +937,12 @@ fn content_column(
         .min_h(px(0.0))
         .h_full()
         .overflow_hidden()
-        // 左键抬起即结束框选。`on_mouse_up_out` 兜住在内容区外松开的情况
+        // 拖动位移在这一层收：列宽分隔线只有 6px 宽，
+        // 挂在自己的处理器上时鼠标一离开就收不到后续事件。
+        .on_mouse_move(move |event, window, cx| {
+            (*pointer_move)(event.position, window, cx);
+        })
+        // 左键抬起即结束框选与列宽拖拽。`on_mouse_up_out` 兜住在内容区外松开的情况
         // （例如一路拖进侧边栏才松手）——那一次的鼠标抬起不会命中内容区本身。
         .on_mouse_up(MouseButton::Left, move |_event, window, cx| {
             (*end_up)(window, cx);

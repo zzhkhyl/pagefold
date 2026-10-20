@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 /// 标签页所处的位置。
 ///
 /// 「此电脑」不是文件系统目录，无法用 `PathBuf` 表示。
@@ -11,7 +13,18 @@ use std::path::{Path, PathBuf};
 ///
 /// 用枚举之后，「哪里需要真实目录」由类型系统强制标注：
 /// 每个使用点都要显式处理两种情形，漏掉处理会直接编译不过。
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// ## 为什么设置页也是「位置」
+///
+/// 设置页做成**标签内页面**而不是独立窗口：这样它天然进入 [`crate::TabState`]
+/// 的历史栈、标签条、`Ctrl+W` 与「重新打开关闭的标签页」体系，
+/// 不需要另一套窗口生命周期、主题同步与焦点管理。
+/// `as_dir()` 对它返回 `None`，因此类型系统保证它**永远不会**被送去扫描目录。
+///
+/// 序列化形态（会话持久化用）是 serde 的默认外部标记：
+/// `"Computer"` / `{"Directory":"C:\\Users"}`。刻意不做自定义 tag —
+/// 默认形态对 unit 变体最紧凑，且不需要为「新变体」维护一份 tag 映射表。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Location {
     /// 虚拟位置：本机（驱动器总览）。
     Computer,
@@ -20,6 +33,8 @@ pub enum Location {
     /// **只读浏览**：列出被删除的项目（原路径、大小、删除时间），
     /// 不提供还原与清空——那两条是写操作，属后续阶段。
     RecycleBin,
+    /// 虚拟位置：设置页（同一窗口内的一个标签）。
+    Settings,
     /// 真实文件系统目录。
     Directory(PathBuf),
 }
@@ -32,8 +47,16 @@ impl Location {
     pub fn as_dir(&self) -> Option<&Path> {
         match self {
             Self::Directory(path) => Some(path),
-            Self::Computer | Self::RecycleBin => None,
+            Self::Computer | Self::RecycleBin | Self::Settings => None,
         }
+    }
+
+    /// 是否是一个不承载文件条目的虚拟位置（「此电脑」/ 回收站 / 设置）。
+    ///
+    /// 供「内容区该画什么」这类分派使用：这三者的 `entries` 恒为空，
+    /// 若按「空文件夹」处理就会画出错误的空状态。
+    pub fn is_virtual(&self) -> bool {
+        !matches!(self, Self::Directory(_))
     }
 
     /// 标签页标题。
@@ -42,6 +65,7 @@ impl Location {
             // 虚拟位置没有文件名，直接用固定文案。
             Self::Computer => String::from("此电脑"),
             Self::RecycleBin => String::from("回收站"),
+            Self::Settings => String::from("设置"),
             // 根目录（如 `C:\`）没有最后一段，退回完整路径，
             // 否则标签标题会变成空串，用户看到的是一个没有文字的标签。
             Self::Directory(path) => path
@@ -80,6 +104,14 @@ impl Location {
             || trimmed == "回收站"
         {
             return Self::RecycleBin;
+        }
+        // 设置页也接受命令行关键字：`pagefold.exe settings` 可以直接落到设置，
+        // 与「此电脑」「回收站」保持同一套入口规则。
+        if trimmed.eq_ignore_ascii_case("settings")
+            || trimmed.eq_ignore_ascii_case("preferences")
+            || trimmed == "设置"
+        {
+            return Self::Settings;
         }
         if trimmed.eq_ignore_ascii_case(COMPUTER_CLSID) {
             return Self::Computer;
@@ -189,6 +221,43 @@ mod tests {
             Location::from_shell_argument(r"D:\"),
             Location::from(PathBuf::from(r"D:\"))
         );
+    }
+
+    #[test]
+    fn settings_is_a_virtual_location_with_its_own_title() {
+        // 设置页是「位置」而不是目录：它必须能被标签页承载，但不能被送去扫描。
+        assert_eq!(Location::Settings.as_dir(), None);
+        assert_eq!(Location::Settings.title(), "设置");
+        assert!(Location::Settings.is_virtual());
+        assert!(!Location::Settings.is_dir(Path::new(r"C:\Users")));
+        // 与「此电脑」同属虚拟位置，但两者在标签标题上必须可区分。
+        assert_ne!(Location::Settings.title(), Location::Computer.title());
+    }
+
+    #[test]
+    fn shell_argument_recognises_the_settings_page() {
+        for argument in ["settings", "SETTINGS", "preferences", "设置"] {
+            assert_eq!(
+                Location::from_shell_argument(argument),
+                Location::Settings,
+                "参数 {argument:?} 应映射到设置页"
+            );
+        }
+    }
+
+    #[test]
+    fn location_round_trips_through_json() {
+        // 会话持久化依赖这条往返：标签的历史里三种位置都可能出现。
+        for location in [
+            Location::Computer,
+            Location::RecycleBin,
+            Location::Settings,
+            Location::Directory(PathBuf::from(r"C:\Users\abc")),
+        ] {
+            let text = serde_json::to_string(&location).expect("位置应可序列化");
+            let parsed: Location = serde_json::from_str(&text).expect("位置应可反序列化");
+            assert_eq!(parsed, location, "{text}");
+        }
     }
 
     #[test]

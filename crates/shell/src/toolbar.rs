@@ -14,6 +14,7 @@ use fm_views::widgets;
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    prelude::FluentBuilder as _,
 };
 use gpui_component::button::{
     Button, ButtonCustomVariant, ButtonVariant, ButtonVariants as _, DropdownButton,
@@ -185,6 +186,22 @@ impl ShellView {
             }),
         );
 
+        // 设置入口放在命令条右端：设计稿的「设置 / 帮助」原本在品牌栏上，
+        // 那一栏整条删掉之后它们一直没有落点，这里补上（标签条菜单里还有一份）。
+        let on_settings = self.in_settings();
+        let settings = widgets::icon_button(
+            "open-settings",
+            IconName::Settings,
+            16.0,
+            "设置（Ctrl+,）",
+            on_settings,
+            true,
+            tokens,
+            cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.open_settings(cx);
+            }),
+        );
+
         // 命令条上的「新建」是一个**下拉**：设计稿的 `$('#btnNew').onclick`
         // 会弹出「新建文件夹 / 新建文本文档 / 新建 Markdown 文档 / 粘贴」四项。
         //
@@ -213,7 +230,7 @@ impl ShellView {
             )
             .dropdown_menu(crate::context_menu::new_menu_builder(cx));
 
-        div()
+        let mut bar = div()
             .flex_none()
             .flex()
             .flex_row()
@@ -228,12 +245,21 @@ impl ShellView {
             .border_color(tokens.border)
             .child(navigation)
             .child(sidebar_toggle)
-            .child(address)
-            .child(search)
-            .child(view_switch)
-            .child(sort)
-            .child(preview_toggle)
-            .child(new_button)
+            .child(address);
+
+        // 设置页不是文件夹：搜索、视图切换、排序、预览与「新建」在那里
+        // 全都是无对象可作用的操作。留着一个点了没反应的按钮，
+        // 比让它消失更像故障，因此整组隐藏。
+        if !on_settings {
+            bar = bar
+                .child(search)
+                .child(view_switch)
+                .child(sort)
+                .child(preview_toggle);
+        }
+
+        bar.child(settings)
+            .when(!on_settings, |element| element.child(new_button))
             .into_any_element()
     }
 
@@ -264,7 +290,9 @@ impl ShellView {
             // 虚拟位置没有层级可拆，直接给一个静态标签。
             // 文案不在这里硬编码：`Location::title()` 是「位置叫什么」的唯一来源，
             // 标签页标题与面包屑因此不会各写一份而慢慢分叉。
-            fm_core::Location::Computer | fm_core::Location::RecycleBin => div()
+            fm_core::Location::Computer
+            | fm_core::Location::RecycleBin
+            | fm_core::Location::Settings => div()
                 .flex_grow(1.0)
                 .min_w(px(0.0))
                 .px(px(2.0))

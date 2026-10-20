@@ -24,6 +24,10 @@ actions!(
         SetViewDetails,
         SetViewIcons,
         ToggleTheme,
+        /// 打开设置页（标签内页面，不是独立窗口）。
+        OpenSettings,
+        /// 打开帮助：与设置页共用「关于与快捷键」分节，不另造页面。
+        OpenHelp,
         SelectAll,
         CopyItems,
         CutItems,

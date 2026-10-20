@@ -9,3 +9,7 @@ publish.workspace = true
 
 [dependencies]
 serde.workspace = true
+
+[dev-dependencies]
+# 会话快照的往返测试要用真实的 JSON 编解码，而不是只比较结构体。
+serde_json.workspace = true

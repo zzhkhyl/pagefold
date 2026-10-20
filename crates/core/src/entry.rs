@@ -66,6 +66,16 @@ pub enum ViewMode {
     Details,
 }
 
+impl ViewMode {
+    /// 供设置页与命令条提示使用的文案。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Icons => "图标",
+            Self::Details => "详细信息",
+        }
+    }
+}
+
 /// 详情视图的排序键。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SortKey {

@@ -11,13 +11,15 @@ use std::time::Duration;
 
 use fm_core::naming;
 use fm_core::{
-    Density, Entry, EntryKind, IconZoom, Location, Selection, SortKey, TabId, TabsState, ViewMode,
+    Column, Density, Entry, EntryKind, IconZoom, Location, Selection, SortKey, TabId, TabsState,
+    ViewMode,
 };
 use fm_platform::{Drive, OpReport};
 use fm_services::clipboard::{Clipboard, ClipboardMode, PastePlan};
 use fm_services::config::Config;
 use fm_services::directory::{DEFAULT_BATCH, DirectoryService, ScanBatch, SortSpec};
 use fm_services::ops::{self, NewItem, OpResult};
+use fm_services::session::SessionSnapshot;
 use fm_views::preview_panel::{EntrySummary, PreviewContent};
 use fm_views::{Tokens, widgets};
 use gpui::{
@@ -35,8 +37,9 @@ use crate::layout::Viewport;
 
 use crate::actions::{
     CloseTab, CopyItems, CutItems, DeleteItems, ExtendCursorDown, ExtendCursorUp, FocusAddressBar,
-    GoBack, GoForward, GoUp, MoveCursorDown, MoveCursorUp, NewTab, OpenItem, PasteItems, Refresh,
-    RenameItem, ReopenClosedTab, SelectAll, SetViewDetails, SetViewIcons, ToggleTheme,
+    GoBack, GoForward, GoUp, MoveCursorDown, MoveCursorUp, NewTab, OpenHelp, OpenItem, OpenSettings,
+    PasteItems, Refresh, RenameItem, ReopenClosedTab, SelectAll, SetViewDetails, SetViewIcons,
+    ToggleTheme,
 };
 
 /// 把「动作 → 视图方法」的绑定接到根元素上。
@@ -97,6 +100,12 @@ pub struct ShellView {
     pub(crate) rubber_band: Option<RubberBand>,
     /// 标签拖拽排序会话：左键按下未抬起时存在。
     pub(crate) tab_drag: Option<TabDrag>,
+    /// 列宽拖拽会话：左键按在表头分隔线上时存在。
+    ///
+    /// 只存「从哪一列、哪个横坐标、起始宽度开始」，实时宽度写回
+    /// `config.detail_columns`——因此拖动期间的重绘读到的永远是最新值，
+    /// 松开后保存的也正是屏幕上那一条。
+    pub(crate) column_drag: Option<ColumnDrag>,
     /// 搜索关键词。
     pub(crate) query: String,
     /// 右侧预览面板是否展开（宽屏下的持久化开关）。
@@ -208,12 +217,36 @@ impl ShellView {
         let tokens = build_tokens(&config, cx);
         let preview_open = config.show_preview;
 
+        // 会话恢复的优先级：命令行位置 > 上次会话 > 默认主目录。
+        // 命令行必须优先——「用叠页打开这个文件夹」是用户此刻的明确意图，
+        // 不该被上次退出时的位置覆盖。因此有命令行参数时连会话文件都不读。
+        let session = if initial_location.is_none() {
+            SessionSnapshot::load()
+        } else {
+            None
+        };
+        let default_location = Location::from(default_start_path());
+        let (tabs, restored_session) = match session {
+            Some(session) => {
+                let active = session.active;
+                match TabsState::from_snapshots(session.tabs, active) {
+                    Some(tabs) => (tabs, true),
+                    None => {
+                        // 坏会话只影响「回到上次位置」，不影响程序可用性。
+                        tracing::warn!("会话内容无法恢复，本次启动回到默认标签");
+                        (TabsState::new(default_location.clone()), false)
+                    }
+                }
+            }
+            None => (
+                TabsState::new(initial_location.unwrap_or(default_location)),
+                false,
+            ),
+        };
+
         let mut this = Self {
             service,
-            // 命令行传入的位置优先，便于从资源管理器「打开方式」、脚本或热键宿主直达目标。
-            tabs: TabsState::new(
-                initial_location.unwrap_or_else(|| Location::from(default_start_path())),
-            ),
+            tabs,
             config,
             drives,
             quick_access,
@@ -225,6 +258,7 @@ impl ShellView {
             cursor: None,
             rubber_band: None,
             tab_drag: None,
+            column_drag: None,
             query: String::new(),
             preview_open,
             sidebar_overlay: false,
@@ -251,8 +285,13 @@ impl ShellView {
 
         // 让上次退出时的视图模式在启动时就生效：`TabState` 只认识自己的默认值（图标视图），
         // 不把配置搬过来的话，用户每次启动都会被重置回图标视图。
-        let initial_view = this.config.view_mode;
-        this.tabs.active_state_mut().set_view_mode(initial_view);
+        //
+        // 从会话恢复时**不覆盖**：那份快照里每个标签都有自己的视图模式，
+        // 用配置里的全局值统一改写，会让「详细信息」标签重启后变成图标视图。
+        if !restored_session {
+            let initial_view = this.config.view_mode;
+            this.tabs.active_state_mut().set_view_mode(initial_view);
+        }
 
         this.reload(cx);
         this
@@ -395,6 +434,24 @@ pub(crate) struct RubberBand {
 
 /// 框选的拖动阈值（px）。低于它的一律按单击处理。
 const RUBBER_BAND_THRESHOLD: f32 = 4.0;
+
+/// 一次列宽拖拽会话。
+pub(crate) struct ColumnDrag {
+    /// 正在被拖的列。
+    pub(crate) column: Column,
+    /// 按下时的窗口横坐标（px）。
+    start_x: f32,
+    /// 按下时该列的实际宽度（可能是断点默认值，也可能是上次拖动的结果）。
+    start_width: f32,
+}
+
+impl ColumnDrag {
+    /// 由当前横坐标算出目标宽度。**不做钳制**：区间由
+    /// [`fm_core::ColumnWidths::set`] 负责，避免同一规则写两遍。
+    fn width_at(&self, x: f32) -> f32 {
+        self.start_width + (x - self.start_x)
+    }
+}
 
 /// 一次标签拖拽排序会话。
 pub(crate) struct TabDrag {
@@ -929,7 +986,39 @@ impl ShellView {
             Location::Directory(dir) => {
                 self.begin_scan(dir, sort, cx);
             }
+            // 设置页没有内容需要加载（`render_content` 直接渲染它），
+            // 但必须清掉上一次的条目：否则从目录切过来时，
+            // 状态栏与预览面板仍会显示上一个目录的统计数据。
+            Location::Settings => {
+                self.entries.clear();
+                self.filtered = None;
+                self.loading = false;
+                self.error = None;
+            }
         }
+
+        // 导航、切换标签、开关标签都会经过这里，因此会话写盘只需要这一个挂点。
+        self.persist_session();
+    }
+
+    /// 当前会话的快照。
+    fn session_snapshot(&self) -> SessionSnapshot {
+        SessionSnapshot::new(
+            self.tabs
+                .tabs()
+                .iter()
+                .map(|tab| tab.state().snapshot())
+                .collect(),
+            self.tabs.active_index(),
+        )
+    }
+
+    /// 把会话写入磁盘（`%APPDATA%\pagefold\session.json`）。
+    ///
+    /// 同步写，与 `Config::save` 同一策略：快照是 KB 级 JSON，
+    /// 而异步去抖会引入「关窗瞬间丢掉最后一次导航」这条只在特定时序下出现的边界。
+    fn persist_session(&self) {
+        self.session_snapshot().save();
     }
 
     /// 扫描结束后，把 `pending_select` 指向的条目选中。
@@ -1237,8 +1326,15 @@ impl ShellView {
         match self.tabs.active_state().location() {
             Location::Computer => String::from("此电脑"),
             Location::RecycleBin => String::from("回收站"),
+            // 设置页没有路径，用标签标题保持一致，而不是显示一个空串或假路径。
+            Location::Settings => String::from("设置"),
             Location::Directory(path) => path.display().to_string(),
         }
+    }
+
+    /// 当前标签是否停在设置页。
+    pub(crate) fn in_settings(&self) -> bool {
+        matches!(self.tabs.active_state().location(), Location::Settings)
     }
 
     /// 当前标签是否停在「回收站」。
@@ -1387,6 +1483,31 @@ impl ShellView {
         self.reload(cx);
     }
 
+    /// 打开设置页（标签内页面）。
+    ///
+    /// 已经有一个设置标签时**切过去**而不是再开一个：`Ctrl+,` 是「我要看看设置」，
+    /// 不是「再开一个设置」。用户手动开多个也不是错误——他只会在关的时候发现。
+    pub(crate) fn open_settings(&mut self, cx: &mut Context<Self>) {
+        let existing = self
+            .tabs
+            .tabs()
+            .iter()
+            .find(|tab| *tab.state().location() == Location::Settings)
+            .map(|tab| tab.id());
+        match existing {
+            Some(id) => self.select_tab(id, cx),
+            None => {
+                self.tabs.open_at(Location::Settings);
+                self.reload(cx);
+            }
+        }
+    }
+
+    /// 打开帮助。与设置页共用「关于与快捷键」分节。
+    pub(crate) fn open_help(&mut self, cx: &mut Context<Self>) {
+        self.open_settings(cx);
+    }
+
     /// 后退。返回是否真的发生了导航。
     pub(crate) fn go_back(&mut self, cx: &mut Context<Self>) -> bool {
         if self.tabs.active_state_mut().back().is_none() {
@@ -1422,6 +1543,8 @@ impl ShellView {
         self.tabs.active_state_mut().set_view_mode(mode);
         self.config.view_mode = mode;
         self.config.save();
+        // 视图模式是会话快照的一部分，改完要立刻落盘。
+        self.persist_session();
         cx.notify();
     }
 
@@ -1478,7 +1601,17 @@ impl ShellView {
     ///
     /// 这里必须传入 `window`：主题里的窗口相关外观（滚动条、标题栏）依赖它才能同步刷新。
     pub(crate) fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.config.dark = !self.config.dark;
+        self.set_dark(!self.config.dark, window, cx);
+    }
+
+    /// 指定深浅色主题（设置页的单选比「切换」语义更明确）。
+    ///
+    /// 这里必须传入 `window`：主题里的窗口相关外观（滚动条、标题栏）依赖它才能同步刷新。
+    pub(crate) fn set_dark(&mut self, dark: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.config.dark == dark {
+            return;
+        }
+        self.config.dark = dark;
         Theme::change(theme_mode(self.config.dark), Some(window), cx);
         // 组件库主题重置后要把设计令牌再同步一次，否则输入框会退回组件库默认配色。
         apply_component_theme(&self.config, cx);
@@ -1497,12 +1630,9 @@ impl ShellView {
         cx.notify();
     }
 
-    /// 设置界面密度并持久化。
+    /// 设置界面密度并持久化（入口在设置页）。
     ///
-    /// 当前没有 UI 入口——设计稿把密度开关放在独立的设置页（`file-manager-settings.html`），
-    /// 而设置页不在本次交付范围内。保留这个入口是为了让设置页接入时不必改这里，
-    /// 平时密度由配置文件决定（见 README「已知缺口」）。
-    #[allow(dead_code)]
+    /// 行高令牌由 `refresh_tokens` 每帧重建，因此这里只需要改配置并重绘。
     pub(crate) fn set_density(&mut self, density: Density, cx: &mut Context<Self>) {
         if self.config.density == density {
             return;
@@ -1510,6 +1640,82 @@ impl ShellView {
         self.config.density = density;
         self.config.save();
         cx.notify();
+    }
+
+    /// 切换「显示文件扩展名」并持久化（入口在设置页）。
+    pub(crate) fn toggle_show_ext(&mut self, cx: &mut Context<Self>) {
+        self.config.show_ext = !self.config.show_ext;
+        self.config.save();
+        cx.notify();
+    }
+
+    /// 把当前选中项滚回可视区（预览面板的「在列表中定位」）。
+    ///
+    /// 用 `selection.single()` 而不是 `cursor`：用户可能是用鼠标点选的那一项，
+    /// 此时焦点项未必同步（键盘导航才维护 `cursor`）。两者都取不到时什么也不做。
+    pub(crate) fn reveal_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(index) = self.selection.single().or(self.cursor) else {
+            return;
+        };
+        self.cursor = Some(index);
+        self.scroll_into_view(index);
+        cx.notify();
+    }
+
+    /// 开始拖动某一列的宽度。
+    ///
+    /// 起始宽度取**当前实际渲染的宽度**（可能是断点默认值，也可能是上次拖动的结果），
+    /// 而不是「上一次的偏好值」：否则在一列从未拖过的情况下，
+    /// 第一次拖动会从 0 或某个默认常量起跳，列宽会瞬间跳变。
+    pub(crate) fn begin_column_resize(
+        &mut self,
+        column: Column,
+        x: f32,
+        window: &Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let viewport = Viewport::for_width(f32::from(window.viewport_size().width));
+        let columns = fm_views::details_table::Columns::for_viewport(
+            viewport.width,
+            &self.tokens,
+            self.config.detail_columns,
+            self.content_width(viewport),
+        );
+        let start_width = match column {
+            Column::Date => columns.date,
+            Column::Kind => columns.kind,
+            Column::Size => Some(columns.size),
+        };
+        // 该列当前不可见（窄屏被断点隐藏）时不起会话：没有可拖的对象。
+        let Some(start_width) = start_width else {
+            return;
+        };
+        self.column_drag = Some(ColumnDrag {
+            column,
+            start_x: x,
+            start_width,
+        });
+    }
+
+    /// 拖动中：把宽度写回配置（`ColumnWidths::set` 负责区间钳制）。
+    pub(crate) fn update_column_resize(&mut self, x: f32, cx: &mut Context<Self>) {
+        let Some(drag) = self.column_drag.as_ref() else {
+            return;
+        };
+        let width = drag.width_at(x);
+        let column = drag.column;
+        self.config.detail_columns.set(column, width);
+        cx.notify();
+    }
+
+    /// 结束拖动并落盘。
+    ///
+    /// 只有在真的发生过拖动时才写配置：一次单击表头（按下即抬起）不该写盘。
+    pub(crate) fn end_column_resize(&mut self, cx: &mut Context<Self>) {
+        if self.column_drag.take().is_some() {
+            self.config.save();
+            cx.notify();
+        }
     }
 }
 
@@ -1637,7 +1843,10 @@ impl ShellView {
 
     /// 标签拖拽结束。
     pub(crate) fn end_tab_drag(&mut self) {
-        self.tab_drag = None;
+        // 顺序是会话的一部分：拖完就落盘，否则「重排标签后立刻关窗」会丢结果。
+        if self.tab_drag.take().is_some_and(|drag| drag.active) {
+            self.persist_session();
+        }
     }
 
     /// 表头勾选框：全选 / 全不选。
@@ -1887,6 +2096,11 @@ impl ShellView {
             this.set_view_mode(ViewMode::Icons, cx);
         });
         root = bind_shortcut::<ToggleTheme>(root, &view, |this, w, cx| this.toggle_theme(w, cx));
+        root = bind_shortcut::<OpenSettings>(root, &view, |this, _w, cx| {
+            this.open_settings(cx);
+        });
+        // 帮助与设置共用一页（「关于与快捷键」分节），因此两个动作落到同一个方法。
+        root = bind_shortcut::<OpenHelp>(root, &view, |this, _w, cx| this.open_help(cx));
         root = bind_shortcut::<SelectAll>(root, &view, |this, _w, cx| {
             this.toggle_select_all(true, cx);
         });

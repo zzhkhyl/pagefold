@@ -105,6 +105,9 @@ pub fn run() {
                 KeyBinding::new("ctrl-1", SetViewDetails, None),
                 KeyBinding::new("ctrl-2", SetViewIcons, None),
                 KeyBinding::new("ctrl-3", ToggleTheme, None),
+                // Windows 惯例：Ctrl+, 打开设置。逗号在 GPUI 的键位解析里
+                // 是合法单字符键（按 `-` 切分后剩一个 `,`），不需要转义。
+                KeyBinding::new("ctrl-,", OpenSettings, None),
                 KeyBinding::new("ctrl-a", SelectAll, None),
                 KeyBinding::new("ctrl-c", CopyItems, None),
                 KeyBinding::new("ctrl-x", CutItems, None),

@@ -46,10 +46,19 @@ impl ShellView {
             let id = tab.id();
             let is_active = id == active_id;
             let title: SharedString = tab.state().title().into();
-            let icon = if is_active {
-                IconName::FolderOpen
-            } else {
-                IconName::FolderClosed
+            // 图标按位置区分：设置页与「此电脑」用非文件夹图标，
+            // 否则一排标签看起来全是文件夹，分不清哪个是设置。
+            let icon = match tab.state().location() {
+                fm_core::Location::Settings => IconName::Settings,
+                fm_core::Location::Computer => IconName::HardDrive,
+                fm_core::Location::RecycleBin => IconName::Trash,
+                fm_core::Location::Directory(_) => {
+                    if is_active {
+                        IconName::FolderOpen
+                    } else {
+                        IconName::FolderClosed
+                    }
+                }
             };
 
             let close = div()
@@ -330,7 +339,38 @@ fn tab_menu_builder(
                 .icon(Icon::new(IconName::X))
                 .on_click(tab_command_handler(&shell, TabCommand::CloseRight(target))),
         );
+        // 设置与帮助：设计稿把它们放在已删除的品牌栏上，这里给它们一个固定落点。
+        // 帮助不另开页面——它复用设置页的「关于与快捷键」分节。
+        menu = menu.separator();
+        menu = menu.item(
+            PopupMenuItem::new("设置")
+                .icon(Icon::new(IconName::Settings))
+                .action(Box::new(crate::actions::OpenSettings))
+                .on_click(shell_action(&shell, |view, cx| view.open_settings(cx))),
+        );
+        menu = menu.item(
+            PopupMenuItem::new("帮助与快捷键")
+                .icon(Icon::new(IconName::Keyboard))
+                .action(Box::new(crate::actions::OpenHelp))
+                .on_click(shell_action(&shell, |view, cx| view.open_help(cx))),
+        );
         menu
+    }
+}
+
+/// 菜单项 → `ShellView` 方法的通用适配。
+///
+/// 与 [`tab_command_handler`] 分开：那个处理的是标签集合上的操作，
+/// 这里只需要「调用某个方法」，不值得为两个菜单项再造一个枚举。
+fn shell_action(
+    shell: &WeakEntity<ShellView>,
+    action: fn(&mut ShellView, &mut Context<ShellView>),
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+    let shell = shell.clone();
+    move |_event: &ClickEvent, _window: &mut Window, cx: &mut App| {
+        if shell.update(cx, action).is_err() {
+            tracing::debug!("执行菜单动作时视图已销毁");
+        }
     }
 }
 

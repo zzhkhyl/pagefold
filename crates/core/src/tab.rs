@@ -2,8 +2,28 @@
 
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 use crate::entry::{SortDirection, SortKey, ViewMode};
 use crate::location::Location;
+
+/// 一个标签页的**可持久化**快照。
+///
+/// 只包含「重启之后仍然有意义」的字段：历史、游标位置与视图模式。
+/// 刻意不存扫描结果、选中集与滚动位置——它们要么能重新算出来，
+/// 要么在下次启动时早已失效（目录内容可能已经变了）。
+///
+/// 类型的字段全部 `pub`：它是一份纯数据，校验规则集中在
+/// [`TabState::from_snapshot`]，因此不需要额外的构造函数。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabSnapshot {
+    /// 完整导航历史（含当前位置）。
+    pub history: Vec<Location>,
+    /// 当前项在历史中的下标。
+    pub cursor: usize,
+    /// 内容区视图模式。
+    pub view_mode: ViewMode,
+}
 
 /// 单个标签页的状态。
 ///
@@ -146,6 +166,39 @@ impl TabState {
         self.generation = self.generation.wrapping_add(1);
         self.generation
     }
+
+    /// 生成可持久化快照。
+    ///
+    /// 历史是私有的，因此快照只能从这里拿——否则 `services` 层就得复制一份
+    /// 「历史怎么维护」的知识，迟早与这里分叉。
+    pub fn snapshot(&self) -> TabSnapshot {
+        TabSnapshot {
+            history: self.history.clone(),
+            cursor: self.cursor,
+            view_mode: self.view_mode,
+        }
+    }
+
+    /// 由快照还原。数据不合法（历史为空、游标越界）时返回 `None`。
+    ///
+    /// **不 panic、不部分接受**：快照来自磁盘，可能是被截断的文件或旧版本写下的内容。
+    /// 还原失败时由调用方整体退回「单个默认标签」，而不是留下一个游标错位的标签——
+    /// 后者会在渲染时直接下标越界。
+    pub fn from_snapshot(snapshot: TabSnapshot) -> Option<Self> {
+        if snapshot.history.is_empty() || snapshot.cursor >= snapshot.history.len() {
+            return None;
+        }
+        Some(Self {
+            history: snapshot.history,
+            cursor: snapshot.cursor,
+            view_mode: snapshot.view_mode,
+            // 排序键与方向不持久化：目录内容可能变了，回到默认排序更可预期。
+            sort_key: SortKey::default(),
+            sort_direction: SortDirection::default(),
+            // 代数从 0 开始即可：它是进程内的相对值，没有任何跨进程含义。
+            generation: 0,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -248,5 +301,54 @@ mod tests {
         let after = tab.navigate_to(Location::Computer);
         assert_ne!(after, before);
         assert_eq!(tab.directory(), None);
+    }
+
+    #[test]
+    fn snapshot_round_trips_history_cursor_and_view_mode() {
+        let mut tab = TabState::new(PathBuf::from(r"C:\a"));
+        tab.navigate_to(PathBuf::from(r"C:\a\b"));
+        tab.navigate_to(PathBuf::from(r"C:\a\b\c"));
+        tab.back();
+        tab.set_view_mode(ViewMode::Icons);
+
+        let snapshot = tab.snapshot();
+        assert_eq!(snapshot.cursor, 1, "游标必须指向当前位置");
+        assert_eq!(snapshot.history.len(), 3);
+
+        let restored = TabState::from_snapshot(snapshot).expect("合法快照应能还原");
+        assert_eq!(restored.directory(), Some(Path::new(r"C:\a\b")));
+        assert_eq!(restored.view_mode(), ViewMode::Icons);
+        // 前进历史必须一起回来，否则「重启后 Alt+→」会失效。
+        assert!(restored.can_go_forward());
+        assert!(restored.can_go_back());
+    }
+
+    #[test]
+    fn invalid_snapshots_are_rejected_instead_of_panicking() {
+        // 空历史：渲染时 `history[cursor]` 会直接越界。
+        assert!(TabState::from_snapshot(TabSnapshot {
+            history: Vec::new(),
+            cursor: 0,
+            view_mode: ViewMode::Details,
+        })
+        .is_none());
+
+        // 游标越界：同样会导致越界读取。
+        assert!(TabState::from_snapshot(TabSnapshot {
+            history: vec![PathBuf::from(r"C:\a").into()],
+            cursor: 3,
+            view_mode: ViewMode::Details,
+        })
+        .is_none());
+    }
+
+    #[test]
+    fn snapshot_keeps_virtual_locations() {
+        // 设置页/此电脑这类位置在历史里必须原样保留：还原成目录是错的。
+        let mut tab = TabState::new(Location::Computer);
+        tab.navigate_to(Location::Settings);
+        let restored = TabState::from_snapshot(tab.snapshot()).expect("虚拟位置应可还原");
+        assert_eq!(restored.location(), &Location::Settings);
+        assert!(restored.can_go_back());
     }
 }

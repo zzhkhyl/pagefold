@@ -13,7 +13,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use fm_core::{Density, IconZoom, ViewMode};
+use fm_core::{ColumnWidths, Density, IconZoom, ViewMode};
 use serde::{Deserialize, Serialize};
 
 /// 应用配置。
@@ -37,6 +37,11 @@ pub struct Config {
     pub zoom: IconZoom,
     /// 是否显示文件扩展名。
     pub show_ext: bool,
+    /// 详情表里手动拖动过的列宽。
+    ///
+    /// `None` = 没拖过，用断点默认值。三列各自独立，因此窄屏隐藏某列时
+    /// 它的偏好仍然保留，宽屏回来时不会丢。
+    pub detail_columns: ColumnWidths,
 }
 
 impl Default for Config {
@@ -49,6 +54,7 @@ impl Default for Config {
             density: Density::Normal,
             zoom: IconZoom::Medium,
             show_ext: true,
+            detail_columns: ColumnWidths::default(),
         }
     }
 }
@@ -158,9 +164,22 @@ mod tests {
             density: Density::Cozy,
             zoom: IconZoom::Large,
             show_ext: false,
+            detail_columns: ColumnWidths {
+                date: Some(150.0),
+                kind: None,
+                size: Some(96.0),
+            },
         };
         let text = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed, config);
+    }
+
+    #[test]
+    fn configs_without_column_widths_still_load() {
+        // 列宽是后加的字段：旧配置文件里没有它，必须回退到「没拖过」。
+        let config: Config =
+            serde_json::from_str(r#"{"dark":false,"show_ext":true}"#).expect("应能容忍缺字段");
+        assert_eq!(config.detail_columns, ColumnWidths::default());
     }
 }

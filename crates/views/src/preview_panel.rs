@@ -22,6 +22,12 @@ use crate::tokens::{Tokens, metrics};
 /// 「打开文件夹」回调。参数是目标目录。
 pub type OpenDirHandler = Rc<dyn Fn(PathBuf, &mut Window, &mut App)>;
 
+/// 「在列表中定位」回调。
+///
+/// 不带参数：当前选中项由 shell 自己知道，视图层若再传一次，
+/// 两处对「选中项是哪一条」的判断就会有机会分叉。
+pub type RevealHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+
 /// 选中项的摘要信息。字段全部由 shell 预先算好（时区换算、类型文案都在那里完成）。
 #[derive(Clone, Debug)]
 pub struct EntrySummary {
@@ -55,15 +61,19 @@ pub enum PreviewContent {
 /// `on_open` 只在选中单个目录时被用到；文件需要用系统默认程序打开，
 /// 那需要 `ShellExecute`（属平台层的后续工作），因此这里不提供对应按钮，
 /// 而不是给一个点了没反应的控件。
+///
+/// `on_reveal` 是「在列表中定位」：选中项可能滚出视野（排序或筛选之后很常见），
+/// 这个按钮把用户带回那一行，而不是让他自己找。
 pub fn panel(
     content: &PreviewContent,
     tokens: &Tokens,
     on_open: Option<OpenDirHandler>,
+    on_reveal: Option<RevealHandler>,
 ) -> AnyElement {
     let inner = match content {
         PreviewContent::Empty => empty(tokens),
         PreviewContent::Multiple { names, total_size } => multiple(names, total_size, tokens),
-        PreviewContent::Single(summary) => single(summary, tokens, on_open),
+        PreviewContent::Single(summary) => single(summary, tokens, on_open, on_reveal),
     };
 
     // 统一的外层容器：面板自身占满父级的高度与宽度（父级负责宽度与左侧分隔线），
@@ -209,6 +219,7 @@ fn single(
     summary: &EntrySummary,
     tokens: &Tokens,
     on_open: Option<OpenDirHandler>,
+    on_reveal: Option<RevealHandler>,
 ) -> AnyElement {
     let mut body = div()
         .id("preview-single-scroll")
@@ -299,37 +310,79 @@ fn single(
         ))
         .child(body);
 
+    // 底部动作区：主操作（打开文件夹）在上，辅助操作（在列表中定位）在下。
+    // 两者分别渲染再组合，而不是写成一个固定高度的按钮组——
+    // 文件夹才有「打开」，文件只有「定位」，硬编高度会留下一条空白。
+    let mut actions: Vec<AnyElement> = Vec::new();
+
     // 只有目录才有可执行的「打开」动作：进入目录是我们已经具备的能力。
     if summary.is_dir
         && let Some(handler) = on_open
     {
         let target = summary.path.clone();
+        actions.push(
+            div()
+                .id("preview-open")
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(6.0))
+                .w_full()
+                .h(px(30.0))
+                .rounded(px(metrics::RADIUS))
+                .bg(crate::tokens::with_alpha(tokens.accent, 0.9))
+                .text_color(tokens.surface)
+                .text_size(px(12.5))
+                .cursor_pointer()
+                .on_click(move |_event: &ClickEvent, window, cx| {
+                    (*handler)(target.clone(), window, cx);
+                })
+                .child(Icon::new(IconName::FolderOpen).with_size(px(14.0)))
+                .child("打开文件夹")
+                .into_any_element(),
+        );
+    }
+
+    if let Some(handler) = on_reveal {
+        // 悬停样式会被存进元素里，因此先把色值拷出来（`Tokens` 不是 `Copy`）。
+        let hover = tokens.hover;
+        let foreground = tokens.fg;
+        actions.push(
+            div()
+                .id("preview-reveal")
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(6.0))
+                .w_full()
+                .h(px(28.0))
+                .rounded(px(metrics::RADIUS))
+                .border_1()
+                .border_color(tokens.border)
+                .text_color(tokens.muted_fg)
+                .text_size(px(12.5))
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover).text_color(foreground))
+                .on_click(move |_event: &ClickEvent, window, cx| {
+                    (*handler)(window, cx);
+                })
+                .child(Icon::new(IconName::Locate).with_size(px(14.0)))
+                .child("在列表中定位")
+                .into_any_element(),
+        );
+    }
+
+    if !actions.is_empty() {
         panel = panel.child(
             div()
                 .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
                 .p(px(10.0))
                 .border_t_1()
                 .border_color(tokens.border)
-                .child(
-                    div()
-                        .id("preview-open")
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(6.0))
-                        .w_full()
-                        .h(px(30.0))
-                        .rounded(px(metrics::RADIUS))
-                        .bg(crate::tokens::with_alpha(tokens.accent, 0.9))
-                        .text_color(tokens.surface)
-                        .text_size(px(12.5))
-                        .cursor_pointer()
-                        .on_click(move |_event: &ClickEvent, window, cx| {
-                            (*handler)(target.clone(), window, cx);
-                        })
-                        .child(Icon::new(IconName::FolderOpen).with_size(px(14.0)))
-                        .child("打开文件夹"),
-                ),
+                .children(actions),
         );
     }
 
