@@ -12,8 +12,8 @@ use fm_core::Location;
 use fm_platform::{FileSystem, SingleInstance, activate_window, platform_file_system};
 use fm_services::config::Config;
 use fm_services::directory::DirectoryService;
-use fm_shell::ShellView;
 use fm_shell::actions::*;
+use fm_shell::{KEY_CONTEXT, ShellView};
 use fm_views::metrics;
 use gpui::{App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
@@ -111,36 +111,41 @@ pub fn run() {
 
             // 全局快捷键。键位以设计稿的 keydown 为准，另加 Ctrl+L 与 Ctrl+1/2/3。
             // 处理器挂在 ShellView 的根元素上（见 `ShellView::apply_shortcuts`）。
+            //
+            // **每一条都必须带 `KEY_CONTEXT`**。无上下文的绑定在这个 GPUI 版本里
+            // 优先级等于「最深上下文」，并且同深度时后注册者胜——那会让
+            // `backspace` / `enter` / `ctrl-a/c/v/z` 全部压过输入框自己的绑定，
+            // 表现为地址栏、搜索框、内联重命名里的这些键全部失效。
             cx.bind_keys([
-                KeyBinding::new("ctrl-t", NewTab, None),
-                KeyBinding::new("ctrl-w", CloseTab, None),
-                KeyBinding::new("ctrl-shift-t", ReopenClosedTab, None),
-                KeyBinding::new("alt-left", GoBack, None),
-                KeyBinding::new("alt-right", GoForward, None),
-                KeyBinding::new("backspace", GoUp, None),
-                KeyBinding::new("f5", Refresh, None),
-                KeyBinding::new("ctrl-l", FocusAddressBar, None),
-                KeyBinding::new("ctrl-1", SetViewDetails, None),
-                KeyBinding::new("ctrl-2", SetViewIcons, None),
-                KeyBinding::new("ctrl-3", ToggleTheme, None),
+                KeyBinding::new("ctrl-t", NewTab, Some(KEY_CONTEXT)),
+                KeyBinding::new("ctrl-w", CloseTab, Some(KEY_CONTEXT)),
+                KeyBinding::new("ctrl-shift-t", ReopenClosedTab, Some(KEY_CONTEXT)),
+                KeyBinding::new("alt-left", GoBack, Some(KEY_CONTEXT)),
+                KeyBinding::new("alt-right", GoForward, Some(KEY_CONTEXT)),
+                KeyBinding::new("backspace", GoUp, Some(KEY_CONTEXT)),
+                KeyBinding::new("f5", Refresh, Some(KEY_CONTEXT)),
+                KeyBinding::new("ctrl-l", FocusAddressBar, Some(KEY_CONTEXT)),
+                KeyBinding::new("ctrl-1", SetViewDetails, Some(KEY_CONTEXT)),
+                KeyBinding::new("ctrl-2", SetViewIcons, Some(KEY_CONTEXT)),
+                KeyBinding::new("ctrl-3", ToggleTheme, Some(KEY_CONTEXT)),
                 // Windows 惯例：Ctrl+, 打开设置。逗号在 GPUI 的键位解析里
                 // 是合法单字符键（按 `-` 切分后剩一个 `,`），不需要转义。
-                KeyBinding::new("ctrl-,", OpenSettings, None),
-                KeyBinding::new("ctrl-a", SelectAll, None),
-                KeyBinding::new("ctrl-c", CopyItems, None),
-                KeyBinding::new("ctrl-x", CutItems, None),
-                KeyBinding::new("ctrl-v", PasteItems, None),
-                KeyBinding::new("f2", RenameItem, None),
-                KeyBinding::new("delete", DeleteItems, None),
+                KeyBinding::new("ctrl-,", OpenSettings, Some(KEY_CONTEXT)),
+                KeyBinding::new("ctrl-a", SelectAll, Some(KEY_CONTEXT)),
+                KeyBinding::new("ctrl-c", CopyItems, Some(KEY_CONTEXT)),
+                KeyBinding::new("ctrl-x", CutItems, Some(KEY_CONTEXT)),
+                KeyBinding::new("ctrl-v", PasteItems, Some(KEY_CONTEXT)),
+                KeyBinding::new("f2", RenameItem, Some(KEY_CONTEXT)),
+                KeyBinding::new("delete", DeleteItems, Some(KEY_CONTEXT)),
                 // 永久删除：与回收站删除只差一个修饰键，与资源管理器一致。
                 // 两个动作的确认框文案不同，因此误按也不会删错东西。
-                KeyBinding::new("shift-delete", DeletePermanently, None),
-                KeyBinding::new("ctrl-z", Undo, None),
-                KeyBinding::new("enter", OpenItem, None),
-                KeyBinding::new("up", MoveCursorUp, None),
-                KeyBinding::new("down", MoveCursorDown, None),
-                KeyBinding::new("shift-up", ExtendCursorUp, None),
-                KeyBinding::new("shift-down", ExtendCursorDown, None),
+                KeyBinding::new("shift-delete", DeletePermanently, Some(KEY_CONTEXT)),
+                KeyBinding::new("ctrl-z", Undo, Some(KEY_CONTEXT)),
+                KeyBinding::new("enter", OpenItem, Some(KEY_CONTEXT)),
+                KeyBinding::new("up", MoveCursorUp, Some(KEY_CONTEXT)),
+                KeyBinding::new("down", MoveCursorDown, Some(KEY_CONTEXT)),
+                KeyBinding::new("shift-up", ExtendCursorUp, Some(KEY_CONTEXT)),
+                KeyBinding::new("shift-down", ExtendCursorDown, Some(KEY_CONTEXT)),
             ]);
 
             // 平台实现与目录服务在整个进程内共享一份：

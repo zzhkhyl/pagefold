@@ -22,4 +22,4 @@ pub mod tab_strip;
 pub mod titlebar;
 pub mod toolbar;
 
-pub use shell::ShellView;
+pub use shell::{KEY_CONTEXT, ShellView};

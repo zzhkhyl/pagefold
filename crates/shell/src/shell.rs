@@ -24,7 +24,7 @@ use fm_services::watch::DirectoryWatcher;
 use fm_views::preview_panel::{EntrySummary, PreviewContent};
 use fm_views::{Tokens, widgets};
 use gpui::{
-    Anchor, App, AppContext as _, ClipboardItem, Context, Entity, Focusable as _,
+    Anchor, App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle, Focusable as _,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Point, Render, ScrollStrategy,
     SharedString, Styled as _, Subscription, Task, UniformListScrollHandle, Window, div, px,
 };
@@ -35,6 +35,16 @@ use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme as _, Edges, Theme, ThemeMode, WindowExt as _};
 
 use crate::layout::Viewport;
+
+/// 应用自己的按键上下文。
+///
+/// 必须给内容根挂一个 `key_context`，并把所有全局快捷键绑到它上面——
+/// 否则会出现一个很隐蔽的优先级问题：GPUI 的 `binding_enabled` 给**无上下文**
+/// 的绑定返回 `contexts.len()`，而给命中上下文的绑定返回它在栈里的深度，
+/// 两者相等时按「后注册的优先」裁决。结果就是：任何无上下文绑定都会**压过**
+/// 输入框自己的按键（`backspace`、`enter`、`ctrl-a/c/v/z` 全部被抢）。
+/// 挂上上下文之后，输入框（`Input`）比内容根更深，输入框的绑定重新胜出。
+pub const KEY_CONTEXT: &str = "Pagefold";
 
 use crate::actions::{
     CloseTab, CopyItems, CutItems, DeleteItems, DeletePermanently, ExtendCursorDown,
@@ -110,6 +120,12 @@ pub struct ShellView {
     /// 撤销栈。**不持久化**：它是本次会话内的操作记录，
     /// 跨重启复活一个「可撤销的粘贴」没有对应的磁盘状态。
     pub(crate) undo: UndoStack,
+    /// 内容根的焦点句柄。
+    ///
+    /// 没有编辑会话时，焦点必须落在这里：GPUI 的按键分发从**焦点节点**向上冒泡，
+    /// 一个焦点都没有时起点会退化成窗口根节点，挂在内容根上的处理器根本不在
+    /// 分发路径上——表现为「所有全局快捷键都没反应」。
+    shell_focus: FocusHandle,
     /// 搜索关键词。
     pub(crate) query: String,
     /// 右侧预览面板是否展开（宽屏下的持久化开关）。
@@ -281,6 +297,7 @@ impl ShellView {
             ambient_task: None,
             persisted_session: None,
             undo: UndoStack::new(),
+            shell_focus: cx.focus_handle(),
             query: String::new(),
             preview_open,
             sidebar_overlay: false,
@@ -914,6 +931,10 @@ impl ShellView {
         let Some(renaming) = self.renaming.take() else {
             return;
         };
+
+        // 输入框即将消失，焦点必须交回内容根：否则焦点停在一个不再渲染的句柄上，
+        // 按键分发没有起点，之后所有全局快捷键都会失效（直到用户再点一次界面）。
+        window.focus(&self.shell_focus, cx);
 
         let typed = renaming.input.read(cx).value().to_string();
         let old_name = renaming
@@ -2250,11 +2271,15 @@ impl ShellView {
     ///
     /// 不需要去重置输入框的值：每次进入编辑态都会新建一个 `InputState`，
     /// 并以当时的关键词作为初值，因此不存在「残留上一次输入」的可能。
-    pub(crate) fn clear_query(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn clear_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let had = !self.query.is_empty();
         self.query.clear();
         self.filtered = None;
-        self.search_editing = false;
+        if self.search_editing {
+            self.search_editing = false;
+            // 搜索框收起，焦点交回内容根（原因同 `commit_rename`）。
+            window.focus(&self.shell_focus, cx);
+        }
         if had {
             self.clear_selection_state();
             cx.notify();
@@ -2282,8 +2307,8 @@ impl ShellView {
         self.address_subscription = Some(cx.subscribe_in(
             &state,
             window,
-            move |this, _state, event: &InputEvent, _window, cx| match event {
-                InputEvent::PressEnter { .. } => this.commit_address_edit(cx),
+            move |this, _state, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.commit_address_edit(window, cx),
                 InputEvent::Blur => {
                     if this.address_editing {
                         this.address_editing = false;
@@ -2302,15 +2327,22 @@ impl ShellView {
     }
 
     /// 提交地址栏输入：路径存在则跳转，否则在内容区给出提示。
-    pub(crate) fn commit_address_edit(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn commit_address_edit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(state) = self.address_input.clone() else {
             self.address_editing = false;
+            window.focus(&self.shell_focus, cx);
             cx.notify();
             return;
         };
 
         let text = state.read(cx).value().trim().to_string();
         self.address_editing = false;
+        // 地址栏收起后焦点交回内容根（原因同 `commit_rename`）。
+        window.focus(&self.shell_focus, cx);
 
         if text.is_empty() {
             // 空输入只当作「取消」，不弹错误——用户清空输入框往往就是想退出。
@@ -2345,7 +2377,7 @@ impl ShellView {
         self.search_subscription = Some(cx.subscribe_in(
             &state,
             window,
-            move |this, state, event: &InputEvent, _window, cx| match event {
+            move |this, state, event: &InputEvent, window, cx| match event {
                 InputEvent::Change => {
                     let value = state.read(cx).value().to_string();
                     this.set_query(value, cx);
@@ -2353,6 +2385,8 @@ impl ShellView {
                 InputEvent::PressEnter { .. } | InputEvent::Blur => {
                     if this.search_editing {
                         this.search_editing = false;
+                        // 搜索框收起后焦点交回内容根（原因同 `commit_rename`）。
+                        window.focus(&this.shell_focus, cx);
                         cx.notify();
                     }
                 }
@@ -2513,6 +2547,16 @@ impl Render for ShellView {
         // 子渲染函数因此只需要读 `self.tokens`，不必各自判断主题。
         self.refresh_tokens(cx);
 
+        // 没有任何焦点时，把焦点落到内容根上。这是全局快捷键能生效的前提：
+        // 按键分发从焦点节点开始向上冒泡，没有焦点时起点是窗口根节点，
+        // 而我们的处理器挂在内容根（窗口根的子节点）上，根本不在路径里。
+        //
+        // 只在 `None` 时接管：菜单、对话框、输入框都有自己的焦点，
+        // 每帧强行夺回会让它们收不到按键。
+        if window.focused(cx).is_none() {
+            window.focus(&self.shell_focus, cx);
+        }
+
         let viewport = Viewport::for_width(f32::from(window.viewport_size().width));
         // 缓存网格列数：`scroll_into_view` 在没有 window 的地方（扫描收尾的
         // 异步回调里）也要把条目下标换算成网格行下标。
@@ -2558,6 +2602,10 @@ impl Render for ShellView {
             .size_full()
             .flex()
             .flex_col()
+            // 按键上下文与焦点：所有全局快捷键都绑在 `KEY_CONTEXT` 上，
+            // 而输入框的上下文更深，因此输入框里的按键不会再被我们抢走。
+            .key_context(KEY_CONTEXT)
+            .track_focus(&self.shell_focus)
             // `relative` 是下面两个浮层的定位基准：它们都是 `absolute().inset_0()`，
             // 少了这一句会一路上溯到窗口根。
             .relative()

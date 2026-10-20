@@ -432,10 +432,10 @@ impl ShellView {
                 false,
                 true,
                 tokens,
-                cx.listener(|this, _: &ClickEvent, _window, cx| {
+                cx.listener(|this, _: &ClickEvent, window, cx| {
                     // 阻止冒泡：否则清除搜索会立刻又把搜索框切换成编辑态。
                     cx.stop_propagation();
-                    this.clear_query(cx);
+                    this.clear_query(window, cx);
                 }),
             ));
         }
