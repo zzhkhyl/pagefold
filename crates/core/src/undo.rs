@@ -32,6 +32,11 @@ pub enum UndoAction {
     Copy { created: Vec<PathBuf> },
     /// 剪切粘贴：撤销即把 `(现在的位置, 原来的位置)` 搬回去。
     Move { moved: Vec<(PathBuf, PathBuf)> },
+    /// 批量重命名：一次操作改了一批名字，撤销时整批改回。
+    ///
+    /// 与「连续多次单条重命名」不同，这是**一步**：用户按下 `Ctrl+Z` 时期的
+    /// 是「撤掉刚才那次批量改名」，而不是逐个回退十次。
+    RenameMany { pairs: Vec<(PathBuf, PathBuf)> },
 }
 
 impl UndoAction {
@@ -42,6 +47,7 @@ impl UndoAction {
             Self::Create { .. } => "新建",
             Self::Copy { .. } => "复制",
             Self::Move { .. } => "移动",
+            Self::RenameMany { .. } => "批量重命名",
         }
     }
 
@@ -51,6 +57,7 @@ impl UndoAction {
             Self::Rename { .. } | Self::Create { .. } => 1,
             Self::Copy { created } => created.len(),
             Self::Move { moved } => moved.len(),
+            Self::RenameMany { pairs } => pairs.len(),
         }
     }
 
@@ -74,7 +81,9 @@ impl UndoAction {
                     .unwrap_or_else(|| path.display().to_string());
                 format!("新建「{name}」")
             }
-            Self::Copy { .. } | Self::Move { .. } => format!("{} {} 项", self.label(), self.count()),
+            Self::Copy { .. } | Self::Move { .. } | Self::RenameMany { .. } => {
+                format!("{} {} 项", self.label(), self.count())
+            }
         }
     }
 }

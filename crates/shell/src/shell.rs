@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use fm_core::naming;
 use fm_core::{
-    Column, Density, Entry, EntryKind, IconZoom, Location, Selection, SortKey, TabId, TabsState,
-    UndoAction, UndoStack, ViewMode,
+    BatchSpec, Column, Density, Entry, EntryKind, IconZoom, Location, Selection, SortKey, TabId,
+    TabsState, UndoAction, UndoStack, ViewMode, batch_names,
 };
 use fm_platform::{Drive, OpReport};
 use fm_services::clipboard::{Clipboard, ClipboardMode, PastePlan};
@@ -120,6 +120,8 @@ pub struct ShellView {
     /// 撤销栈。**不持久化**：它是本次会话内的操作记录，
     /// 跨重启复活一个「可撤销的粘贴」没有对应的磁盘状态。
     pub(crate) undo: UndoStack,
+    /// 批量重命名浮层。`Some` 时浮层盖住内容区。
+    pub(crate) batch: Option<BatchRename>,
     /// 内容根的焦点句柄。
     ///
     /// 没有编辑会话时，焦点必须落在这里：GPUI 的按键分发从**焦点节点**向上冒泡，
@@ -297,6 +299,7 @@ impl ShellView {
             ambient_task: None,
             persisted_session: None,
             undo: UndoStack::new(),
+            batch: None,
             shell_focus: cx.focus_handle(),
             query: String::new(),
             preview_open,
@@ -525,6 +528,41 @@ pub(crate) struct RubberBand {
 
 /// 框选的拖动阈值（px）。低于它的一律按单击处理。
 const RUBBER_BAND_THRESHOLD: f32 = 4.0;
+
+/// 批量重命名的进行态。
+pub(crate) struct BatchRename {
+    /// 参与改名的路径（按列表顺序，序号按此顺序递增）。
+    pub(crate) paths: Vec<PathBuf>,
+    pub(crate) prefix: Entity<InputState>,
+    pub(crate) start: Entity<InputState>,
+    pub(crate) keep_extension: bool,
+    /// 订阅必须持有：丢掉即退订，表现为「输入时预览不动」。
+    _prefix_subscription: Subscription,
+    _start_subscription: Subscription,
+}
+
+/// 预览里的一行。
+pub(crate) struct BatchRow {
+    pub(crate) old: String,
+    pub(crate) new: String,
+    /// 与列表中**其他**条目撞名。
+    pub(crate) conflict: bool,
+}
+
+/// 一次预览的结果。
+pub(crate) struct BatchPreview {
+    pub(crate) rows: Vec<BatchRow>,
+    /// 无法生成名称的原因（前缀非法、序号不是数字……）。
+    pub(crate) error: Option<String>,
+    pub(crate) conflicts: usize,
+}
+
+impl BatchPreview {
+    /// 能否执行：没有错误、没有撞名、至少一行。
+    pub(crate) fn can_apply(&self) -> bool {
+        self.error.is_none() && self.conflicts == 0 && !self.rows.is_empty()
+    }
+}
 
 /// 一次列宽拖拽会话。
 pub(crate) struct ColumnDrag {
@@ -1002,6 +1040,213 @@ impl ShellView {
                 // 名称非法、目标已存在等都在这里被拦下并如实告知。
                 // 刻意不重新打开输入框让用户改：焦点已经不在那一行上了，
                 // 重新聚焦会让人以为程序在抢键盘。
+                Err(reason) => window.push_notification(Notification::error(reason), cx),
+            });
+        }));
+    }
+
+    /// 打开批量重命名面板。
+    ///
+    /// 用自绘浮层而不是组件库的 `Dialog`：面板里有两个输入框和一段**实时预览**，
+    /// 而对话框的内容只在打开时构建一次——预览就不会跟着输入更新了。
+    /// 自绘浮层每帧随 `render` 重建，预览天然是实时的。
+    pub(crate) fn open_batch_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            window.push_notification(Notification::warning("先选中要改名的项目"), cx);
+            return;
+        }
+
+        let spec = BatchSpec::default();
+        let prefix = cx.new(|cx| {
+            InputState::new(window, cx).default_value(spec.prefix.clone())
+        });
+        let start = cx.new(|cx| InputState::new(window, cx).default_value(spec.start.to_string()));
+
+        // 两个输入框都要订阅：任何一次按键都要让预览重算。
+        // `Subscription` 必须持有，否则立刻退订，表现为「预览不跟着动」。
+        // 回车也在这里接：输入框自己的 `Enter` 绑定在某些焦点状态下不生效
+        // （见 `apply_list_shortcuts` 的注释），而「填完就回车」是最自然的操作。
+        let prefix_subscription = cx.subscribe_in(
+            &prefix,
+            window,
+            |this, _state, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => cx.notify(),
+                InputEvent::PressEnter { .. } => this.apply_batch_rename(window, cx),
+                InputEvent::Focus | InputEvent::Blur => {}
+            },
+        );
+        let start_subscription = cx.subscribe_in(
+            &start,
+            window,
+            |this, _state, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => cx.notify(),
+                InputEvent::PressEnter { .. } => this.apply_batch_rename(window, cx),
+                InputEvent::Focus | InputEvent::Blur => {}
+            },
+        );
+
+        let handle = prefix.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+
+        self.batch = Some(BatchRename {
+            paths,
+            prefix,
+            start,
+            keep_extension: spec.keep_extension,
+            _prefix_subscription: prefix_subscription,
+            _start_subscription: start_subscription,
+        });
+        cx.notify();
+    }
+
+    /// 关闭批量重命名面板（取消）。
+    pub(crate) fn cancel_batch_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.batch.take().is_some() {
+            // 焦点交还内容区：否则焦点停在已卸载的输入框上，之后快捷键全失效。
+            window.focus(&self.shell_focus, cx);
+            cx.notify();
+        }
+    }
+
+    /// 切换「保留扩展名」并重算预览。
+    pub(crate) fn toggle_batch_extension(&mut self, cx: &mut Context<Self>) {
+        if let Some(batch) = self.batch.as_mut() {
+            batch.keep_extension = !batch.keep_extension;
+            cx.notify();
+        }
+    }
+
+    /// 按当前参数算出预览：每一行的新旧名称、以及与现有条目撞名的行数。
+    ///
+    /// 撞名检查用的是**当前列表**而不是磁盘：列表就是用户眼前看到的东西，
+    /// 以它为准得到的「冲突」与用户的判断一致；真正的兜底是执行时
+    /// `fs::rename` 的存在性检查（那里会逐条报「已存在」）。
+    pub(crate) fn batch_preview(&self, cx: &App) -> BatchPreview {
+        let Some(batch) = self.batch.as_ref() else {
+            return BatchPreview {
+                rows: Vec::new(),
+                error: Some(String::from("没有进行中的批量重命名")),
+                conflicts: 0,
+            };
+        };
+
+        let start_text = batch.start.read(cx).value().trim().to_string();
+        let Ok(start) = start_text.parse::<u32>() else {
+            return BatchPreview {
+                rows: Vec::new(),
+                error: Some(format!("起始序号必须是数字（现在是「{start_text}」）")),
+                conflicts: 0,
+            };
+        };
+
+        let spec = BatchSpec {
+            prefix: batch.prefix.read(cx).value().to_string(),
+            start,
+            keep_extension: batch.keep_extension,
+        };
+        let names: Vec<String> = batch
+            .paths
+            .iter()
+            .filter_map(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+
+        match batch_names(&refs, &spec) {
+            Ok(new_names) => {
+                // 参与改名的条目本身不算冲突：它们马上就要变成别的名字。
+                let taken: std::collections::HashSet<String> = self
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        !batch
+                            .paths
+                            .iter()
+                            .any(|path| path.as_path() == entry.path.as_ref().as_path())
+                    })
+                    .map(|entry| entry.name.to_lowercase())
+                    .collect();
+
+                let mut rows = Vec::with_capacity(names.len());
+                let mut conflicts = 0;
+                for (old, new) in names.into_iter().zip(new_names) {
+                    let conflict = taken.contains(&new.to_lowercase());
+                    conflicts += usize::from(conflict);
+                    rows.push(BatchRow {
+                        old,
+                        new,
+                        conflict,
+                    });
+                }
+                BatchPreview {
+                    rows,
+                    error: None,
+                    conflicts,
+                }
+            }
+            Err(error) => BatchPreview {
+                rows: Vec::new(),
+                error: Some(error.message()),
+                conflicts: 0,
+            },
+        }
+    }
+
+    /// 执行批量重命名。
+    pub(crate) fn apply_batch_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.batch.is_none() {
+            return;
+        }
+        let preview = self.batch_preview(cx);
+        if let Some(error) = preview.error.clone() {
+            window.push_notification(Notification::warning(error), cx);
+            return;
+        }
+        if preview.conflicts > 0 {
+            window.push_notification(
+                Notification::warning(format!(
+                    "{} 个目标名称已存在，改一下前缀或起始序号",
+                    preview.conflicts
+                )),
+                cx,
+            );
+            return;
+        }
+
+        let Some(batch) = self.batch.take() else {
+            return;
+        };
+        window.focus(&self.shell_focus, cx);
+
+        let items: Vec<(PathBuf, String)> = batch
+            .paths
+            .iter()
+            .cloned()
+            .zip(preview.rows.into_iter().map(|row| row.new))
+            .collect();
+        let fs = Arc::clone(self.service.file_system());
+
+        self.op_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { ops::batch_rename(&*fs, &items) })
+                .await;
+
+            let _ = this.update_in(cx, move |view, window, cx| match result {
+                Ok(report) => {
+                    // 只把**成功**的那些记进撤销栈：失败的没动过，
+                    // 记进去会让撤销去改一个不存在的名字。
+                    if !report.renamed.is_empty() {
+                        view.undo.push(UndoAction::RenameMany {
+                            pairs: report.renamed.clone(),
+                        });
+                    }
+                    view.notice_report(window, cx, "重命名", &report);
+                    view.refresh_after_write(cx);
+                }
                 Err(reason) => window.push_notification(Notification::error(reason), cx),
             });
         }));
@@ -2508,7 +2753,10 @@ impl ShellView {
             let view = view.clone();
             root = root.on_action(move |_: &OpenItem, window, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    if this.renaming.is_some() {
+                    if this.batch.is_some() {
+                        // 批量重命名面板打开时，回车 = 执行。
+                        this.apply_batch_rename(window, cx);
+                    } else if this.renaming.is_some() {
                         this.commit_rename(window, cx);
                     } else if this.address_editing {
                         // 地址栏正在编辑：提交它，而不是打开选中项。
@@ -2668,6 +2916,11 @@ impl Render for ShellView {
         }
         if let Some(scrim) = scrim {
             body = body.child(scrim);
+        }
+        // 批量重命名浮层盖在侧边栏浮层之上、通知与对话框层之下：
+        // 它属于「内容区的一次操作」，不该盖住系统级提示。
+        if let Some(batch) = self.render_batch_overlay(cx) {
+            body = body.child(batch);
         }
 
         let root = div()

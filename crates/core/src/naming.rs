@@ -8,6 +8,7 @@
 //! 判定规则照搬 Windows（资源管理器）的行为，刻意不做「更宽容」的处理：
 //! 本程序的目标平台就是 Windows，宽容只会让「本地能建、拷到别处炸」。
 
+use std::collections::HashSet;
 use std::ops::Range;
 
 /// 新建文件夹的默认名。
@@ -183,10 +184,98 @@ fn strip_index_suffix(stem: &str) -> &str {
     &stem[..open]
 }
 
+/// 批量重命名的参数。
+///
+/// 刻意只有「前缀 + 起始序号 + 是否保留扩展名」三项：
+/// 更复杂的模板（正则、占位符）会把「批量改名」变成一门小语言，
+/// 而用户真正需要的是「把这些照片改成 旅行_1、旅行_2……」。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchSpec {
+    /// 序号前面的部分，可以为空（此时名称就是纯序号）。
+    pub prefix: String,
+    /// 第一个序号。
+    pub start: u32,
+    /// 是否保留原扩展名。
+    ///
+    /// 默认开启：把 `报告.docx` 改成 `报告_1` 会让它失去文件类型，
+    /// 而用户想改的几乎总是主干。
+    pub keep_extension: bool,
+}
+
+impl Default for BatchSpec {
+    fn default() -> Self {
+        Self {
+            prefix: String::from("文件_"),
+            start: 1,
+            keep_extension: true,
+        }
+    }
+}
+
+/// 批量重命名无法生成名称的原因。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BatchError {
+    /// 没有选中任何条目。
+    EmptySelection,
+    /// 生成的某个名称不合法（前缀里带了 `?` 之类）。
+    Invalid(NameError),
+    /// 生成了重复的名称。
+    ///
+    /// 正常情况下序号天然唯一；这条只在序号溢出（`start` 极大）时才可能触发，
+    /// 但一旦发生就是「两个条目要改成同一个名字」，必须在提交前拦住。
+    Duplicate(String),
+}
+
+impl BatchError {
+    /// 面向用户的一句话说明。
+    pub fn message(&self) -> String {
+        match self {
+            Self::EmptySelection => String::from("先选中要改名的项目"),
+            Self::Invalid(error) => error.message(),
+            Self::Duplicate(name) => format!("会生成重复的名称「{name}」"),
+        }
+    }
+}
+
+/// 按 [`BatchSpec`] 生成新的名称序列（**不碰文件系统**）。
+///
+/// 输入与输出一一对应、顺序保持：调用方拿 `(原路径, 新名字)` 直接执行即可。
+/// 扩展名从原名称里取（见 [`split_extension`]），因此 `archive.tar.gz` 会变成
+/// `前缀1.gz` —— 与「重命名只改主干」的既有约定一致。
+pub fn batch_names(names: &[&str], spec: &BatchSpec) -> Result<Vec<String>, BatchError> {
+    if names.is_empty() {
+        return Err(BatchError::EmptySelection);
+    }
+
+    // 去首尾空白只做一次：前缀末尾的空格会产生「文件_ 1」这种名字。
+    let prefix = spec.prefix.trim_end();
+    let mut seen: HashSet<String> = HashSet::with_capacity(names.len());
+    let mut result = Vec::with_capacity(names.len());
+
+    for (offset, name) in names.iter().enumerate() {
+        let (_, extension) = split_extension(name);
+        let index = spec.start.saturating_add(offset as u32);
+        let stem = format!("{prefix}{index}");
+        let candidate = if spec.keep_extension {
+            format!("{stem}{extension}")
+        } else {
+            stem
+        };
+
+        let valid = validate(&candidate).map_err(BatchError::Invalid)?;
+        // Windows 的文件名不区分大小写，因此查重也按不区分大小写做。
+        if !seen.insert(valid.to_lowercase()) {
+            return Err(BatchError::Duplicate(valid.to_string()));
+        }
+        result.push(valid.to_string());
+    }
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     #[test]
     fn validate_trims_and_accepts_a_normal_name() {
@@ -334,6 +423,76 @@ mod tests {
         assert_eq!(
             unique_name("会议 (02)", |name| taken.contains(name)),
             "会议 (02) (2)"
+        );
+    }
+
+    #[test]
+    fn batch_names_numbers_from_the_requested_start() {
+        let spec = BatchSpec {
+            prefix: String::from("旅行_"),
+            start: 3,
+            keep_extension: true,
+        };
+        let names = batch_names(&["a.jpg", "b.jpg"], &spec).unwrap();
+        assert_eq!(names, vec!["旅行_3.jpg", "旅行_4.jpg"]);
+    }
+
+    #[test]
+    fn batch_names_keep_the_original_extension_per_file() {
+        // 每个条目各自保留自己的扩展名：一次批量操作里可能混着 .jpg 与 .png。
+        let spec = BatchSpec::default();
+        let names = batch_names(&["a.jpg", "b.png", "无扩展名", ".gitignore"], &spec).unwrap();
+        assert_eq!(
+            names,
+            vec!["文件_1.jpg", "文件_2.png", "文件_3", "文件_4"]
+        );
+        // `.gitignore` 没有扩展名（开头的点不算），因此序号直接顶上去。
+        assert_eq!(split_extension(".gitignore").1, "");
+    }
+
+    #[test]
+    fn batch_names_can_drop_the_extension() {
+        let spec = BatchSpec {
+            prefix: String::from("x"),
+            start: 1,
+            keep_extension: false,
+        };
+        assert_eq!(batch_names(&["a.txt"], &spec).unwrap(), vec!["x1"]);
+    }
+
+    #[test]
+    fn batch_names_reject_an_invalid_prefix() {
+        let spec = BatchSpec {
+            prefix: String::from("a?b"),
+            start: 1,
+            keep_extension: true,
+        };
+        assert_eq!(
+            batch_names(&["a.txt"], &spec),
+            Err(BatchError::Invalid(NameError::Forbidden('?')))
+        );
+    }
+
+    #[test]
+    fn batch_names_reject_duplicates_caused_by_index_overflow() {
+        // `start` 极大时 `saturating_add` 会把多个序号压成同一个数字，
+        // 那会生成重复名称——必须在提交前拦住，而不是让第二条 rename 失败。
+        let spec = BatchSpec {
+            prefix: String::new(),
+            start: u32::MAX,
+            keep_extension: false,
+        };
+        assert!(matches!(
+            batch_names(&["a.txt", "b.txt"], &spec),
+            Err(BatchError::Duplicate(_))
+        ));
+    }
+
+    #[test]
+    fn batch_names_need_a_selection() {
+        assert_eq!(
+            batch_names(&[], &BatchSpec::default()),
+            Err(BatchError::EmptySelection)
         );
     }
 

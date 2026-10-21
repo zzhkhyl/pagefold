@@ -21,7 +21,7 @@ pub use command::Command;
 pub use entry::{Entry, EntryKind, ExtId, IconId, SortDirection, SortKey, ViewMode};
 pub use icon::RasterIcon;
 pub use location::Location;
-pub use naming::{NameError, unique_name, validate};
+pub use naming::{BatchError, BatchSpec, NameError, batch_names, unique_name, validate};
 pub use selection::Selection;
 pub use tab::{TabSnapshot, TabState};
 pub use undo::{UNDO_LIMIT, UndoAction, UndoStack};

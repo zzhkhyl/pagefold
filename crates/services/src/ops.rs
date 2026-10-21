@@ -137,6 +137,31 @@ pub fn delete_forever(fs: &dyn FileSystem, paths: &[PathBuf]) -> OpResult<OpRepo
         .map_err(|error| describe_error(&error))
 }
 
+/// 批量重命名：按 `(原路径, 新名字)` 逐条改名，逐条回执。
+///
+/// 逐条而不是「一次系统调用」：Windows 没有批量改名的原子接口，
+/// 而逐条能给出「哪几条成功、哪一条为什么失败」，这正是 `OpReport` 的形状。
+/// **不做自动去重**：批量改名是用户明确指定结果的操作，
+/// 目标已存在时应当报错让他改参数，而不是悄悄改成 `名称 (2)`——
+/// 那会让「执行完的结果」与「预览里看到的结果」不一致。
+pub fn batch_rename(fs: &dyn FileSystem, items: &[(PathBuf, String)]) -> OpResult<OpReport> {
+    let mut report = OpReport::default();
+
+    for (path, new_name) in items {
+        match rename(fs, path, new_name) {
+            Ok(target) => {
+                report.done += 1;
+                if target != *path {
+                    report.renamed.push((path.clone(), target));
+                }
+            }
+            Err(reason) => report.failed.push((path.clone(), reason)),
+        }
+    }
+
+    Ok(report)
+}
+
 /// 撤销一步写操作。
 ///
 /// 每种动作的逆操作都是**一次系统调用**，没有「先备份再恢复」的中间态：
@@ -165,6 +190,25 @@ pub fn undo(fs: &dyn FileSystem, action: &UndoAction) -> OpResult<OpReport> {
         UndoAction::Copy { created } => fs
             .delete_permanently(created)
             .map_err(|error| describe_error(&error)),
+        UndoAction::RenameMany { pairs } => {
+            // 逆序回退：批量改名可能包含 `1→2` 与 `2→1` 这种互换，
+            // 正序回退会在中途撞上「目标已存在」。
+            let mut total = OpReport::default();
+            for (from, to) in pairs.iter().rev() {
+                let Some(name) = from.file_name().map(|name| name.to_string_lossy().into_owned())
+                else {
+                    total
+                        .failed
+                        .push((to.clone(), String::from("原路径没有文件名")));
+                    continue;
+                };
+                match fs.rename(to, &name) {
+                    Ok(_) => total.done += 1,
+                    Err(error) => total.failed.push((to.clone(), describe_error(&error))),
+                }
+            }
+            Ok(total)
+        }
         UndoAction::Move { moved } => {
             // 逐项搬回原目录：不同条目的原目录可能不同（一次跨目录的多选剪切），
             // 因此不能像粘贴那样「一次 move_into 到一个目标」。
@@ -503,6 +547,74 @@ mod tests {
                 MockWrite::Move {
                     sources: vec![dir().join("b.txt")],
                     dest_dir: PathBuf::from(r"C:\two"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn batch_rename_reports_each_item_and_keeps_going_after_a_failure() {
+        let fs = MockFileSystem::new(0);
+        let items = vec![
+            (dir().join("a.txt"), String::from("照片_1.txt")),
+            (dir().join("b.txt"), String::from("照片_2.txt")),
+        ];
+
+        let report = batch_rename(&fs, &items).unwrap();
+        assert_eq!(report.done, 2);
+        assert_eq!(report.renamed.len(), 2, "逐个记录「改成了什么」，撤销要用");
+        assert_eq!(
+            fs.writes(),
+            vec![
+                MockWrite::Rename {
+                    path: dir().join("a.txt"),
+                    new_name: String::from("照片_1.txt"),
+                },
+                MockWrite::Rename {
+                    path: dir().join("b.txt"),
+                    new_name: String::from("照片_2.txt"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn batch_rename_rejects_an_invalid_name_without_touching_the_disk() {
+        let fs = MockFileSystem::new(0);
+        let items = vec![(dir().join("a.txt"), String::from("a?b.txt"))];
+
+        let report = batch_rename(&fs, &items).unwrap();
+        assert_eq!(report.done, 0);
+        assert_eq!(report.failed.len(), 1);
+        assert!(
+            fs.writes().is_empty(),
+            "非法名称必须在系统调用之前就被拦下"
+        );
+    }
+
+    #[test]
+    fn undo_of_a_batch_rename_walks_back_in_reverse_order() {
+        let fs = MockFileSystem::new(0);
+        let action = UndoAction::RenameMany {
+            pairs: vec![
+                (dir().join("a.txt"), dir().join("照片_1.txt")),
+                (dir().join("b.txt"), dir().join("照片_2.txt")),
+            ],
+        };
+
+        let report = undo(&fs, &action).unwrap();
+        assert_eq!(report.done, 2);
+        // 逆序：先回退最后一条，互换类改名才不会中途撞名。
+        assert_eq!(
+            fs.writes(),
+            vec![
+                MockWrite::Rename {
+                    path: dir().join("照片_2.txt"),
+                    new_name: String::from("b.txt"),
+                },
+                MockWrite::Rename {
+                    path: dir().join("照片_1.txt"),
+                    new_name: String::from("a.txt"),
                 },
             ]
         );

@@ -73,11 +73,8 @@ pub(crate) enum MenuAction {
     DeletePermanently,
     /// 撤销上一步可逆的写操作。
     Undo,
-    /// 占位：菜单里保留位置但禁用，因此永远不会被派发。
-    ///
-    /// 留一个显式的「没有动作」变体，而不是借一个真实动作当占位：
-    /// 借来的动作会在单测与将来的重构里被当成真的，那是最难查的一类错。
-    NotImplemented,
+    /// 批量重命名（前缀 + 起始序号 + 实时预览）。
+    BatchRename,
 }
 
 impl MenuAction {
@@ -146,21 +143,6 @@ impl MenuItemSpec {
         }
     }
 
-    /// 尚未接入的动作。
-    ///
-    /// 与命令条、选中条用同一套约定：**保留设计稿里的位置**但置为禁用。
-    /// 直接删掉这一项会让菜单看起来「本来就没有这个功能」，
-    /// 而用户需要知道它即将到来。
-    fn not_implemented(label: impl Into<String>, icon: IconName) -> Self {
-        Self {
-            label: label.into(),
-            icon,
-            disabled: true,
-            checked: false,
-            action: MenuAction::NotImplemented,
-        }
-    }
-
     fn checked(mut self, checked: bool) -> Self {
         self.checked = checked;
         self
@@ -168,8 +150,8 @@ impl MenuItemSpec {
 
     /// 置为禁用（用于「功能有，但此刻不适用」）。
     ///
-    /// 与 [`MenuItemSpec::not_implemented`] 的区别只在语义：那个是「还没做」，
-    /// 这个是「做得了，但现在不行」（剪贴板为空时不能粘贴）。
+    /// 例：剪贴板为空时不能粘贴。与「还没做」不同——那类项现在一律不显示，
+    /// 因此不再需要「保留位置但禁用」的占位约定。
     fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
@@ -233,10 +215,10 @@ pub(crate) fn entry_menu_spec(
             IconName::Scissors,
             MenuAction::Clip(ClipboardMode::Cut),
         )));
+        // 多选时给「批量重命名」，单选时给普通「重命名」：后者对批量没有意义，
+        // 而前者对单个条目也没有意义（前缀 + 序号只有一个结果）。
         nodes.push(MenuNode::Item(if multi {
-            // 批量重命名需要一个「前缀 + 起始序号 + 实时预览」的对话框
-            // （设计稿的 `#dlgRename`），属后续增量：位置保留，禁用。
-            MenuItemSpec::not_implemented("批量重命名", IconName::Pencil)
+            MenuItemSpec::new("批量重命名…", IconName::Pencil, MenuAction::BatchRename)
         } else {
             MenuItemSpec::new("重命名", IconName::Pencil, MenuAction::Rename)
         }));
@@ -499,9 +481,9 @@ fn dispatch(
             }
         }
         MenuAction::DeleteToRecycleBin => view.delete_selection(window, cx),
+        MenuAction::BatchRename => view.open_batch_rename(window, cx),
         MenuAction::DeletePermanently => view.delete_selection_forever(window, cx),
         MenuAction::Undo => view.undo_last(window, cx),
-        MenuAction::NotImplemented => {}
     });
 
     if applied.is_err() {
@@ -849,12 +831,15 @@ mod tests {
         assert_eq!(copy.action, MenuAction::Clip(ClipboardMode::Copy));
         assert_eq!(cut.action, MenuAction::Clip(ClipboardMode::Cut));
 
-        // 批量重命名需要一个「前缀 + 起始序号 + 预览」的对话框，属后续增量，
-        // 因此多选时它是**禁用**的，而且指向占位动作而不是单项重命名。
-        let batch = find(&many, "批量重命名").expect("多选时应保留批量重命名的位置");
-        assert!(batch.disabled, "批量重命名尚未接入，必须是禁用态");
-        assert_eq!(batch.action, MenuAction::NotImplemented);
+        // 多选时给「批量重命名…」（带省略号，表示会弹出面板），单选时给普通重命名。
+        let batch = find(&many, "批量重命名…").expect("多选时应提供批量重命名");
+        assert!(!batch.disabled, "批量重命名已实现，必须可用");
+        assert_eq!(batch.action, MenuAction::BatchRename);
         assert!(find(&many, "重命名").is_none(), "多选不该再显示单项重命名");
+        assert!(
+            find(&single, "批量重命名…").is_none(),
+            "单选时批量重命名没有意义"
+        );
     }
 
     #[test]

@@ -22,6 +22,7 @@ use gpui::{
     prelude::FluentBuilder as _,
 };
 use gpui_component::WindowExt as _;
+use gpui_component::input::Input;
 use gpui_component::menu::ContextMenuExt as _;
 use gpui_kit_assets::IconName;
 
@@ -826,6 +827,255 @@ impl ShellView {
         };
 
         settings_page::page(&snapshot, &self.tokens, handlers)
+    }
+
+    /// 批量重命名浮层：遮罩 + 居中卡片。
+    ///
+    /// 为什么是自绘浮层而不是组件库的对话框：面板里有两个输入框和一段
+    /// **实时预览**，而对话框的内容只在打开时构建一次。自绘浮层每帧随
+    /// `render` 重建，预览天然跟着输入更新。
+    pub(crate) fn render_batch_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let batch = self.batch.as_ref()?;
+        let tokens = &self.tokens;
+        let preview = self.batch_preview(cx);
+
+        // 预览最多 6 行：再多会把面板撑过一屏，而「还剩几项」用一个数字就够了——
+        // 用户要看的是「命名规则对不对」，不是把整批名字读一遍。
+        const PREVIEW_ROWS: usize = 6;
+        let rows: Vec<AnyElement> = preview
+            .rows
+            .iter()
+            .take(PREVIEW_ROWS)
+            .map(|row| {
+                let color = if row.conflict { tokens.danger } else { tokens.fg };
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(px(metrics::FONT_SM))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(tokens.muted_fg)
+                            .child(row.old.clone()),
+                    )
+                    .child(div().flex_none().text_color(tokens.muted_fg).child("→"))
+                    .child(
+                        div()
+                            .flex_grow(1.0)
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .text_color(color)
+                            .child(row.new.clone()),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let remaining = preview.rows.len().saturating_sub(PREVIEW_ROWS);
+
+        // 一行状态：错误优先于撞名提示，两者都用危险色——它们都意味着「不能执行」。
+        let status = match (&preview.error, preview.conflicts) {
+            (Some(error), _) => Some(error.clone()),
+            (None, conflicts) if conflicts > 0 => {
+                Some(format!("{conflicts} 个目标名称已存在，改一下前缀或起始序号"))
+            }
+            _ => None,
+        };
+
+        let can_apply = preview.can_apply();
+
+        let field = |label: &'static str, control: AnyElement| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(72.0))
+                        .text_size(px(metrics::FONT_SM))
+                        .text_color(tokens.muted_fg)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .flex_grow(1.0)
+                        .min_w(px(0.0))
+                        .h(px(28.0))
+                        .px(px(8.0))
+                        .rounded(px(metrics::RADIUS))
+                        .border_1()
+                        .border_color(tokens.border)
+                        .bg(tokens.bg)
+                        .flex()
+                        .items_center()
+                        .child(control),
+                )
+                .into_any_element()
+        };
+
+        let prefix = field(
+            "前缀",
+            Input::new(&batch.prefix).appearance(false).into_any_element(),
+        );
+        let start = field(
+            "起始序号",
+            Input::new(&batch.start).appearance(false).into_any_element(),
+        );
+        let keep_extension = {
+            let view = cx.entity().downgrade();
+            let control = widgets::switch(
+                "batch-keep-ext",
+                batch.keep_extension,
+                tokens,
+                move |_event: &gpui::ClickEvent, _window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| view.toggle_batch_extension(cx))
+                        .is_err()
+                    {
+                        tracing::debug!("切换保留扩展名时视图已销毁");
+                    }
+                },
+            );
+            field("扩展名", control)
+        };
+
+        let cancel = widgets::text_button(
+            "batch-cancel",
+            "取消",
+            None,
+            "关闭（Esc）",
+            true,
+            tokens,
+            cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                this.cancel_batch_rename(window, cx);
+            }),
+        );
+
+        let apply = {
+            let accent = tokens.accent;
+            let surface = tokens.surface;
+            div()
+                .id("batch-apply")
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .px(px(14.0))
+                .py(px(5.0))
+                .rounded(px(metrics::RADIUS))
+                .text_size(px(metrics::FONT_SM))
+                .bg(if can_apply {
+                    accent
+                } else {
+                    fm_views::tokens::with_alpha(tokens.fg, 0.2)
+                })
+                .text_color(surface)
+                .when(can_apply, |element| {
+                    element
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                            this.apply_batch_rename(window, cx);
+                        }))
+                })
+                .child("执行")
+        };
+
+        let card = div()
+            .id("batch-card")
+            .occlude()
+            .w(px(520.0))
+            .max_w_full()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .p(px(18.0))
+            .rounded(px(metrics::RADIUS_LG))
+            .border_1()
+            .border_color(tokens.border)
+            .bg(tokens.surface)
+            .text_color(tokens.fg)
+            .font_family(tokens.font_family.clone())
+            .shadow_lg()
+            .on_key_down(cx.listener(
+                |this, event: &gpui::KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.cancel_batch_rename(window, cx);
+                    }
+                },
+            ))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(metrics::FONT_LG))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(format!("批量重命名 · {} 项", preview.rows.len())),
+            )
+            .child(prefix)
+            .child(start)
+            .child(keep_extension)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .p(px(10.0))
+                    .rounded(px(metrics::RADIUS))
+                    .bg(tokens.bg)
+                    .children(rows)
+                    .when(remaining > 0, |element| {
+                        element.child(
+                            div()
+                                .text_size(px(metrics::FONT_XS))
+                                .text_color(tokens.muted_fg)
+                                .child(format!("……另有 {remaining} 项")),
+                        )
+                    })
+                    .when(preview.rows.is_empty() && preview.error.is_none(), |element| {
+                        element.child(
+                            div()
+                                .text_size(px(metrics::FONT_XS))
+                                .text_color(tokens.muted_fg)
+                                .child("没有可预览的项目"),
+                        )
+                    }),
+            )
+            .when_some(status, |element, status| {
+                element.child(
+                    div()
+                        .text_size(px(metrics::FONT_XS))
+                        .text_color(tokens.danger)
+                        .child(status),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(cancel)
+                    .child(apply),
+            );
+
+        Some(
+            div()
+                .id("batch-overlay")
+                .absolute()
+                .inset_0()
+                // 遮罩挡住底下的一切：浮层里的输入框拿不到「点空白处」的事件，
+                // 也就不会误触后面的列表。
+                .occlude()
+                .bg(fm_views::tokens::with_alpha(tokens.fg, 0.35))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(card)
+                .into_any_element(),
+        )
     }
 
     /// 窄屏侧边栏浮层下的遮罩：点它即收起侧边栏。
