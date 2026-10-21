@@ -2360,6 +2360,20 @@ impl ShellView {
         }
     }
 
+    /// 结束搜索编辑态，并把焦点交回内容区。
+    ///
+    /// 与输入框自己那条「回车/失焦退出」路径重复，但两条都需要：
+    /// 输入框的 `Enter` 绑定在某些焦点状态下不生效（见 `apply_list_shortcuts` 的注释），
+    /// 那时回车会落到窗口根上的路由器，由它调到这里。
+    pub(crate) fn end_search_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.search_editing {
+            return;
+        }
+        self.search_editing = false;
+        window.focus(&self.shell_focus, cx);
+        cx.notify();
+    }
+
     /// 进入搜索编辑态。
     ///
     /// 与地址栏同一套做法：点一下才创建真正的输入框，未进入编辑态时只用静态文本
@@ -2457,9 +2471,9 @@ impl ShellView {
         root = bind_shortcut::<GoForward>(root, &view, |this, _w, cx| {
             this.go_forward(cx);
         });
-        root = bind_shortcut::<GoUp>(root, &view, |this, _w, cx| {
-            this.go_up(cx);
-        });
+        // 注意：`backspace`（回上级）、`enter`（打开）、`ctrl-a/c/x/v/z`、方向键
+        // 都**不在这里**绑定。它们与输入框自己的按键冲突，必须挂在「内容区」上，
+        // 见 `apply_list_shortcuts` 的注释。
         root = bind_shortcut::<Refresh>(root, &view, |this, _w, cx| this.reload(cx));
         root = bind_shortcut::<FocusAddressBar>(root, &view, |this, w, cx| {
             this.begin_address_edit(w, cx);
@@ -2476,28 +2490,6 @@ impl ShellView {
         });
         // 帮助与设置共用一页（「关于与快捷键」分节），因此两个动作落到同一个方法。
         root = bind_shortcut::<OpenHelp>(root, &view, |this, _w, cx| this.open_help(cx));
-        root = bind_shortcut::<SelectAll>(root, &view, |this, _w, cx| {
-            this.toggle_select_all(true, cx);
-        });
-        root = bind_shortcut::<CopyItems>(root, &view, |this, w, cx| {
-            this.clip_selection(ClipboardMode::Copy, w, cx);
-        });
-        root = bind_shortcut::<CutItems>(root, &view, |this, w, cx| {
-            this.clip_selection(ClipboardMode::Cut, w, cx);
-        });
-        root = bind_shortcut::<PasteItems>(root, &view, |this, w, cx| this.paste(w, cx));
-        root = bind_shortcut::<RenameItem>(root, &view, |this, w, cx| {
-            this.rename_selected(w, cx);
-        });
-        root = bind_shortcut::<DeleteItems>(root, &view, |this, w, cx| {
-            this.delete_selection(w, cx);
-        });
-        root = bind_shortcut::<DeletePermanently>(root, &view, |this, w, cx| {
-            this.delete_selection_forever(w, cx);
-        });
-        root = bind_shortcut::<Undo>(root, &view, |this, w, cx| {
-            this.undo_last(w, cx);
-        });
         // 回车是唯一一个「要看上下文才知道该做什么」的键，因此单独接：
         // - 内联重命名进行中 → 提交改名；
         // - 地址栏 / 搜索框编辑中 → 让位（它们自己的输入框处理）；
@@ -2518,26 +2510,103 @@ impl ShellView {
                 let _ = view.update(cx, |this, cx| {
                     if this.renaming.is_some() {
                         this.commit_rename(window, cx);
+                    } else if this.address_editing {
+                        // 地址栏正在编辑：提交它，而不是打开选中项。
+                        this.commit_address_edit(window, cx);
+                    } else if this.search_editing {
+                        this.end_search_edit(window, cx);
                     } else if !this.editing_input() {
                         this.open_selected(cx);
                     }
                 });
             });
         }
-        root = bind_shortcut::<MoveCursorUp>(root, &view, |this, _w, cx| {
+
+        root
+    }
+
+    /// 列表类快捷键：全部挂在**内容区**上，而不是窗口根。
+    ///
+    /// ## 为什么必须分开放
+    ///
+    /// 这些键与输入框自己的按键重合：`backspace`（删字）、`enter`（提交）、
+    /// `ctrl-a/c/x/v/z`（文本全选/复制/剪切/粘贴/撤销）、`up/down`（光标）。
+    /// 按键分发是「按优先级挑一条绑定，再沿**焦点节点到根**的路径找人处理」，
+    /// 而 GPUI 的上下文深度排序在本版本里并不能可靠地把输入框排在前面
+    /// （无上下文绑定的深度等于 `contexts.len()`，同深度时后注册者胜）。
+    ///
+    /// 换个角度利用同一套机制：把处理器挂在**内容区**上。输入框在命令条里，
+    /// 它的分发路径不经过内容区，于是这条绑定即使被选中也**没人处理**，
+    /// 分发会继续尝试下一条（输入框自己的绑定）——不需要依赖任何优先级假设。
+    ///
+    /// 内容区同时是「没有输入框时的焦点」，因此不编辑时它就在路径起点上，
+    /// 这些键照常生效。
+    fn apply_list_shortcuts(&self, list: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        let view = cx.entity().downgrade();
+        let mut list = list;
+
+        list = bind_shortcut::<GoUp>(list, &view, |this, _w, cx| {
+            this.go_up(cx);
+        });
+        list = bind_shortcut::<SelectAll>(list, &view, |this, _w, cx| {
+            this.toggle_select_all(true, cx);
+        });
+        list = bind_shortcut::<CopyItems>(list, &view, |this, w, cx| {
+            this.clip_selection(ClipboardMode::Copy, w, cx);
+        });
+        list = bind_shortcut::<CutItems>(list, &view, |this, w, cx| {
+            this.clip_selection(ClipboardMode::Cut, w, cx);
+        });
+        list = bind_shortcut::<PasteItems>(list, &view, |this, w, cx| this.paste(w, cx));
+        list = bind_shortcut::<RenameItem>(list, &view, |this, w, cx| {
+            this.rename_selected(w, cx);
+        });
+        list = bind_shortcut::<DeleteItems>(list, &view, |this, w, cx| {
+            this.delete_selection(w, cx);
+        });
+        list = bind_shortcut::<DeletePermanently>(list, &view, |this, w, cx| {
+            this.delete_selection_forever(w, cx);
+        });
+        list = bind_shortcut::<Undo>(list, &view, |this, w, cx| {
+            this.undo_last(w, cx);
+        });
+        list = bind_shortcut::<MoveCursorUp>(list, &view, |this, _w, cx| {
             this.move_cursor(-1, false, cx);
         });
-        root = bind_shortcut::<MoveCursorDown>(root, &view, |this, _w, cx| {
+        list = bind_shortcut::<MoveCursorDown>(list, &view, |this, _w, cx| {
             this.move_cursor(1, false, cx);
         });
-        root = bind_shortcut::<ExtendCursorUp>(root, &view, |this, _w, cx| {
+        list = bind_shortcut::<ExtendCursorUp>(list, &view, |this, _w, cx| {
             this.move_cursor(-1, true, cx);
         });
-        root = bind_shortcut::<ExtendCursorDown>(root, &view, |this, _w, cx| {
+        list = bind_shortcut::<ExtendCursorDown>(list, &view, |this, _w, cx| {
             this.move_cursor(1, true, cx);
         });
 
-        root
+        list
+    }
+
+    /// 给内容区套一层「快捷键 + 焦点」外壳。
+    ///
+    /// 焦点只挂在这一层（`shell_focus`）：它是列表类快捷键的分发起点，
+    /// 也是没有输入框时的默认焦点。窗口根不再 `track_focus`，
+    /// 否则同一个焦点句柄会被两个元素同时声明，分发树里只会认其中一个。
+    fn wrap_list_area(
+        &self,
+        content: gpui::AnyElement,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let area = div()
+            .flex()
+            .flex_col()
+            .flex_grow(1.0)
+            .min_w(px(0.0))
+            .min_h(px(0.0))
+            .key_context(KEY_CONTEXT)
+            .track_focus(&self.shell_focus);
+        self.apply_list_shortcuts(area, cx)
+            .child(content)
+            .into_any_element()
     }
 }
 
@@ -2571,7 +2640,10 @@ impl Render for ShellView {
         let tab_strip = self.render_tab_strip(cx);
         let toolbar = self.render_toolbar(viewport, cx);
         let sidebar = self.render_sidebar(viewport, cx);
+        // 内容区外面套一层：列表类快捷键与默认焦点都在这一层上，
+        // 输入框（在命令条里）的分发路径不经过它，因此不会再被抢占。
         let content = self.render_content(viewport, window, cx);
+        let content = self.wrap_list_area(content, cx);
         let preview = self.render_preview(viewport, cx);
         let status_bar = self.render_status_bar(viewport, cx);
         // 浮层模式下才需要遮罩；宽屏侧边栏是常驻的一栏，点它不该有任何副作用。
@@ -2602,10 +2674,10 @@ impl Render for ShellView {
             .size_full()
             .flex()
             .flex_col()
-            // 按键上下文与焦点：所有全局快捷键都绑在 `KEY_CONTEXT` 上，
-            // 而输入框的上下文更深，因此输入框里的按键不会再被我们抢走。
+            // 只声明按键上下文，**不**声明焦点：焦点由内容区那一层持有
+            // （见 `wrap_list_area`）。一个焦点句柄被两个元素同时 track，
+            // 分发树里只会认其中一个，另一处的处理器就静默失效了。
             .key_context(KEY_CONTEXT)
-            .track_focus(&self.shell_focus)
             // `relative` 是下面两个浮层的定位基准：它们都是 `absolute().inset_0()`，
             // 少了这一句会一路上溯到窗口根。
             .relative()
