@@ -344,6 +344,7 @@ file-manager/
 | 批量重命名的命名规则         | `crates/core/src/naming.rs` 的 `BatchSpec` / `batch_names`（纯函数）；面板在 `layout.rs::render_batch_overlay`，状态在 `ShellView::open_batch_rename` |
 | 传输进度与取消               | 平台：`platform/src/fs.rs` 的 `CancelToken` / `TransferProgress` + `fs_ops::transfer_with`；服务：`ops::paste_with`；UI：`ShellView::paste`（线程 + 120ms 轮询）与 `layout.rs::render_transfer_card` |
 | 跨程序文件剪贴板             | `crates/platform/src/windows/clipboard.rs`（`CF_HDROP` 编解码 + `Preferred DropEffect`）；`ShellView::clip_selection` 负责写、`paste` 负责回退读、`probe_system_clipboard` 负责可用态 |
+| 拖入（外部文件拖进来）       | `crates/shell/src/shell.rs` 的 `wrap_list_area`（`on_drop` / `can_drop` / `on_drag_move` / `on_file_drop_exit`）+ `accept_drop` + `begin_transfer`；不需要改平台层 |
 | 应用图标的几何与配色         | `tools/icon-gen/src/design.rs`，改完重新生成（见 `assets/app-icon/README.md`） |
 
 用户数据的两个落点（都在 `%APPDATA%\pagefold\`，损坏时都只告警并回退默认）：

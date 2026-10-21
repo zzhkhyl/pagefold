@@ -303,6 +303,55 @@
 **取消之后**：不结算剪贴板（剩下的条目用户很可能想再粘一次），
 但已经复制成功的部分仍然入撤销栈——那是真实发生的磁盘变化。
 
+## 拖入：同一个「不写 OLE」的结论，理由却相反
+
+剪贴板那一节的理由是「我们要**发布**数据，所以得自己写 `CF_HDROP`」；
+拖入恰好相反——**消费**数据这件事 GPUI 已经做完了：
+
+```
+系统文件拖放 → gpui_windows 的 IDropTarget
+             → PlatformInput::FileDrop(Entered { position, paths })
+             → cx.active_drag = ExternalPaths
+             → 合成 MouseMove / MouseUp
+             → 命中元素按「鼠标下方 + 载荷类型」派发 on_drop
+```
+
+因此拖入不需要 `OleInitialize`、不需要 `RegisterDragDrop`、也不需要自己实现
+`IDropTarget`——内容区只要挂两样东西：
+
+```rust
+.can_drop(|payload, _, _| payload.is::<ExternalPaths>())
+.on_drop::<ExternalPaths>(cx.listener(|this, paths, window, cx| { … }))
+```
+
+### 三个决定
+
+**1. 一律按复制处理。** `FileDropEvent` 只带 `paths`，源程序的
+`Preferred DropEffect` 在 GPUI 这一层就丢了。猜「移动」的代价是用户以为文件被
+复制、实际却被搬走，甚至源被删——比多留一份副本严重得多。用户想移动，
+复制完删掉源即可。
+
+**2. 落在原目录等于空操作。** 把文件拖进它自己所在的目录，资源管理器也不做任何事。
+同理，拖进来的路径若已不存在，也直接过滤——静默失败比报错更糟，因此两者都会被
+合并成一句「已经在当前目录，或已不存在」。
+
+**3. 松手后复用粘贴那条管线**（`begin_transfer`）：进度卡、取消、逐条回执、
+`Ctrl+Z` 撤销全部一致。拖入与粘贴在「把它搬进当前目录」这件事上是同一类操作，
+各写一条路径只会让两边的边界行为慢慢分叉。
+
+### 悬停高亮用背景色，不用描边
+
+没有提示的话，用户在松手之前不知道这一下会不会生效。高亮由一个 `drop_active` 标志
+驱动：`on_drag_move::<ExternalPaths>` 置位、`on_file_drop_exit` 与 `on_drop` 清除。
+样式用**背景色**（强调色 6% 透明度）而不是描边：描边会改变布局宽度，
+拖动时内容会横向跳一格。
+
+### 拖出还没做
+
+GPUI 也提供了反方向的通道（`on_drag` + `external_drag_payload(ExternalDragPayload::Files(…))`），
+但需要把 `on_drag` 布到详情行与图标格上，并确认它不与框选（rubber band）抢鼠标。
+这属于独立的一块，见 `ROADMAP` 的「拖出」。
+
 ## 跨程序剪贴板：为什么不写 `IDataObject`
 
 早期规划写的是「需要 `OleSetClipboard` + `OleFlushClipboard`，`OleInitialize` 必须在主线程」。

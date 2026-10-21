@@ -164,6 +164,8 @@ pub struct ShellView {
     pub(crate) system_clipboard: bool,
     /// 系统剪贴板探测的节流计数。
     clipboard_ticks: u32,
+    /// 是否有外部文件正拖在内容区上方（只用于高亮提示）。
+    pub(crate) drop_active: bool,
     /// 正在内联重命名的条目。
     pub(crate) renaming: Option<RenameState>,
     /// 本次右键是否落在某个条目上（由条目上的处理器置位，空白处菜单的构造器消费）。
@@ -327,6 +329,7 @@ impl ShellView {
             clipboard: Clipboard::new(),
             system_clipboard: false,
             clipboard_ticks: 0,
+            drop_active: false,
             renaming: None,
             area_menu_suppressed: false,
             list_incomplete: false,
@@ -926,6 +929,62 @@ impl ShellView {
             PastePlan::Copy { .. } => ClipboardMode::Copy.action(),
             PastePlan::Move { .. } => ClipboardMode::Cut.action(),
         };
+        self.begin_transfer(plan, verb, window, cx);
+    }
+
+    /// 接收从别的程序拖进来的文件/文件夹（拖入当前目录）。
+    ///
+    /// 统一按**复制**处理：GPUI 的 `FileDropEvent` 只带路径，不带源程序的
+    /// `Preferred DropEffect`，因此拿不到「对方是剪切还是复制」。
+    /// 与其猜，不如给一个确定的行为——用户想移动，复制完删掉源即可，
+    /// 而猜错方向会直接弄丢用户的数据。
+    pub(crate) fn accept_drop(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dir) = self.current_dir() else {
+            window.push_notification(Notification::warning("当前位置不能接收拖入的文件"), cx);
+            return;
+        };
+
+        // 拖进自己所在的目录等于什么也没做（资源管理器在这种情况下也是空操作）。
+        let sources: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|path| path.exists() && path.parent() != Some(dir.as_path()))
+            .collect();
+
+        if sources.is_empty() {
+            window.push_notification(
+                Notification::warning("拖入的项目已经在当前目录，或已不存在"),
+                cx,
+            );
+            return;
+        }
+
+        self.begin_transfer(
+            PastePlan::Copy {
+                sources,
+                dest_dir: dir,
+            },
+            ClipboardMode::Copy.action(),
+            window,
+            cx,
+        );
+    }
+
+    /// 启动一次传输（粘贴与拖入共用）。
+    ///
+    /// 三件事在这里统一处理：右下角进度卡、后台线程、UI 侧轮询。
+    /// 收尾（结算剪贴板、记撤销、刷列表）在 [`ShellView::finish_paste`] 里。
+    fn begin_transfer(
+        &mut self,
+        plan: PastePlan,
+        verb: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let fs = Arc::clone(self.service.file_system());
         // 后台线程要一份独立所有权；外层留一份，用于收尾时结算剪贴板。
         let planned = plan.clone();
@@ -3093,6 +3152,9 @@ impl ShellView {
         content: gpui::AnyElement,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        // 拖入：GPUI 把系统级文件拖放翻译成一个 `active_drag`（载荷是 `ExternalPaths`），
+        // 松手时按「鼠标下方的元素 + 载荷类型」派发 `on_drop`。因此这里不需要碰
+        // OLE / `IDropTarget`，也不需要在窗口线程上做任何初始化。
         let area = div()
             .flex()
             .flex_col()
@@ -3100,7 +3162,39 @@ impl ShellView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .key_context(KEY_CONTEXT)
-            .track_focus(&self.shell_focus);
+            .track_focus(&self.shell_focus)
+            .can_drop(|payload, _window, _cx| payload.is::<gpui::ExternalPaths>())
+            .on_drag_move::<gpui::ExternalPaths>(cx.listener(
+                |this, _event: &gpui::DragMoveEvent<gpui::ExternalPaths>, _window, cx| {
+                    if !this.drop_active {
+                        this.drop_active = true;
+                        cx.notify();
+                    }
+                },
+            ))
+            // 拖出窗口时清掉高亮：否则它会在「拖到任务栏又放弃」之后一直亮着。
+            .on_file_drop_exit(cx.listener(|this, _event, _window, cx| {
+                if this.drop_active {
+                    this.drop_active = false;
+                    cx.notify();
+                }
+            }))
+            .on_drop::<gpui::ExternalPaths>(cx.listener(
+                |this, paths: &gpui::ExternalPaths, window, cx| {
+                    this.drop_active = false;
+                    let paths: Vec<PathBuf> = paths.0.iter().cloned().collect();
+                    this.accept_drop(paths, window, cx);
+                },
+            ));
+
+        // 悬停高亮：没有它，用户松手之前不知道这一下会不会生效。
+        // 用背景色而不是描边——描边会改变布局宽度，拖动时内容会跳一格。
+        let area = if self.drop_active {
+            area.bg(fm_views::tokens::with_alpha(self.tokens.accent, 0.06))
+        } else {
+            area
+        };
+
         self.apply_list_shortcuts(area, cx)
             .child(content)
             .into_any_element()
