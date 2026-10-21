@@ -271,9 +271,8 @@ mod tests {
         let plan = clipboard.plan(&path(r"C:\b")).unwrap();
 
         let report = OpReport {
-            done: 0,
-            renamed: Vec::new(),
             failed: vec![(path(r"C:\a\x.txt"), String::from("文件正被其它程序使用"))],
+            ..OpReport::default()
         };
         clipboard.complete(&plan, &report);
 

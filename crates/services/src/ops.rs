@@ -118,11 +118,30 @@ pub fn rename(fs: &dyn FileSystem, path: &Path, new_name: &str) -> OpResult<Path
 /// 是不是原位粘贴剪切内容）是纯逻辑，放在 `Clipboard` 里就能单测；
 /// 这里只负责「照计划执行」，一行分支。
 pub fn paste(fs: &dyn FileSystem, plan: &PastePlan) -> OpResult<OpReport> {
-    let result = match plan {
-        PastePlan::Copy { sources, dest_dir } => fs.copy_into(sources, dest_dir),
-        PastePlan::Move { sources, dest_dir } => fs.move_into(sources, dest_dir),
+    paste_with(
+        fs,
+        plan,
+        &fm_platform::CancelToken::new(),
+        &mut |_| {},
+    )
+}
+
+/// 带进度与取消的粘贴。
+///
+/// 与 [`paste`] 只多两个参数：取消标志与进度回调。放在同一条实现上而不是
+/// 各写一份，是为了避免「带进度的版本」和「不带进度的版本」在冲突处理上分叉。
+pub fn paste_with(
+    fs: &dyn FileSystem,
+    plan: &PastePlan,
+    cancel: &fm_platform::CancelToken,
+    progress: &mut dyn FnMut(fm_platform::TransferProgress),
+) -> OpResult<OpReport> {
+    let (sources, dest_dir, mode) = match plan {
+        PastePlan::Copy { sources, dest_dir } => (sources, dest_dir, fm_platform::TransferMode::Copy),
+        PastePlan::Move { sources, dest_dir } => (sources, dest_dir, fm_platform::TransferMode::Move),
     };
-    result.map_err(|error| describe_error(&error))
+    fs.transfer(sources, dest_dir, mode, cancel, progress)
+        .map_err(|error| describe_error(&error))
 }
 
 /// 把若干条目移入回收站，返回实际处理的数量。
@@ -256,6 +275,10 @@ pub fn summarize(verb: &str, report: &OpReport) -> String {
         let (_, reason) = &report.failed[0];
         parts.push(format!("{} 项失败（{reason}）", report.failed.len()));
     }
+    if report.cancelled {
+        // 放在最后：前面是「已经做到的」，这一句补充「为什么没做完」。
+        parts.push(String::from("已取消"));
+    }
 
     if parts.is_empty() {
         // 一条都没动、也没报错：源全都消失了才会走到这里。
@@ -386,17 +409,17 @@ mod tests {
         let renamed = OpReport {
             done: 3,
             renamed: vec![(dir().join("a"), dir().join("a (2)"))],
-            failed: Vec::new(),
+            ..OpReport::default()
         };
         assert_eq!(summarize("复制", &renamed), "已复制 3 项，1 项因重名已改名");
 
         let partial = OpReport {
             done: 2,
-            renamed: Vec::new(),
             failed: vec![
                 (dir().join("a"), String::from("文件正被其它程序使用")),
                 (dir().join("b"), String::from("没有权限，文件可能被占用或受保护")),
             ],
+            ..OpReport::default()
         };
         let text = summarize("移动", &partial);
         assert_eq!(text, "已移动 2 项，2 项失败（文件正被其它程序使用）");

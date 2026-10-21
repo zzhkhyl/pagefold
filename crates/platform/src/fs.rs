@@ -147,6 +147,25 @@ pub trait FileSystem: Send + Sync + 'static {
     /// 只读属性会被清掉后重试：确认框已经问过一次，删除时再失败一次
     /// 等于让用户在两个地方回答同一个问题。
     fn delete_permanently(&self, paths: &[PathBuf]) -> anyhow::Result<OpReport>;
+
+    /// 带进度与取消的粘贴。
+    ///
+    /// 默认实现退化成 [`FileSystem::copy_into`] / [`FileSystem::move_into`]：
+    /// 进度与取消只是**增强**，mock 与将来的其他平台不必为此各写一份。
+    /// 真实实现（Windows）会覆盖它，在文件边界检查取消标志并回调进度。
+    fn transfer(
+        &self,
+        sources: &[PathBuf],
+        dest_dir: &Path,
+        mode: TransferMode,
+        _cancel: &CancelToken,
+        _progress: &mut dyn FnMut(TransferProgress),
+    ) -> anyhow::Result<OpReport> {
+        match mode {
+            TransferMode::Copy => self.copy_into(sources, dest_dir),
+            TransferMode::Move => self.move_into(sources, dest_dir),
+        }
+    }
 }
 
 /// 一次写操作的回执。
@@ -165,6 +184,11 @@ pub struct OpReport {
     pub renamed: Vec<(PathBuf, PathBuf)>,
     /// 失败的条目及原因（面向用户的短句，不是 `Os { code: .. }`）。
     pub failed: Vec<(PathBuf, String)>,
+    /// 是否因为用户取消而提前结束。
+    ///
+    /// 与「失败」分开记：取消不是错误，回执里要说「已取消」而不是
+    /// 「1 项失败（已取消）」——后者会让用户以为出了问题。
+    pub cancelled: bool,
 }
 
 impl OpReport {
@@ -177,4 +201,54 @@ impl OpReport {
     pub fn is_empty(&self) -> bool {
         self.done == 0 && self.failed.is_empty()
     }
+}
+
+/// 传输方向。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferMode {
+    Copy,
+    Move,
+}
+
+impl TransferMode {
+    /// 面向用户的动词（「复制」/「移动」）。
+    pub fn verb(self) -> &'static str {
+        match self {
+            Self::Copy => "复制",
+            Self::Move => "移动",
+        }
+    }
+}
+
+/// 取消标志。
+///
+/// 用 `Arc<AtomicBool>` 而不是 channel：取消是**单向、幂等、随时可读**的信号，
+/// 原子读就够；channel 还要在复制的每一层递归里处理接收端，反而更绕。
+/// 克隆出来的句柄共享同一个标志，因此 UI 点「取消」能立刻影响后台线程。
+#[derive(Clone, Debug, Default)]
+pub struct CancelToken(Arc<std::sync::atomic::AtomicBool>);
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 请求取消。重复调用无副作用。
+    pub fn cancel(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 是否已请求取消。
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// 一次传输的进度快照。
+#[derive(Clone, Debug, Default)]
+pub struct TransferProgress {
+    /// 已完成的**文件**数（目录本身不计）。
+    pub files_done: u64,
+    /// 正在处理的路径。
+    pub current: PathBuf,
 }

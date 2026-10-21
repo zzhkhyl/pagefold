@@ -174,8 +174,7 @@ impl FileSystem for MockFileSystem {
         });
         Ok(OpReport {
             done: paths.len(),
-            renamed: Vec::new(),
-            failed: Vec::new(),
+            ..OpReport::default()
         })
     }
 

@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use fm_core::naming;
@@ -14,7 +15,7 @@ use fm_core::{
     BatchSpec, Column, Density, Entry, EntryKind, IconZoom, Location, Selection, SortKey, TabId,
     TabsState, UndoAction, UndoStack, ViewMode, batch_names,
 };
-use fm_platform::{Drive, OpReport};
+use fm_platform::{CancelToken, Drive, OpReport, TransferProgress};
 use fm_services::clipboard::{Clipboard, ClipboardMode, PastePlan};
 use fm_services::config::Config;
 use fm_services::directory::{DEFAULT_BATCH, DirectoryService, ScanBatch, SortSpec};
@@ -122,6 +123,11 @@ pub struct ShellView {
     pub(crate) undo: UndoStack,
     /// 批量重命名浮层。`Some` 时浮层盖住内容区。
     pub(crate) batch: Option<BatchRename>,
+    /// 进行中的复制 / 移动。`Some` 时右下角显示进度卡。
+    ///
+    /// 用 `Arc<Mutex<_>>` 是因为它被两个线程同时读写：UI 每 120ms 读一次画进度，
+    /// 后台线程每复制完一个文件写一次。锁的持有时间都只有几个字段的拷贝。
+    pub(crate) transfer: Option<Arc<Mutex<Transfer>>>,
     /// 内容根的焦点句柄。
     ///
     /// 没有编辑会话时，焦点必须落在这里：GPUI 的按键分发从**焦点节点**向上冒泡，
@@ -300,6 +306,7 @@ impl ShellView {
             persisted_session: None,
             undo: UndoStack::new(),
             batch: None,
+            transfer: None,
             shell_focus: cx.focus_handle(),
             query: String::new(),
             preview_open,
@@ -528,6 +535,24 @@ pub(crate) struct RubberBand {
 
 /// 框选的拖动阈值（px）。低于它的一律按单击处理。
 const RUBBER_BAND_THRESHOLD: f32 = 4.0;
+
+/// 一次复制 / 移动的进行态。
+pub(crate) struct Transfer {
+    /// 展示用的标题：「复制 3 项 → D:\目标」。
+    pub(crate) label: String,
+    /// 选中的顶层条目数（进度条的分母用文件数，这里只用于文案）。
+    pub(crate) total: usize,
+    /// 已完成的文件数。
+    pub(crate) files_done: u64,
+    /// 正在处理的路径。
+    pub(crate) current: PathBuf,
+    /// 取消标志：UI 点「取消」后，后台在下一个文件边界停下。
+    pub(crate) cancel: CancelToken,
+    /// 是否已经请求取消（用于把按钮变成「正在取消…」）。
+    pub(crate) cancelling: bool,
+    /// 后台线程是否已收工。
+    pub(crate) finished: bool,
+}
 
 /// 批量重命名的进行态。
 pub(crate) struct BatchRename {
@@ -817,16 +842,100 @@ impl ShellView {
         // 后台线程要一份独立所有权；外层留一份，用于收尾时结算剪贴板。
         let planned = plan.clone();
 
+        let (count, dest_dir) = match &plan {
+            PastePlan::Copy { sources, dest_dir } | PastePlan::Move { sources, dest_dir } => {
+                (sources.len(), dest_dir.clone())
+            }
+        };
+        let transfer = Arc::new(Mutex::new(Transfer {
+            label: format!("{verb} {count} 项 → {}", dest_dir.display()),
+            total: count,
+            files_done: 0,
+            current: PathBuf::new(),
+            cancel: CancelToken::new(),
+            cancelling: false,
+            finished: false,
+        }));
+        // 后台把结果放在这里，UI 轮询到 `finished` 后取走。
+        let outcome: Arc<Mutex<Option<OpResult<OpReport>>>> = Arc::new(Mutex::new(None));
+        self.transfer = Some(Arc::clone(&transfer));
+
+        // 阻塞 IO 交给普通线程，而不是后台执行器：
+        // `fs::copy` 是同步阻塞调用，放在执行器上会占住一个工作线程；
+        // 而这里还需要在等待期间持续读进度，把两者分开最直接。
+        let io_transfer = Arc::clone(&transfer);
+        let io_outcome = Arc::clone(&outcome);
+        let spawned = std::thread::Builder::new()
+            .name(String::from("pagefold-transfer"))
+            .spawn(move || {
+                let cancel = io_transfer
+                    .lock()
+                    .map(|state| state.cancel.clone())
+                    .unwrap_or_default();
+                let mut progress = |step: TransferProgress| {
+                    if let Ok(mut state) = io_transfer.lock() {
+                        state.files_done = step.files_done;
+                        state.current = step.current;
+                    }
+                };
+                let result = ops::paste_with(&*fs, &planned, &cancel, &mut progress);
+                if let Ok(mut state) = io_transfer.lock() {
+                    state.finished = true;
+                }
+                if let Ok(mut slot) = io_outcome.lock() {
+                    *slot = Some(result);
+                }
+            });
+        if let Err(error) = spawned {
+            // 线程起不来时不能留下一个永远转圈的进度卡。
+            self.transfer = None;
+            window.push_notification(
+                Notification::error(format!("无法启动传输线程：{error}")),
+                cx,
+            );
+            return;
+        }
+
+        // UI 侧：每 120ms 刷新一次进度卡，直到后台收工，再统一收尾。
         self.op_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { ops::paste(&*fs, &planned) })
-                .await;
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(120))
+                    .await;
+                let finished = transfer
+                    .lock()
+                    .map(|state| state.finished)
+                    .unwrap_or(true);
+                let _ = this.update_in(cx, |_view, _window, cx| cx.notify());
+                if finished {
+                    break;
+                }
+            }
+
+            let result = outcome
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take())
+                .unwrap_or_else(|| Err(String::from("传输没有返回结果")));
 
             let _ = this.update_in(cx, move |view, window, cx| {
                 view.finish_paste(window, cx, &plan, verb, result);
             });
         }));
+    }
+
+    /// 请求取消进行中的传输。
+    ///
+    /// 只是置一个标志：真正的停止发生在后台线程的下一个文件边界
+    /// （半截文件比「多复制了一个」危险得多，见 `fs_ops::transfer_with`）。
+    pub(crate) fn cancel_transfer(&mut self, cx: &mut Context<Self>) {
+        if let Some(transfer) = self.transfer.as_ref()
+            && let Ok(mut state) = transfer.lock()
+        {
+            state.cancel.cancel();
+            state.cancelling = true;
+        }
+        cx.notify();
     }
 
     /// 粘贴完成后的收尾。
@@ -838,13 +947,28 @@ impl ShellView {
         verb: &str,
         result: OpResult<OpReport>,
     ) {
+        // 进度卡先撤掉：无论成功、失败还是取消，它都不该继续留在屏幕上。
+        self.transfer = None;
+
         match result {
             Ok(report) => {
-                // 剪贴板怎么收尾的规则（剪切只在**全部成功**时失效，
-                // 部分失败留着重试）在 `Clipboard::complete` 里，那条规则有单测。
-                self.clipboard.complete(plan, &report);
+                // 成功的那部分先记撤销：取消也可能已经复制了好几个文件，
+                // 它们同样应该可撤销。
                 self.record_paste_undo(plan, &report);
-                self.notice_report(window, cx, verb, &report);
+
+                if report.cancelled {
+                    // 取消**不结算剪贴板**：剩下的条目用户很可能想再粘一次，
+                    // 而清空剪贴板会让他回去重选一遍。
+                    window.push_notification(
+                        Notification::warning(ops::summarize(verb, &report)),
+                        cx,
+                    );
+                } else {
+                    // 剪贴板怎么收尾的规则（剪切只在**全部成功**时失效，
+                    // 部分失败留着重试）在 `Clipboard::complete` 里，那条规则有单测。
+                    self.clipboard.complete(plan, &report);
+                    self.notice_report(window, cx, verb, &report);
+                }
                 self.refresh_after_write(cx);
             }
             Err(reason) => window.push_notification(Notification::error(reason), cx),
@@ -2921,6 +3045,10 @@ impl Render for ShellView {
         // 它属于「内容区的一次操作」，不该盖住系统级提示。
         if let Some(batch) = self.render_batch_overlay(cx) {
             body = body.child(batch);
+        }
+        // 进度卡固定在右下角，不遮内容：它只占 340px 宽的一小块。
+        if let Some(card) = self.render_transfer_card(cx) {
+            body = body.child(card);
         }
 
         let root = div()

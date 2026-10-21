@@ -11,7 +11,9 @@ pub mod watch;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-pub use fs::{Drive, DriveKind, FileSystem, OpReport};
+pub use fs::{
+    CancelToken, Drive, DriveKind, FileSystem, OpReport, TransferMode, TransferProgress,
+};
 pub use watch::{Watcher, watch_directory};
 
 /// 返回当前平台的 [`FileSystem`] 实现。

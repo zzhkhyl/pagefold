@@ -222,7 +222,7 @@ target\innosetup-6.7.3.exe /PORTABLE=1 /VERYSILENT /SUPPRESSMSGBOXES /NORESTART 
 | 依赖解析           | 828 个包，经 USTC 镜像全部拉取成功                                                                                                                     |
 | debug 构建         | 通过                                                                                                                                                   |
 | debug 本地运行     | 通过：窗口存活满 15 秒；日志显示`Using GPU: Intel(R) Graphics`、`Created device with Direct3D 11.1 feature level`、`Use Microsoft YaHei UI as UI font` |
-| 单元测试           | `cargo test --workspace` 250 项全部通过（1 项标记 ignored），零警告                                                                                     |
+| 单元测试           | `cargo test --workspace` 252 项全部通过（1 项标记 ignored），零警告                                                                                     |
 | release 构建       | 通过：`Finished release profile [optimized] target(s) in 4m 54s`，0 错误，产物 `target/release/pagefold.exe`（17.8 MB）                              |
 | release 产物子系统 | 通过：`PE32+ executable for MS Windows 6.00 (GUI), x86-64`，不弹控制台                                                                                 |
 | release 本地运行   | 通过：进程存活满 10 秒；构建期由`fxc.exe` 编译的内嵌着色器字节码可用                                                                                   |
@@ -302,6 +302,7 @@ file-manager/
 | 撤销栈与逆操作               | `crates/core/src/undo.rs`（记录什么）+ `crates/services/src/ops.rs` 的 `undo`（怎么返回）+ `ShellView::undo_last`（入口与提示） |
 | 永久删除                     | `crates/platform/src/windows/fs_ops.rs` 的 `delete_permanently`（含只读清属性）+ `ShellView::delete_selection_forever`（独立确认框） |
 | 批量重命名的命名规则         | `crates/core/src/naming.rs` 的 `BatchSpec` / `batch_names`（纯函数）；面板在 `layout.rs::render_batch_overlay`，状态在 `ShellView::open_batch_rename` |
+| 传输进度与取消               | 平台：`platform/src/fs.rs` 的 `CancelToken` / `TransferProgress` + `fs_ops::transfer_with`；服务：`ops::paste_with`；UI：`ShellView::paste`（线程 + 120ms 轮询）与 `layout.rs::render_transfer_card` |
 | 应用图标的几何与配色         | `tools/icon-gen/src/design.rs`，改完重新生成（见 `assets/app-icon/README.md`） |
 
 用户数据的两个落点（都在 `%APPDATA%\pagefold\`，损坏时都只告警并回退默认）：

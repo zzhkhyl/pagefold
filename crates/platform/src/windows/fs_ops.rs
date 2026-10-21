@@ -23,7 +23,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result};
 use fm_core::naming::unique_name;
 
-use crate::fs::OpReport;
+use crate::fs::{CancelToken, OpReport, TransferMode, TransferProgress};
 
 /// 在 `parent` 下新建目录，重名时自动改名。
 pub fn create_dir(parent: &Path, name: &str) -> Result<PathBuf> {
@@ -64,40 +64,100 @@ pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf> {
 
 /// 复制若干条目进 `dest_dir`。
 pub fn copy_into(sources: &[PathBuf], dest_dir: &Path) -> Result<OpReport> {
-    let mut report = OpReport::default();
-
-    for source in sources {
-        match copy_one(source, dest_dir) {
-            Ok((target, renamed)) => {
-                report.done += 1;
-                if renamed {
-                    report.renamed.push((source.clone(), target));
-                }
-            }
-            Err(error) => report.failed.push((source.clone(), describe(&error))),
-        }
-    }
-
-    Ok(report)
+    Ok(transfer_with(
+        sources,
+        dest_dir,
+        TransferMode::Copy,
+        &CancelToken::new(),
+        &mut |_| {},
+    ))
 }
 
 /// 移动若干条目进 `dest_dir`。
 pub fn move_into(sources: &[PathBuf], dest_dir: &Path) -> Result<OpReport> {
+    Ok(transfer_with(
+        sources,
+        dest_dir,
+        TransferMode::Move,
+        &CancelToken::new(),
+        &mut |_| {},
+    ))
+}
+
+/// 带进度与取消的复制 / 移动。
+///
+/// **取消发生在文件边界**：正在写的那一个文件会写完，之后不再开始下一个。
+/// 这是刻意的——`fs::copy` 是单个阻塞调用，没有「写到一半停下」的干净办法，
+/// 而半截文件比「多复制了一个」危险得多（用户会以为那个文件是完整的）。
+/// 资源管理器的取消行为与此一致。
+pub fn transfer_with(
+    sources: &[PathBuf],
+    dest_dir: &Path,
+    mode: TransferMode,
+    cancel: &CancelToken,
+    progress: &mut dyn FnMut(TransferProgress),
+) -> OpReport {
     let mut report = OpReport::default();
+    let mut run = TransferRun {
+        cancel,
+        progress,
+        files_done: 0,
+        cancelled: false,
+    };
 
     for source in sources {
-        match move_one(source, dest_dir) {
+        if run.cancelled {
+            break;
+        }
+        let outcome = match mode {
+            TransferMode::Copy => copy_one(source, dest_dir, &mut run),
+            TransferMode::Move => move_one(source, dest_dir, &mut run),
+        };
+        match outcome {
             Ok((target, renamed)) => {
                 report.done += 1;
                 if renamed {
                     report.renamed.push((source.clone(), target));
                 }
             }
-            Err(error) => report.failed.push((source.clone(), describe(&error))),
+            Err(error) => {
+                // 取消时递归里抛出的那个错误不算「失败」：用户主动喊停，
+                // 不是程序出错，回执要分开说。
+                if run.cancelled {
+                    break;
+                }
+                report.failed.push((source.clone(), describe(&error)));
+            }
         }
     }
 
-    Ok(report)
+    report.cancelled = run.cancelled;
+    report
+}
+
+/// 一次传输的运行态：取消标志、进度回调与已完成文件数。
+struct TransferRun<'a> {
+    cancel: &'a CancelToken,
+    progress: &'a mut dyn FnMut(TransferProgress),
+    files_done: u64,
+    cancelled: bool,
+}
+
+impl TransferRun<'_> {
+    /// 在每个文件真正开始复制之前调用：检查取消、累进并回调。
+    fn tick(&mut self, path: &Path) -> Result<()> {
+        if self.cancel.is_cancelled() {
+            self.cancelled = true;
+            // 错误内容不重要：调用方看到 `cancelled` 就把它当取消处理。
+            anyhow::bail!("已取消");
+        }
+        self.files_done += 1;
+        (self.progress)(TransferProgress {
+            files_done: self.files_done,
+            current: path.to_path_buf(),
+        });
+        Ok(())
+    }
 }
 
 /// 永久删除若干条目（不进回收站），逐条回执。
@@ -192,14 +252,22 @@ fn create_unique(
 }
 
 /// 复制单个条目，返回 `(实际目标路径, 是否因重名改过名)`。
-fn copy_one(source: &Path, dest_dir: &Path) -> Result<(PathBuf, bool)> {
+fn copy_one(
+    source: &Path,
+    dest_dir: &Path,
+    run: &mut TransferRun<'_>,
+) -> Result<(PathBuf, bool)> {
     let (target, renamed) = resolve_target(dest_dir, source)?;
-    copy_tree(source, &target)?;
+    copy_tree(source, &target, run)?;
     Ok((target, renamed))
 }
 
 /// 移动单个条目。
-fn move_one(source: &Path, dest_dir: &Path) -> Result<(PathBuf, bool)> {
+fn move_one(
+    source: &Path,
+    dest_dir: &Path,
+    run: &mut TransferRun<'_>,
+) -> Result<(PathBuf, bool)> {
     // 把目录移进它自己（或它的子目录）会自我吞食：`copy` 会一边写一边读、
     // 直到磁盘写满；`move` 更糟，删源时会把刚移进去的部分一起删掉。
     // 资源管理器同样拒绝这种操作。
@@ -208,7 +276,7 @@ fn move_one(source: &Path, dest_dir: &Path) -> Result<(PathBuf, bool)> {
     }
 
     let (target, renamed) = resolve_target(dest_dir, source)?;
-    move_tree(source, &target)?;
+    move_tree(source, &target, run)?;
     Ok((target, renamed))
 }
 
@@ -228,7 +296,7 @@ fn resolve_target(dest_dir: &Path, source: &Path) -> Result<(PathBuf, bool)> {
 }
 
 /// 递归复制。目录逐层新建，文件用 `fs::copy`（它会带上修改时间）。
-fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+fn copy_tree(from: &Path, to: &Path, run: &mut TransferRun<'_>) -> Result<()> {
     let metadata = fs::symlink_metadata(extended(from))
         .with_context(|| format!("无法读取「{}」", from.display()))?;
 
@@ -250,23 +318,30 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
             // 单个条目失败会让整项失败，不做「跳过继续」：复制留下的半成品
             // 比一次明确的失败更难收拾，而回执里会写明是哪一个条目出的问题。
             let item = item.with_context(|| format!("无法读取目录「{}」", from.display()))?;
-            copy_tree(&item.path(), &to.join(item.file_name()))?;
+            copy_tree(&item.path(), &to.join(item.file_name()), run)?;
         }
         return Ok(());
     }
 
+    // 在真正写文件之前检查取消并回调进度：这样「已取消」时不会多写一个文件。
+    run.tick(from)?;
     fs::copy(extended(from), extended(to)).with_context(|| format!("无法复制「{}」", from.display()))?;
     Ok(())
 }
 
 /// 移动。同卷用 `fs::rename`（瞬间完成、不产生副本），跨卷退化为复制 + 删源。
-fn move_tree(from: &Path, to: &Path) -> Result<()> {
+fn move_tree(from: &Path, to: &Path, run: &mut TransferRun<'_>) -> Result<()> {
     match fs::rename(extended(from), extended(to)) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            // 同卷改名是瞬间的，但进度面板仍需前进一格，否则「移动大目录」
+            // 会停在 0 直到全部做完。
+            run.tick(from)?;
+            Ok(())
+        }
         Err(error) if is_cross_device(&error) => {
             // `rename` 不能跨卷。先复制再删源，中途失败会留下一份副本——
             // 这是所有文件管理器都接受的风险方向：宁可多留一份，也不能丢数据。
-            copy_tree(from, to)?;
+            copy_tree(from, to, run)?;
             remove_tree(from)?;
             Ok(())
         }
@@ -392,6 +467,67 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn transfer_reports_progress_once_per_file() {
+        let root = scratch_dir("transfer-progress");
+        let source = scratch_dir("transfer-progress-src");
+        fs::write(source.join("a.txt"), b"a").unwrap();
+        fs::write(source.join("b.txt"), b"b").unwrap();
+
+        let mut seen: Vec<u64> = Vec::new();
+        let report = transfer_with(
+            &[source.join("a.txt"), source.join("b.txt")],
+            &root,
+            TransferMode::Copy,
+            &CancelToken::new(),
+            &mut |progress| seen.push(progress.files_done),
+        );
+
+        assert_eq!(report.done, 2);
+        assert!(!report.cancelled);
+        assert_eq!(seen, vec![1, 2], "每复制完一个文件回调一次，计数递增");
+        assert!(root.join("a.txt").exists() && root.join("b.txt").exists());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&source);
+    }
+
+    #[test]
+    fn transfer_stops_between_files_when_cancelled() {
+        let root = scratch_dir("transfer-cancel");
+        let source = scratch_dir("transfer-cancel-src");
+        fs::write(source.join("a.txt"), b"a").unwrap();
+        fs::write(source.join("b.txt"), b"b").unwrap();
+
+        let cancel = CancelToken::new();
+        let mut calls = 0;
+        let report = transfer_with(
+            &[source.join("a.txt"), source.join("b.txt")],
+            &root,
+            TransferMode::Copy,
+            &cancel,
+            &mut |_| {
+                calls += 1;
+                // 第一个文件复制完之后喊停。
+                if calls == 1 {
+                    cancel.cancel();
+                }
+            },
+        );
+
+        assert!(report.cancelled, "取消必须反映在回执里");
+        assert_eq!(report.done, 1, "第一个文件已完成，第二个不该开始");
+        assert!(report.failed.is_empty(), "取消不是失败，不能记进 failed");
+        assert!(root.join("a.txt").exists());
+        assert!(
+            !root.join("b.txt").exists(),
+            "取消之后不应再写新文件（半截文件比少复制一个更危险）"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&source);
     }
 
     #[test]

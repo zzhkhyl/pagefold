@@ -144,6 +144,19 @@ impl FileSystem for WindowsFileSystem {
     fn delete_permanently(&self, paths: &[PathBuf]) -> anyhow::Result<OpReport> {
         Ok(fs_ops::delete_permanently(paths))
     }
+
+    fn transfer(
+        &self,
+        sources: &[PathBuf],
+        dest_dir: &Path,
+        mode: crate::fs::TransferMode,
+        cancel: &crate::fs::CancelToken,
+        progress: &mut dyn FnMut(crate::fs::TransferProgress),
+    ) -> anyhow::Result<OpReport> {
+        Ok(fs_ops::transfer_with(
+            sources, dest_dir, mode, cancel, progress,
+        ))
+    }
 }
 
 /// 由 `DirEntry` 构造条目。

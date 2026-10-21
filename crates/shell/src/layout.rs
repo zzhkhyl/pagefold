@@ -1078,6 +1078,108 @@ impl ShellView {
         )
     }
 
+    /// 右下角的传输进度卡（复制 / 移动进行中时存在）。
+    ///
+    /// 刻意**不画百分比进度条**：复制开始前我们并不知道一棵目录里有多少文件，
+    /// 而为了知道就得先完整遍历一遍（那是第二次 IO）。画一条按「顶层条目数」
+    /// 推进的条会在「只复制一个 5GB 目录」时几乎不动，比不画更让人焦虑。
+    /// 这里给出的是确定的信息：已复制多少文件、当前是哪一个。
+    pub(crate) fn render_transfer_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let transfer = self.transfer.as_ref()?;
+        let (label, files_done, total, current, cancelling) = {
+            let state = transfer.lock().ok()?;
+            (
+                state.label.clone(),
+                state.files_done,
+                state.total,
+                state.current.clone(),
+                state.cancelling,
+            )
+        };
+
+        let current = if current.as_os_str().is_empty() {
+            String::from("准备中…")
+        } else {
+            crate::shell::truncate(&current.display().to_string(), 46)
+        };
+
+        let cancel = if cancelling {
+            widgets::text_button(
+                "transfer-cancel",
+                "正在取消…",
+                None,
+                "当前文件写完后停止",
+                false,
+                &self.tokens,
+                |_: &gpui::ClickEvent, _: &mut Window, _: &mut App| {},
+            )
+        } else {
+            widgets::text_button(
+                "transfer-cancel",
+                "取消",
+                None,
+                "停止复制（当前文件会写完，不会留下半截文件）",
+                true,
+                &self.tokens,
+                cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
+                    this.cancel_transfer(cx);
+                }),
+            )
+        };
+
+        let tokens = &self.tokens;
+        Some(
+            div()
+                .id("transfer-card")
+                .occlude()
+                .absolute()
+                .right(px(16.0))
+                .bottom(px(40.0))
+                .w(px(340.0))
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .p(px(12.0))
+                .rounded(px(metrics::RADIUS_LG))
+                .border_1()
+                .border_color(tokens.border)
+                .bg(tokens.surface)
+                .shadow_lg()
+                .text_color(tokens.fg)
+                .font_family(tokens.font_family.clone())
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .flex_grow(1.0)
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .text_size(px(metrics::FONT_SM))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(label),
+                        )
+                        .child(cancel),
+                )
+                .child(
+                    div()
+                        .text_size(px(metrics::FONT_XS))
+                        .text_color(tokens.muted_fg)
+                        .child(format!("已处理 {files_done} 个文件 · 共 {total} 项")),
+                )
+                .child(
+                    div()
+                        .text_size(px(metrics::FONT_XS))
+                        .text_color(tokens.muted_fg)
+                        .child(current),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// 窄屏侧边栏浮层下的遮罩：点它即收起侧边栏。
     pub(crate) fn render_scrim(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
