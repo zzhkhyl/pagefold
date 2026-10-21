@@ -1,0 +1,196 @@
+name: Release
+
+# 触发方式：
+#   1) 打 tag 并推送（`git tag v0.4.0 && git push origin v0.4.0`）→ 编译 + 发布 Release；
+#   2) 手动 Run workflow → 只编译并上传 artifact，**不**创建 Release（用于试跑）。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# `gh release create` 需要写权限；其余权限一律不给。
+permissions:
+  contents: write
+
+# 同一个 tag 重复触发时排队执行，不并发（避免两次 Release 抢同一个名字）。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # 发布产物就在 dist/ 下，与本机手工打包的目录一致。
+  INSTALLER_VERSION: "6.7.3"
+  # Inno Setup 6.7.3 官方安装包的 SHA-256（与 winget 清单一致，见 docs/DEVELOPMENT.md）。
+  INSTALLER_SHA256: "9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732"
+
+jobs:
+  windows-x64:
+    name: Windows x64 安装包
+    runs-on: windows-latest
+    # 冷启动含依赖编译约 15–25 分钟；超过 45 分钟基本是卡在某个对话框上。
+    timeout-minutes: 45
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 仓库里的 .cargo/config.toml 把 crates.io 换成了 USTC 镜像（国内开发机用）。
+      # Runner 在境外，镜像反而更慢甚至不可达；该文件头部也写明了「不在中国大陆
+      # 就删掉这两段」。这里直接移走它，让 cargo 回落官方 crates.io。
+      - name: 使用 crates.io（跳过国内镜像）
+        shell: pwsh
+        run: |
+          if (Test-Path .cargo/config.toml) {
+            Remove-Item .cargo/config.toml -Force
+            Write-Host "已移除 .cargo/config.toml（USTC 镜像）"
+          }
+
+      # rustup 会按 rust-toolchain.toml（stable）自动安装工具链。
+      - name: 安装 Rust 工具链
+        shell: pwsh
+        run: |
+          rustup show active-toolchain
+          rustc -vV
+          cargo -V
+
+      # 只缓存 ~/.cargo 与 target；key 里带 Cargo.lock，依赖没变才命中。
+      - name: 缓存依赖与构建产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-x64-release
+
+      - name: 计算版本号
+        id: version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ('${{ github.ref_type }}' -eq 'tag') {
+            $tag = '${{ github.ref_name }}'
+            # 只接受 vX.Y.Z 或 vX.Y.Z-rc.1 这类形式：安装包的版本列必须可解析。
+            if ($tag -notmatch '^v(?<num>\d+\.\d+\.\d+)(?<pre>-[0-9A-Za-z][0-9A-Za-z.-]*)?$') {
+              throw "标签格式必须是 vX.Y.Z（可带预发布后缀，如 v1.0.0-rc.1），当前是「$tag」"
+            }
+            $numeric = $Matches['num']
+            $pre = $Matches['pre']
+            $version = "$numeric$pre"
+            $prerelease = [bool]$pre
+          } else {
+            # 手动触发：版本号只是给 artifact 起名，不参与发布。
+            $version = "0.0.0-dev.${{ github.run_number }}"
+            $numeric = '0.0.0'
+            $prerelease = $false
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "numeric=$numeric" >> $env:GITHUB_OUTPUT
+          "prerelease=$prerelease" >> $env:GITHUB_OUTPUT
+          Write-Host "构建版本：$version（预发布：$prerelease）"
+
+      # --locked：用仓库里的 Cargo.lock，不让 CI 悄悄升级依赖。
+      - name: 编译发布产物
+        shell: pwsh
+        run: |
+          cargo build --release -p fm-app --locked
+          if ($LASTEXITCODE -ne 0) { throw "cargo build 失败（退出码 $LASTEXITCODE）" }
+          if (-not (Test-Path target/release/pagefold.exe)) { throw "没有产出 pagefold.exe" }
+
+      # 发布前的门槛：单元测试必须全绿。--release 复用上一步的产物，
+      # 只额外编译测试目标，比在 dev profile 下重编一遍便宜得多。
+      - name: 单元测试（发布门槛）
+        shell: pwsh
+        run: |
+          cargo test --workspace --release --locked
+          if ($LASTEXITCODE -ne 0) { throw "测试失败，终止发布（退出码 $LASTEXITCODE）" }
+
+      # Inno Setup 不装进系统：官方安装包支持免管理员 portable 解包，
+      # 与 docs/DEVELOPMENT.md 记录的本机流程一致（版本、哈希都钉死）。
+      - name: 准备 Inno Setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-$env:INSTALLER_VERSION.exe"
+          $file = "target/innosetup-$env:INSTALLER_VERSION.exe"
+          Write-Host "下载 $url"
+          Invoke-WebRequest -Uri $url -OutFile $file -MaximumRetryCount 3
+          $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:INSTALLER_SHA256) {
+            throw "Inno Setup 校验失败：期望 $env:INSTALLER_SHA256，实际 $hash"
+          }
+          $dir = Join-Path $PWD 'target\innosetup'
+          # 命中缓存时目录可能已存在：先清掉，避免 portable 解包与旧文件混在一起。
+          if (Test-Path $dir) { Remove-Item $dir -Recurse -Force }
+          $process = Start-Process -FilePath $file -Wait -PassThru -ArgumentList @(
+            '/PORTABLE=1', '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$dir"
+          )
+          if ($process.ExitCode -ne 0) { throw "Inno Setup 解包失败（退出码 $($process.ExitCode)）" }
+          if (-not (Test-Path (Join-Path $dir 'ISCC.exe'))) { throw "Inno Setup 解包后找不到 ISCC.exe" }
+
+      # 版本号通过 ISPP 的 /D 传给脚本（installer/files.iss 里用 #ifndef 兜底默认值）。
+      - name: 编译安装包
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ steps.version.outputs.version }}'
+          $quad = '${{ steps.version.outputs.numeric }}.0'
+          # 干净检出里没有 dist/（不入库），先建出来再让 ISCC 往里写。
+          New-Item -ItemType Directory -Force -Path 'dist' | Out-Null
+          & 'target\innosetup\ISCC.exe' "/DAppVersion=$version" "/DAppVersionQuad=$quad" 'installer\files.iss'
+          if ($LASTEXITCODE -ne 0) { throw "ISCC 失败（退出码 $LASTEXITCODE）" }
+          $installer = "dist\Pagefold-$version-x64-setup.exe"
+          if (-not (Test-Path $installer)) { throw "没有产出 $installer" }
+          Write-Host "已生成 $installer"
+
+      # 给下载页一个可校验的哈希：Windows 用户拿到 exe 后能自己核对。
+      - name: 生成 SHA-256
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $installer = "dist/Pagefold-$version-x64-setup.exe"
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
+          "$hash  Pagefold-$version-x64-setup.exe" | Out-File -FilePath 'dist/SHA256SUMS.txt' -Encoding ascii
+          Get-Content 'dist/SHA256SUMS.txt'
+          # 写进 Actions 的作业摘要，省得为了一次校验下载整个产物。
+          @(
+            "## Pagefold $version"
+            ""
+            "- 安装包：Pagefold-$version-x64-setup.exe"
+            "- SHA-256：$hash"
+          ) >> $env:GITHUB_STEP_SUMMARY
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pagefold-${{ steps.version.outputs.version }}-x64-setup
+          path: |
+            dist/Pagefold-*-x64-setup.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      # 只有 tag 触发才建 Release；手动触发只留 artifact，方便先看产物对不对。
+      - name: 发布 Release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ steps.version.outputs.version }}'
+          $tag = '${{ github.ref_name }}'
+          $arguments = @(
+            'release', 'create', $tag,
+            "dist/Pagefold-$version-x64-setup.exe",
+            'dist/SHA256SUMS.txt',
+            '--title', "Pagefold $version",
+            '--generate-notes',
+            '--verify-tag'
+          )
+          if ('${{ steps.version.outputs.prerelease }}' -eq 'True') {
+            $arguments += '--prerelease'
+          }
+          # 允许重跑：同名 Release 已存在时改为覆盖上传，而不是整个流水线失败。
+          & gh @arguments
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Release 已存在，改为上传覆盖"
+            & gh release upload $tag "dist/Pagefold-$version-x64-setup.exe" 'dist/SHA256SUMS.txt' --clobber
+            if ($LASTEXITCODE -ne 0) { throw "上传 Release 资产失败" }
+          }

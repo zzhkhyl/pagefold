@@ -124,6 +124,30 @@ target\innosetup-6.7.3.exe /PORTABLE=1 /VERYSILENT /SUPPRESSMSGBOXES /NORESTART 
 > （Inno Setup 官方发行版只带英文等 29 种语言，中文在「非官方翻译」之列），已固化入库，
 > 构建不依赖网络。
 
+### CI 自动发布（打 tag）
+
+`.github/workflows/release.yml` 负责把上面两条命令搬到 GitHub Runner 上：
+
+```bash
+git tag v0.4.0 && git push origin v0.4.0
+```
+
+推送 tag 后自动执行：`cargo build --release --locked` → `cargo test --workspace --release --locked`
+（发布门槛）→ portable 解包 Inno Setup → `ISCC /DAppVersion=… /DAppVersionQuad=…` →
+上传 artifact → 用 `GITHUB_TOKEN` 创建 Release 并附上安装包与 `SHA256SUMS.txt`。
+
+| 事项 | 说明 |
+| --- | --- |
+| 触发条件 | `push` 形如 `v*` 的 tag；也支持 Actions 页面手动 Run（**只上传 artifact，不建 Release**，便于先看产物） |
+| 版本号 | 只认 tag：`vX.Y.Z` 或 `vX.Y.Z-<后缀>`（后者自动标为 prerelease）。版本通过 ISPP 的 `/DAppVersion` 传给 `installer/files.iss`，脚本里用 `#ifndef` 兜底默认值 |
+| 权限 | 只需要 `GITHUB_TOKEN`（工作流已声明 `contents: write`），无需额外 secret |
+| 依赖镜像 | Runner 在境外，工作流会先删掉 `.cargo/config.toml`（USTC 镜像）让 cargo 回落 crates.io——这正是该文件头部写明的用法 |
+| 安装包工具 | 与本地同一版本、同一 SHA-256 校验，解包到 `target/innosetup`，不装进系统 |
+| 重复触发 | 同一 tag 的 Release 已存在时改为 `gh release upload --clobber` 覆盖资产，而不是让流水线失败 |
+| 已知依赖 | Runner 需具备 VS 生成工具与 Windows SDK（`rc.exe` 编译图标资源、GPUI 的着色器工具）；`windows-latest` 自带 |
+
+> 手动 Run 的版本号是 `0.0.0-dev.<run_number>`，只用于给 artifact 起名。
+
 安装包的行为约定：
 
 | 项 | 取值 | 理由 |

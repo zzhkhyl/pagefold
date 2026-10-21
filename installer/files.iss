@@ -26,9 +26,17 @@
 ; 也是任务栏上显示的窗口标题（两处必须一致，否则用户会看到两个名字）。
 #define AppName "Pagefold"
 #define AppExeName "pagefold.exe"
-#define AppVersion "0.1.0"
-#define AppVersionQuad "0.1.0.0"
 #define AppPublisher "Pagefold"
+
+; 版本号的默认值与 Cargo.toml 的 workspace.package.version 保持一致（本机构建用）。
+; CI 打 tag 时传 `/DAppVersion=x.y.z /DAppVersionQuad=x.y.z.0` 覆盖，
+; 因此必须用 `#ifndef` 包起来：ISPP 对已定义的符号再次 `#define` 会直接报错。
+#ifndef AppVersion
+  #define AppVersion "0.1.0"
+#endif
+#ifndef AppVersionQuad
+  #define AppVersionQuad "0.1.0.0"
+#endif
 
 ; 载荷与图标：路径相对本脚本所在目录解析。
 #define SourceExe "..\target\release\" + AppExeName

@@ -137,6 +137,8 @@ Fluent Design / Windows 11 原生观感，参考 Files 项目。
 
 从 [Releases](https://github.com/zzhkhyl/pagefold/releases) 下载
 `Pagefold-<版本>-x64-setup.exe`，按向导安装即可（用户级安装，全程不弹 UAC）。
+安装包由 GitHub Actions 在推送 `v*` tag 时自动编译并发布（含 `SHA256SUMS.txt`），
+维护者流程见 [`docs/DEVELOPMENT.md`](./docs/DEVELOPMENT.md) 的「CI 自动发布」。
 尚未发布安装包时，可直接从源码构建。
 
 也可以从源码构建：
