@@ -38,7 +38,7 @@ const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
 ///
 /// 刻意不用 `windows` crate 的常量：这两个值是 Win32 的稳定 ABI，
 /// 而 `std::fs::MetadataExt` 已经把手伸到属性位了，没必要为此多开一个 feature。
-fn is_hidden(metadata: &fs::Metadata) -> bool {
+pub(crate) fn is_hidden(metadata: &fs::Metadata) -> bool {
     metadata.file_attributes() & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0
 }
 

@@ -21,6 +21,7 @@ use fm_services::clipboard::{Clipboard, ClipboardMode, PasteError, PastePlan};
 use fm_services::config::Config;
 use fm_services::directory::{DEFAULT_BATCH, DirectoryService, ScanBatch, SortSpec};
 use fm_services::ops::{self, NewItem, OpResult};
+use fm_services::search::{self, SearchState};
 use fm_services::session::SessionSnapshot;
 use fm_services::thumbnail::ThumbnailService;
 use fm_services::watch::DirectoryWatcher;
@@ -183,6 +184,24 @@ pub struct ShellView {
     preview_text: Option<(PathBuf, Option<SharedString>)>,
     /// 正在读取预览文本的任务。丢了这个句柄，读取会被取消。
     preview_task: Option<Task<()>>,
+    /// 是否在当前目录**及其子文件夹**中搜索。
+    ///
+    /// 默认关闭：递归搜索会遍历整棵树，用户只是想在当前目录里筛一下时
+    /// 不该顺带扫几十万个文件。
+    pub(crate) search_recursive: bool,
+    /// 递归搜索的结果。`Some` 时 `visible()` 用它而不是当前目录的列表。
+    search_results: Option<Vec<Entry>>,
+    /// 后台搜索的共享状态：批次缓冲 + 是否结束。
+    ///
+    /// 与缩略图、系统剪贴板同一套模式：后台线程只写共享状态，
+    /// 界面在 `ambient_tick` 里取走。跨线程直接调 `update` 会绕开这套约定。
+    search_shared: Arc<Mutex<SearchState>>,
+    /// 是否还在搜（用于状态提示）。
+    pub(crate) search_running: bool,
+    /// 取消标志。每次重新搜索都换一个新的，旧任务的标志被 cancel。
+    search_cancel: CancelToken,
+    /// 搜索任务句柄。丢了它搜索会被取消。
+    search_task: Option<Task<()>>,
     /// 标签条的横向滚动位置。
     ///
     /// 标签有最小宽度（96px），多到装不下时靠横向滚动而不是无限压缩——
@@ -362,6 +381,12 @@ impl ShellView {
             thumb_ids: std::collections::HashMap::new(),
             preview_text: None,
             preview_task: None,
+            search_recursive: false,
+            search_results: None,
+            search_shared: Arc::new(Mutex::new(SearchState::default())),
+            search_running: false,
+            search_cancel: CancelToken::new(),
+            search_task: None,
             tab_scroll: ScrollHandle::new(),
             renaming: None,
             area_menu_suppressed: false,
@@ -1909,6 +1934,10 @@ impl ShellView {
 
     /// 刷新的共同实现。`clear_filter` 决定要不要顺带清掉搜索条件。
     fn reload_inner(&mut self, cx: &mut Context<Self>, clear_filter: bool) {
+        // 递归搜索的结果属于「另一个目录树」：一旦导航或刷新，它就过期了。
+        // 不在这里清掉，用户会看到新目录里列着旧目录的搜索结果。
+        self.stop_search();
+
         // 内联重命名会话锚在「当前列表的第 N 项」上，而刷新会把整份列表换掉。
         // 会话若留下来，它指向的条目已经不在原处：输入框不再渲染，
         // 但 `editing_input()` 仍然是真——**所有全局快捷键都会被吞掉**，
@@ -1986,6 +2015,7 @@ impl ShellView {
         // 放在重命名/扫卡守卫之前，滚动时也能持续跟进。
         self.pump_thumbnails(cx);
         self.pump_preview_text(cx);
+        self.pump_search(cx);
 
         // 正在内联重命名时**不自动刷新**。新建一个项目会立刻触发一次文件系统变更，
         // 而重命名的输入框正是在这一刻打开的：400ms 后若来一次刷新，
@@ -2423,6 +2453,11 @@ impl ShellView {
 impl ShellView {
     /// 当前应当展示的条目：有筛选条件时是筛选结果，否则是全部已加载条目。
     pub(crate) fn visible(&self) -> &[Entry] {
+        // 递归搜索期间列表是「搜索结果」而不是当前目录：两者的条目来源不同，
+        // 但下游（渲染、选中、右键、双击）只认 `Entry`，因此不必分叉。
+        if let Some(results) = &self.search_results {
+            return results;
+        }
         self.filtered.as_deref().unwrap_or(&self.entries)
     }
 
@@ -3198,7 +3233,117 @@ impl ShellView {
         if changed {
             // 筛选会重排整个列表，基于下标的选中集立刻失去意义。
             self.clear_selection_state();
+            if self.search_recursive {
+                self.start_search(cx);
+            } else {
+                self.refresh_filter();
+                cx.notify();
+            }
+        }
+    }
+
+    /// 切换「在当前目录及子文件夹中搜索」。
+    pub(crate) fn toggle_recursive_search(&mut self, cx: &mut Context<Self>) {
+        self.search_recursive = !self.search_recursive;
+
+        if self.search_recursive && !self.query.trim().is_empty() {
+            self.start_search(cx);
+        } else {
+            // 关掉递归：退回「只筛当前目录」。
+            self.stop_search();
             self.refresh_filter();
+        }
+        cx.notify();
+    }
+
+    /// 启动一次递归搜索。会先取消上一次。
+    ///
+    /// 每敲一个字都重来一遍：目录树遍历没有「增量更新」的低成本做法，
+    /// 而取消是立刻生效的（后台每处理一条就查一次标志），
+    /// 因此重来的代价只是「重新走一遍已经走过的目录」。
+    fn start_search(&mut self, cx: &mut Context<Self>) {
+        self.stop_search();
+
+        let needle = self.query.trim().to_lowercase();
+        let Some(root) = self.current_dir() else {
+            self.refresh_filter();
+            cx.notify();
+            return;
+        };
+        if needle.is_empty() {
+            self.refresh_filter();
+            cx.notify();
+            return;
+        }
+
+        let request = search::Request {
+            root,
+            needle,
+            include_hidden: self.config.show_hidden,
+        };
+        let shared = Arc::clone(&self.search_shared);
+        let cancel = self.search_cancel.clone();
+
+        self.search_results = Some(Vec::new());
+        self.search_running = true;
+
+        self.search_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    let sink = Arc::clone(&shared);
+                    search::search(&request, &cancel, &mut |batch| {
+                        if let Ok(mut state) = sink.lock() {
+                            state.pending.extend(batch);
+                        }
+                    });
+                    if let Ok(mut state) = shared.lock() {
+                        state.done = true;
+                    }
+                })
+                .await;
+
+            // 后台已经收工；把「结束」这件事告诉界面（结果本身由 tick 取走）。
+            let _ = this.update(cx, |_view, cx| cx.notify());
+        }));
+    }
+
+    /// 停掉搜索并清空结果，回到「当前目录列表」。
+    fn stop_search(&mut self) {
+        self.search_cancel.cancel();
+        self.search_cancel = CancelToken::new();
+        self.search_task = None;
+        self.search_running = false;
+        self.search_results = None;
+        if let Ok(mut state) = self.search_shared.lock() {
+            *state = SearchState::default();
+        }
+    }
+
+    /// 取走后台搜索的批次。由 `ambient_tick` 驱动。
+    fn pump_search(&mut self, cx: &mut Context<Self>) {
+        let (pending, done) = match self.search_shared.lock() {
+            Ok(mut state) => state.drain(),
+            Err(_) => return,
+        };
+
+        let mut changed = false;
+        if !pending.is_empty()
+            && let Some(results) = self.search_results.as_mut()
+        {
+            results.extend(pending);
+            changed = true;
+        }
+
+        if done && self.search_running {
+            self.search_running = false;
+            // 收工时排一次序：边搜边排会让结果在用户眼前反复跳动。
+            if let Some(results) = self.search_results.as_mut() {
+                search::sort_by_name(results);
+            }
+            changed = true;
+        }
+
+        if changed {
             cx.notify();
         }
     }

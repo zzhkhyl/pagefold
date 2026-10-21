@@ -68,6 +68,21 @@ pub fn describe_error(error: &anyhow::Error) -> String {
 ///
 /// `None` 表示取不到（无扩展名、shell 未初始化、或当前平台没有系统图标），
 /// 调用方应退回内置 SVG 图标。
+/// 该文件是否被标记为隐藏或系统文件。
+///
+/// 递归搜索要用它做过滤：那里拿到的只是 `Metadata`，没有 `Entry`，
+/// 而「隐藏」这件事由平台层判断（Windows 看属性位，别的平台可能没有）。
+#[cfg(target_os = "windows")]
+pub fn is_hidden(metadata: &std::fs::Metadata) -> bool {
+    windows::is_hidden(metadata)
+}
+
+/// 非 Windows 平台没有「隐藏属性」这一说。
+#[cfg(not(target_os = "windows"))]
+pub fn is_hidden(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
 #[cfg(target_os = "windows")]
 pub fn system_icon(extension: Option<&str>, directory: bool) -> Option<fm_core::RasterIcon> {
     windows::icon::system_icon(extension, directory)

@@ -392,6 +392,8 @@ impl ShellView {
 
         let text: SharedString = if has_query {
             self.query.clone().into()
+        } else if self.search_recursive {
+            "搜索当前文件夹及子文件夹".into()
         } else {
             "搜索当前文件夹".into()
         };
@@ -421,6 +423,41 @@ impl ShellView {
                     .text_color(text_color)
                     .child(text),
             );
+
+        // 递归搜索期间显示进度 / 命中数：整棵树可能要走上几秒，
+        // 没有这个提示，界面看起来就像卡住了。
+        if has_query && self.search_recursive {
+            let label: SharedString = if self.search_running {
+                "搜索中…".into()
+            } else {
+                format!("{} 项", self.visible().len()).into()
+            };
+            box_ = box_.child(
+                div()
+                    .flex_none()
+                    .text_size(px(metrics::FONT_XS))
+                    .text_color(tokens.muted_fg)
+                    .child(label),
+            );
+        }
+
+        // 「包含子文件夹」开关。放在清除按钮左边：它是搜索**范围**的修饰，
+        // 而不是撤掉搜索本身。
+        box_ = box_.child(widgets::icon_button_with_size(
+            "search-recursive",
+            IconName::FolderSearch,
+            14.0,
+            20.0,
+            "在当前目录及子文件夹中搜索",
+            self.search_recursive,
+            true,
+            tokens,
+            cx.listener(|this, _: &ClickEvent, _window, cx| {
+                // 阻止冒泡：否则点开关会顺带把搜索框切进编辑态。
+                cx.stop_propagation();
+                this.toggle_recursive_search(cx);
+            }),
+        ));
 
         if has_query {
             box_ = box_.child(widgets::icon_button_with_size(
