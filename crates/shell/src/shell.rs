@@ -6,6 +6,7 @@
 //! 换主题或改密度时只有 `tokens.rs` 需要动。
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -851,6 +852,34 @@ impl ShellView {
 
         // 剪贴板的状态决定空白处菜单里「粘贴」是否禁用，必须重绘。
         cx.notify();
+    }
+
+    /// 拖出载荷的构造器。
+    ///
+    /// 规则与资源管理器一致：拖**已选中**的条目 → 带走整个选中集；
+    /// 拖未选中的条目 → 只带走它自己。视图层只知道自己那一行，
+    /// 「哪一批被选中」只有外壳知道，因此用回调把判断留在这里。
+    pub(crate) fn drag_out_builder(&self) -> fm_views::DragOutBuilder {
+        let selected: Rc<Vec<(PathBuf, bool)>> = Rc::new(
+            self.visible()
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| self.selection.contains(*index))
+                .map(|(_, entry)| (entry.path.as_ref().clone(), entry.is_dir()))
+                .collect(),
+        );
+
+        Rc::new(move |entry: &Entry| {
+            // 用路径而不是下标比对：视图层给出的条目可能来自上一帧的列表。
+            if selected
+                .iter()
+                .any(|(path, _)| path == entry.path.as_ref())
+            {
+                fm_views::DragOut(Rc::clone(&selected))
+            } else {
+                fm_views::DragOut::single(entry)
+            }
+        })
     }
 
     /// 「粘贴」当前是否有内容可粘：应用内剪贴板非空，或系统剪贴板里有文件。

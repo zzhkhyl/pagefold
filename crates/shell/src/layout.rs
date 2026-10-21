@@ -463,6 +463,7 @@ impl ShellView {
         let menu = crate::context_menu::entry_menu_builder(cx);
         let right_press = crate::context_menu::right_press_handler(cx);
         let (drag_start, drag_move) = drag_handlers(cx);
+        let drag_out = self.drag_out_builder();
         let list = virtual_rows(
             "details-list",
             &self.details_scroll,
@@ -505,6 +506,7 @@ impl ShellView {
                     &right_press,
                     &drag_start,
                     &drag_move,
+                    Some(&drag_out),
                 )
             },
         )
@@ -549,6 +551,7 @@ impl ShellView {
         let menu = crate::context_menu::entry_menu_builder(cx);
         let right_press = crate::context_menu::right_press_handler(cx);
         let (drag_start, drag_move) = drag_handlers(cx);
+        let drag_out = self.drag_out_builder();
         let list = virtual_rows(
             "icon-grid",
             &self.grid_scroll,
@@ -588,6 +591,7 @@ impl ShellView {
                     &right_press,
                     &drag_start,
                     &drag_move,
+                    Some(&drag_out),
                 )
             },
         )

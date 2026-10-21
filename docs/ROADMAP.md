@@ -10,7 +10,7 @@
 | 任务 | 描述 | 状态 | 负责人 | 预计完成 |
 | --- | --- | --- | --- | --- |
 | 拖入（从其它程序拖文件进来） | **已完成**：不需要 OLE——GPUI 已把系统级文件拖放翻译成 `active_drag`（载荷 `ExternalPaths`），内容区用 `on_drop::<ExternalPaths>` 接收；悬停时给内容区加浅色高亮（`on_drag_move` + `on_file_drop_exit`），松手后走与粘贴同一条传输管线（进度卡、取消、可撤销）。统一按**复制**处理：GPUI 的 `FileDropEvent` 只带路径、不带源程序的 `Preferred DropEffect`，猜「移动」会丢数据 | 已完成 | — | — |
-| 拖出（把条目拖到资源管理器等） | 待开始：GPUI 提供了 `on_drag` + `external_drag_payload(ExternalDragPayload::Files(FileDragPaths))` 通道，需要把 `on_drag` 布到详情行与图标格上（并避免与框选冲突），预览由平台绘制 | 待开始 | — | — |
+| 拖出（把条目拖到资源管理器等） | **已完成**：详情行与图标格挂 `on_drag` + `external_drag_payload(ExternalDragPayload::Files(FileDragPaths))`，载荷是「路径 + 是否目录」；拖已选中项带走整个选中集，拖未选中项只带它自己。**只有拖出窗口边界时**才提升为平台级拖拽（GPUI 的 `promote_external_drag_to_platform` 判定指针离开视口），因此窗口内拖动不会触发它——框选行为完全不变；预览由系统绘制 | 已完成 | — | — |
 | 目录变更实时监听 | **已完成**：`platform::windows::dir_watch` 用 `ReadDirectoryChangesW`（单层、64KB 缓冲、独立线程、`CancelIoEx` 打断）只累加计数器；`services::watch::DirectoryWatcher` 负责换目录时重建、同目录不重建；`ShellView::ambient_tick` 每 400ms 检查一次，有变化才 `reload`。事件不直接改列表，因此与分批扫描的 generation 校验不冲突 | 已完成 | — | — |
 | 列宽拖拽 | **已完成**：表头分隔线可拖动（命中区 6px，绝对定位，不参与 flex 布局因此不会挤窄列）；断点仍决定列是否显示，拖动偏好只覆盖可见列宽度并写入 `config.json` 的 `detail_columns`；内容区宽度不足时按「大小 → 类型 → 日期」顺序收敛，名称列保底 180px | 已完成 | — | — |
 | 标签条横向溢出滚动 + 左右箭头 | 标签多时当前是压缩到 96px 最小宽 + 裁剪；改造需把标签改成「固定宽可溢出」并引入 `ScrollHandle`，属较高风险的布局重构 | 待开始 | — | — |

@@ -18,6 +18,7 @@ use std::rc::Rc;
 
 use fm_core::{Column, ColumnWidths, Entry, SortDirection, SortKey, format_size};
 use gpui::{
+    AppContext as _,
     AnyElement, App, ClickEvent, CursorStyle, Entity, Hsla, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
     Window, div, px, prelude::FluentBuilder as _,
@@ -251,6 +252,7 @@ pub fn row(
     right_press: &RightPressHandler,
     drag_start: &DragSelectHandler,
     drag_move: &DragSelectHandler,
+    drag_out: Option<&crate::DragOutBuilder>,
 ) -> AnyElement {
     // 目录的「大小」没有意义（系统给出的目录 metadata.len() 与内容无关），显示为破折号。
     let size = if entry.is_dir() {
@@ -383,6 +385,23 @@ pub fn row(
         })
         .child(checkbox)
         .child(name_cell);
+
+    // 拖出到其它程序。编辑态下不挂：输入框里拖选文字是另一回事，
+    // 而且此时拖动整行会把正在改名的条目连同旧名字一起拖出去。
+    if let Some(builder) = drag_out.filter(|_| editing.is_none()) {
+        let payload = builder(entry);
+        row = row
+            // 预览交给平台画（Windows 自己会画文件名与图标），
+            // 因此这里返回一个空视图，不重复造一个「像不像」的浮层。
+            .on_drag(payload, |_payload: &crate::DragOut, _offset, _window, cx| {
+                cx.new(|_| gpui::Empty)
+            })
+            .external_drag_payload(|payload: &crate::DragOut, _window, _cx| {
+                Some(gpui::ExternalDragPayload::Files(gpui::FileDragPaths::new(
+                    payload.0.iter().cloned(),
+                )))
+            });
+    }
 
     if let Some(width) = columns.date {
         row = row.child(plain_cell(

@@ -9,8 +9,8 @@
 //! 悬停浅灰底、选中强调色浅底加描边，与详情视图共用同一套语义。
 
 use gpui::{
-    AnyElement, ClickEvent, Entity, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px,
+    AnyElement, AppContext as _, ClickEvent, Entity, InteractiveElement as _, IntoElement,
+    MouseButton, ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px,
     prelude::FluentBuilder as _,
 };
 use gpui_component::input::InputState;
@@ -102,6 +102,7 @@ pub fn row(
     right_press: &RightPressHandler,
     drag_start: &DragSelectHandler,
     drag_move: &DragSelectHandler,
+    drag_out: Option<&crate::DragOutBuilder>,
 ) -> AnyElement {
     let height = cell_height(cell_width);
 
@@ -129,6 +130,7 @@ pub fn row(
                 right_press,
                 drag_start,
                 drag_move,
+                drag_out,
             ),
             // 末行不足时补等高空占位：行高不一致会让 uniform_list 的滚动计算失准。
             None => div()
@@ -171,6 +173,7 @@ fn cell(
     right_press: &RightPressHandler,
     drag_start: &DragSelectHandler,
     drag_move: &DragSelectHandler,
+    drag_out: Option<&crate::DragOutBuilder>,
 ) -> AnyElement {
     let icon = crate::widgets::entry_icon(entry, extension);
     let thumb_size = (cell_width - metrics::CELL_PADDING * 2.0).max(16.0);
@@ -186,7 +189,7 @@ fn cell(
     let drag_move = std::rc::Rc::clone(drag_move);
     let selected_hover = crate::tokens::with_alpha(tokens.fg, 0.1);
 
-    let cell = div()
+    let mut cell = div()
         .id(("icon-cell", index))
         .flex()
         .flex_col()
@@ -294,6 +297,21 @@ fn cell(
                 .text_color(tokens.muted_fg)
                 .child(meta_label(entry)),
         );
+
+    // 拖出到其它程序：预览由平台画（Windows 自己画文件图标与名字），
+    // 因此这里只交出路径与类型。编辑态下不挂——此时拖选名称是输入框的事。
+    if let Some(builder) = drag_out.filter(|_| editing.is_none()) {
+        let payload = builder(entry);
+        cell = cell
+            .on_drag(payload, |_payload: &crate::DragOut, _offset, _window, cx| {
+                cx.new(|_| gpui::Empty)
+            })
+            .external_drag_payload(|payload: &crate::DragOut, _window, _cx| {
+                Some(gpui::ExternalDragPayload::Files(
+                    gpui::FileDragPaths::new(payload.0.iter().cloned()),
+                ))
+            });
+    }
 
     // 包装层不能写 `w_full()`：网格行是 `flex_row`，写满了每个单元格都会占满整行宽度。
     // 由内容（单元格自己的固定宽高）撑开，正是原来单元格作为直接子项时的行为。

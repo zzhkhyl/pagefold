@@ -17,12 +17,14 @@ pub mod details_table;
 pub mod empty_state;
 pub mod icon_grid;
 pub mod icon_image;
+pub mod drag;
 pub mod preview_panel;
 pub mod settings_page;
 pub mod tokens;
 pub mod widgets;
 
 pub use context_menu::{AreaMenuBuilder, EntryMenuBuilder, RightPressHandler};
+pub use drag::{DragOut, DragOutBuilder};
 pub use details_table::{ColumnResizeStart, Columns};
 pub use preview_panel::RevealHandler;
 pub use settings_page::{SettingsHandlers, SettingsSnapshot};
