@@ -15,6 +15,7 @@ pub mod config;
 pub mod directory;
 pub mod icon;
 pub mod ops;
+pub mod preview;
 pub mod session;
 pub mod thumbnail;
 pub mod watch;

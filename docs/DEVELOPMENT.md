@@ -348,6 +348,7 @@ file-manager/
 | 双击 / 回车打开              | 平台：`fs_ops::shell_open`（`ShellExecuteW`，错误码经 `describe_shell_code` 翻译）；外壳：`ShellView::open_entry` / `open_path` / `shell_open` |
 | 回收站还原 / 清空            | `crates/platform/src/windows/recycle_bin.rs` 的 `restore`（读 `$I` → `MoveFile` → 删 `$I`）与 `empty`（`SHEmptyRecycleBinW`）；外壳：`restore_selection` / `empty_recycle_bin` / `start_empty_bin` |
 | 缩略图                       | 平台：`platform/src/windows/thumbnail.rs`（`IShellItemImageFactory` + `GetDIBits`）；服务：`services/src/thumbnail.rs`（单线程队列 + 白名单）；外壳：`ShellView::pump_thumbnails` / `patch_thumbnails`（`ambient_tick` 驱动） |
+| 预览面板的正文               | 服务：`services/src/preview.rs`（按内容判断文本、32KB / 200 行上限）；视图：`PreviewBody` + `preview_panel::single`；外壳：`ShellView::pump_preview_text`（后台读取，按路径防重） |
 | 应用图标的几何与配色         | `tools/icon-gen/src/design.rs`，改完重新生成（见 `assets/app-icon/README.md`） |
 
 用户数据的两个落点（都在 `%APPDATA%\pagefold\`，损坏时都只告警并回退默认）：

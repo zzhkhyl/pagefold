@@ -28,6 +28,16 @@ pub type OpenDirHandler = Rc<dyn Fn(PathBuf, &mut Window, &mut App)>;
 /// 两处对「选中项是哪一条」的判断就会有机会分叉。
 pub type RevealHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
+/// 预览面板的正文。
+#[derive(Clone, Debug, Default)]
+pub enum PreviewBody {
+    /// 没有正文可显示：目录、图片（大图靠 `icon_id`）、二进制，或尚未读完。
+    #[default]
+    None,
+    /// 文本文件的开头（已截断；shell 负责读取与判断）。
+    Text(SharedString),
+}
+
 /// 选中项的摘要信息。字段全部由 shell 预先算好（时区换算、类型文案都在那里完成）。
 #[derive(Clone, Debug)]
 pub struct EntrySummary {
@@ -43,6 +53,8 @@ pub struct EntrySummary {
     pub icon: IconName,
     /// 系统图标句柄（`IconId(0)` = 没有，用 `icon` 兜底）。
     pub icon_id: fm_core::IconId,
+    /// 正文（文本预览）。图片内容通过 `icon_id` 呈现，不在这里。
+    pub body: PreviewBody,
 }
 
 /// 预览面板要展示的内容。
@@ -249,7 +261,13 @@ fn single(
             .child(crate::widgets::glyph(
                 summary.icon_id,
                 summary.icon,
-                44.0,
+                // 有缩略图（图片/视频/PDF）时铺满底板：44px 的小图标放在 132px 的
+                // 板子里，看起来像「没取到缩略图」。
+                if summary.icon_id == fm_core::IconId(0) {
+                    44.0
+                } else {
+                    112.0
+                },
                 if summary.is_dir {
                     tokens.accent
                 } else {
@@ -257,6 +275,26 @@ fn single(
                 },
             )),
     );
+
+    // 文本正文：等宽字体 + 弱化色，与「元信息」区分开——
+    // 用户一眼要能看出下面是文件的**内容**，而不是又一段属性。
+    if let PreviewBody::Text(text) = &summary.body {
+        body = body.child(
+            div()
+                .flex_none()
+                .w_full()
+                .mb(px(12.0))
+                .p(px(8.0))
+                .rounded(px(metrics::RADIUS))
+                .border_1()
+                .border_color(tokens.border)
+                .bg(tokens.bg)
+                .font_family(tokens.mono_font.clone())
+                .text_size(px(metrics::FONT_XS))
+                .text_color(tokens.muted_fg)
+                .child(text.clone()),
+        );
+    }
 
     let mut rows: Vec<(&'static str, String)> = vec![
         ("名称", summary.name.to_string()),

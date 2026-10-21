@@ -24,7 +24,7 @@ use fm_services::ops::{self, NewItem, OpResult};
 use fm_services::session::SessionSnapshot;
 use fm_services::thumbnail::ThumbnailService;
 use fm_services::watch::DirectoryWatcher;
-use fm_views::preview_panel::{EntrySummary, PreviewContent};
+use fm_views::preview_panel::{EntrySummary, PreviewBody, PreviewContent};
 use fm_views::{Tokens, widgets};
 use gpui::{
     Anchor, App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle, Focusable as _,
@@ -175,6 +175,13 @@ pub struct ShellView {
     /// 用路径而不是下标做键：排序、刷新、筛选都会让下标失效，
     /// 而路径在「同一份文件」的生命周期里是稳定的。
     thumb_ids: std::collections::HashMap<PathBuf, IconId>,
+    /// 预览面板的文本内容：`(路径, 文本)`。
+    ///
+    /// 内层 `None` 表示「读过，但不是文本」——记下来才不会每次 tick 重读一遍。
+    /// 文本用 `SharedString`：每帧渲染都要克隆一份给面板，`String` 会真的复制 32KB。
+    preview_text: Option<(PathBuf, Option<SharedString>)>,
+    /// 正在读取预览文本的任务。丢了这个句柄，读取会被取消。
+    preview_task: Option<Task<()>>,
     /// 正在内联重命名的条目。
     pub(crate) renaming: Option<RenameState>,
     /// 本次右键是否落在某个条目上（由条目上的处理器置位，空白处菜单的构造器消费）。
@@ -347,6 +354,8 @@ impl ShellView {
             drop_active: false,
             thumbnails: ThumbnailService::new(),
             thumb_ids: std::collections::HashMap::new(),
+            preview_text: None,
+            preview_task: None,
             renaming: None,
             area_menu_suppressed: false,
             list_incomplete: false,
@@ -1969,6 +1978,7 @@ impl ShellView {
         // 缩略图同理：取图与渲染解耦，这里只做「收货 + 补请求」两件事。
         // 放在重命名/扫卡守卫之前，滚动时也能持续跟进。
         self.pump_thumbnails(cx);
+        self.pump_preview_text(cx);
 
         // 正在内联重命名时**不自动刷新**。新建一个项目会立刻触发一次文件系统变更，
         // 而重命名的输入框正是在这一刻打开的：400ms 后若来一次刷新，
@@ -2018,13 +2028,21 @@ impl ShellView {
             self.patch_thumbnails();
         }
 
+        let size = self.tokens.cell.max(96.0) as u32;
+
+        // 预览面板里的大图：无论哪种视图，**选中的那一张**都值得取。
+        // 只有一条，成本可以忽略；而且面板的头图是 112px，按格子尺寸取的图刚好够用
+        // （同一路径只会取一次，因此这里不会和下面的批量请求重复）。
+        if let Some(path) = self.single_selected_file() {
+            self.thumbnails.request(&path, size.max(128));
+        }
+
         // 只有图标视图用得上：详情视图的图标是 16px，缩略图在那里看不出差别，
         // 白白解码一遍反而拖慢滚动。
         if self.tabs.active_state().view_mode() != ViewMode::Icons {
             return;
         }
 
-        let size = self.tokens.cell.max(96.0) as u32;
         let requests: Vec<PathBuf> = self
             .visible()
             .iter()
@@ -2039,6 +2057,64 @@ impl ShellView {
         for path in requests {
             self.thumbnails.request(&path, size);
         }
+    }
+
+    /// 当前单选中的**文件**（目录不读内容）。
+    fn single_selected_file(&self) -> Option<PathBuf> {
+        let index = self.selection.single()?;
+        let entry = self.visible().get(index)?;
+        (!entry.is_dir()).then(|| entry.path.as_ref().clone())
+    }
+
+    /// 按需读取预览面板的文本内容。
+    ///
+    /// 只读**当前单选的那一个文件**：面板一次只显示一项，预读别的没有意义。
+    /// 判定放在 [`fm_services::preview::read_text`] 里（按内容而不是扩展名：
+    /// `README`、`.gitignore` 这类没有扩展名却最想瞄一眼的文件也要能预览）。
+    fn pump_preview_text(&mut self, cx: &mut Context<Self>) {
+        // 面板没显示时不必读：省掉一次文件 IO，也避免用户关掉面板后还在后台读盘。
+        if !self.preview_open || self.in_settings() {
+            self.preview_text = None;
+            return;
+        }
+
+        let Some(path) = self.single_selected_file() else {
+            // 多选 / 空选 / 选的是目录：面板不显示正文，缓存也没用了。
+            self.preview_text = None;
+            return;
+        };
+
+        // 已经读过这个路径（无论成功还是「不是文本」）就不再重复读。
+        if self.preview_text.as_ref().is_some_and(|(known, _)| known == &path) {
+            return;
+        }
+
+        self.preview_text = Some((path.clone(), None));
+        self.preview_task = Some(cx.spawn(async move |this, cx| {
+            let target = path.clone();
+            let reading = target.clone();
+            let text = cx
+                .background_executor()
+                .spawn(async move { fm_services::preview::read_text(&reading) })
+                .await;
+
+            if let Some(text) = &text {
+                tracing::debug!(path = %target.display(), bytes = text.len(), "已生成文本预览");
+            }
+
+            let shared: Option<SharedString> = text.map(|text| text.into());
+            let _ = this.update(cx, move |view, cx| {
+                // 期间用户可能已经选了别的条目：只写回仍然匹配的那一份。
+                if view
+                    .preview_text
+                    .as_ref()
+                    .is_some_and(|(known, _)| known == &path)
+                {
+                    view.preview_text = Some((path.clone(), shared));
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     /// 把已取到的缩略图写回条目。
@@ -2429,6 +2505,14 @@ impl ShellView {
                     is_dir: entry.is_dir(),
                     icon: widgets::entry_icon(entry, self.extension_label(entry).as_deref()),
                     icon_id: entry.icon,
+                    // 只在这一条**就是**上次读过的那个路径时给出正文：
+                    // 用户切走了但读取还没回来时，面板不该显示上一条的内容。
+                    body: match &self.preview_text {
+                        Some((path, Some(text))) if path == entry.path.as_ref() => {
+                            PreviewBody::Text(text.clone())
+                        }
+                        _ => PreviewBody::None,
+                    },
                 }))
             }
             _ => PreviewContent::Multiple {
