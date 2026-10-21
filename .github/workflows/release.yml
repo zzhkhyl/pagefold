@@ -86,6 +86,39 @@ jobs:
           "prerelease=$prerelease" >> $env:GITHUB_OUTPUT
           Write-Host "构建版本：$version（预发布：$prerelease）"
 
+      # 版本号以 tag 为准（本项目约定）。Cargo.toml 与 files.iss 里的默认值只是
+      # 「本机构建时用多少」，发版时应当顺手改成同一个版本；这里比对一次，
+      # 不一致就报 warning 提醒，但**不阻断**发布——tag 是唯一事实来源。
+      - name: 检查版本一致性
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+
+          $cargoVersion = $null
+          $inSection = $false
+          foreach ($line in Get-Content 'Cargo.toml') {
+            if ($line -match '^\[workspace\.package\]') { $inSection = $true; continue }
+            if ($inSection -and $line -match '^\[') { break }
+            if ($inSection -and $line -match '^\s*version\s*=\s*"([^"]+)"') { $cargoVersion = $Matches[1]; break }
+          }
+
+          $issVersion = $null
+          foreach ($line in Get-Content 'installer/files.iss') {
+            if ($line -match '^\s*#define\s+AppVersion\s+"([^"]+)"') { $issVersion = $Matches[1]; break }
+          }
+
+          $drift = @()
+          if ($cargoVersion -ne $version) { $drift += "Cargo.toml 的 workspace.package.version = $cargoVersion" }
+          if ($issVersion -ne $version) { $drift += "installer/files.iss 的默认 AppVersion = $issVersion" }
+          if ($drift.Count -eq 0) {
+            Write-Host "版本一致：$version"
+          } else {
+            $message = "发版版本是 $version（以 tag 为准），但 $($drift -join '；')。安装包会按 $version 命名，无需改 tag；建议把这两处改成 $version 后一并提交。"
+            Write-Host "::warning::$message"
+            "- 版本提示：$message" >> $env:GITHUB_STEP_SUMMARY
+          }
+
       # --locked：用仓库里的 Cargo.lock，不让 CI 悄悄升级依赖。
       - name: 编译发布产物
         shell: pwsh

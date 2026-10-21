@@ -139,7 +139,8 @@ git tag v0.4.0 && git push origin v0.4.0
 | 事项 | 说明 |
 | --- | --- |
 | 触发条件 | `push` 形如 `v*` 的 tag；也支持 Actions 页面手动 Run（**只上传 artifact，不建 Release**，便于先看产物） |
-| 版本号 | 只认 tag：`vX.Y.Z` 或 `vX.Y.Z-<后缀>`（后者自动标为 prerelease）。版本通过 ISPP 的 `/DAppVersion` 传给 `installer/files.iss`，脚本里用 `#ifndef` 兜底默认值 |
+| 版本号 | **以 tag 为准**：`vX.Y.Z` 或 `vX.Y.Z-<后缀>`（后者自动标 prerelease）。版本通过 ISPP 的 `/DAppVersion` 传给 `installer/files.iss`，脚本里用 `#ifndef` 兜底默认值 |
+| 版本一致性 | `Cargo.toml` 与 `installer/files.iss` 的版本**不参与**发布产物命名，只影响本机构建。工作流会比对「tag / Cargo.toml / files.iss」三者，不一致时在作业摘要里给 warning 提醒，**不阻断发布** |
 | 权限 | 只需要 `GITHUB_TOKEN`（工作流已声明 `contents: write`），无需额外 secret |
 | 依赖镜像 | Runner 在境外，工作流会先删掉 `.cargo/config.toml`（USTC 镜像）让 cargo 回落 crates.io——这正是该文件头部写明的用法 |
 | 安装包工具 | 与本地同一版本、同一 SHA-256 校验，解包到 `target/innosetup`，不装进系统 |
@@ -147,6 +148,18 @@ git tag v0.4.0 && git push origin v0.4.0
 | 已知依赖 | Runner 需具备 VS 生成工具与 Windows SDK（`rc.exe` 编译图标资源、GPUI 的着色器工具）；`windows-latest` 自带 |
 
 > 手动 Run 的版本号是 `0.0.0-dev.<run_number>`，只用于给 artifact 起名。
+
+发版清单（三步）：
+
+```bash
+# 1. 改版本：Cargo.toml 的 workspace.package.version、installer/files.iss 的
+#    AppVersion / AppVersionQuad 都改成同一个版本（工作流只是提醒，不会替你改）
+cargo test --workspace            # 2. 全绿后提交
+git tag v0.4.0 && git push origin v0.4.0   # 3. 等 Actions 产出安装包
+```
+
+安装包的名字与版本列**永远取自 tag**，因此即使漏改上面两处，发布出去的包也是对的；
+那两处的用途是「本机构建时用哪个版本」，漏改只会让本机产物与发布产物对不上。
 
 安装包的行为约定：
 
