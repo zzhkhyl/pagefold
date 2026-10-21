@@ -105,9 +105,10 @@ pub struct IconCache {
 #[derive(Debug, Default)]
 struct IconInner {
     /// 缓存键（`dir` / `file:<ext>`）→ 句柄。`IconId(0)` 表示「取过，但系统没有」。
+    ///
+    /// 句柄由 `fm_core::icon::allocate` 统一发放：缩略图用的是同一张全局注册表，
+    /// 这里不能自己维护计数器，否则两处会从同一个数字开始互相覆盖。
     ids: HashMap<String, IconId>,
-    /// 下一个可用句柄。从 1 开始，0 是保留值。
-    next: u32,
 }
 
 impl IconCache {
@@ -136,8 +137,6 @@ impl IconCache {
 
         let id = match fm_platform::system_icon(extension, directory) {
             Some(raster) => {
-                inner.next += 1;
-                let id = IconId(inner.next);
                 // 提取是低频事件（每种扩展名一次），但排查「图标为什么没出来」时
                 // 这条日志是最直接的证据：它证明 shell 那一步成功了。
                 tracing::debug!(
@@ -147,8 +146,7 @@ impl IconCache {
                     height = raster.height,
                     "已提取系统图标"
                 );
-                fm_core::icon::register(id, Arc::new(raster));
-                id
+                fm_core::icon::register_raster(Arc::new(raster))
             }
             None => IconId(0),
         };

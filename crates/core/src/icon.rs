@@ -88,6 +88,24 @@ fn lock() -> std::sync::MutexGuard<'static, HashMap<IconId, Arc<RasterIcon>>> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// 分配一个新的图标句柄（进程内唯一，从 1 开始）。
+///
+/// 注册表是**全局**的：扩展名图标与文件缩略图共用同一张表。因此句柄必须由
+/// 一个分配器统一发放——两处各自从 1 计数会让后写入的那张图覆盖前一张，
+/// 表现为「某个扩展名的图标变成了某张缩略图」。
+pub fn allocate() -> IconId {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    IconId(NEXT.fetch_add(1, Ordering::Relaxed) + 1)
+}
+
+/// 登记一张位图并返回它的句柄。
+pub fn register_raster(icon: Arc<RasterIcon>) -> IconId {
+    let id = allocate();
+    register(id, icon);
+    id
+}
+
 /// 登记一张位图。
 pub fn register(id: IconId, icon: Arc<RasterIcon>) {
     if id == IconId(0) {
@@ -113,6 +131,17 @@ pub fn len() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn allocated_ids_are_unique_and_never_zero() {
+        // 0 是「没有系统图标」的保留值；两处（扩展名图标 / 缩略图）同时分配
+        // 也必须拿到不同句柄，否则会互相覆盖。
+        let first = allocate();
+        let second = allocate();
+        assert_ne!(first, second);
+        assert_ne!(first, IconId(0));
+        assert_ne!(second, IconId(0));
+    }
 
     fn solid(width: u32, height: u32, value: u8) -> RasterIcon {
         RasterIcon::new(width, height, vec![value; (width * height * 4) as usize]).unwrap()

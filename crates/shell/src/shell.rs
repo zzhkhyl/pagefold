@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use fm_core::naming;
 use fm_core::{
-    BatchSpec, Column, Density, Entry, EntryKind, IconZoom, Location, Selection, SortKey, TabId,
-    TabsState, UndoAction, UndoStack, ViewMode, batch_names,
+    BatchSpec, Column, Density, Entry, EntryKind, IconId, IconZoom, Location, Selection, SortKey,
+    TabId, TabsState, UndoAction, UndoStack, ViewMode, batch_names,
 };
 use fm_platform::{CancelToken, Drive, OpReport, TransferProgress};
 use fm_services::clipboard::{Clipboard, ClipboardMode, PasteError, PastePlan};
@@ -22,6 +22,7 @@ use fm_services::config::Config;
 use fm_services::directory::{DEFAULT_BATCH, DirectoryService, ScanBatch, SortSpec};
 use fm_services::ops::{self, NewItem, OpResult};
 use fm_services::session::SessionSnapshot;
+use fm_services::thumbnail::ThumbnailService;
 use fm_services::watch::DirectoryWatcher;
 use fm_views::preview_panel::{EntrySummary, PreviewContent};
 use fm_views::{Tokens, widgets};
@@ -167,6 +168,13 @@ pub struct ShellView {
     clipboard_ticks: u32,
     /// 是否有外部文件正拖在内容区上方（只用于高亮提示）。
     pub(crate) drop_active: bool,
+    /// 缩略图队列（工作线程）。
+    thumbnails: ThumbnailService,
+    /// 路径 → 缩略图句柄。取到之后条目自己的 `icon` 会被替换成它。
+    ///
+    /// 用路径而不是下标做键：排序、刷新、筛选都会让下标失效，
+    /// 而路径在「同一份文件」的生命周期里是稳定的。
+    thumb_ids: std::collections::HashMap<PathBuf, IconId>,
     /// 正在内联重命名的条目。
     pub(crate) renaming: Option<RenameState>,
     /// 本次右键是否落在某个条目上（由条目上的处理器置位，空白处菜单的构造器消费）。
@@ -337,6 +345,8 @@ impl ShellView {
             system_clipboard: false,
             clipboard_ticks: 0,
             drop_active: false,
+            thumbnails: ThumbnailService::new(),
+            thumb_ids: std::collections::HashMap::new(),
             renaming: None,
             area_menu_suppressed: false,
             list_incomplete: false,
@@ -1956,6 +1966,10 @@ impl ShellView {
         // 否则用户在别的程序里复制完文件切回来，粘贴按钮会一直是灰的。
         self.probe_system_clipboard(cx);
 
+        // 缩略图同理：取图与渲染解耦，这里只做「收货 + 补请求」两件事。
+        // 放在重命名/扫卡守卫之前，滚动时也能持续跟进。
+        self.pump_thumbnails(cx);
+
         // 正在内联重命名时**不自动刷新**。新建一个项目会立刻触发一次文件系统变更，
         // 而重命名的输入框正是在这一刻打开的：400ms 后若来一次刷新，
         // 列表会被清空重建，输入框随之消失，用户刚敲的字也一起没了。
@@ -1973,6 +1987,81 @@ impl ShellView {
         if self.watcher.take_change() {
             tracing::debug!("检测到目录变更，重新扫描当前目录");
             self.reload(cx);
+        }
+    }
+
+    /// 收缩略图结果，并为可见的图片类条目补请求。
+    ///
+    /// 每 400ms 一次（跟 `ambient_tick` 同节奏）：结果到达就替换图标并重绘，
+    /// 请求去重由 `ThumbnailService` 自己保证，因此这里每轮都扫一遍可见项是无害的。
+    fn pump_thumbnails(&mut self, cx: &mut Context<Self>) {
+        let ready = self.thumbnails.take_ready();
+        if !ready.is_empty() {
+            let mut changed = false;
+            for (path, id) in ready {
+                // `IconId(0)` 表示「这条取过但没有缩略图」：保持扩展名图标，
+                // 记下来是为了不再重复请求（去重在服务里做，这里只跳过替换）。
+                if id != IconId(0) && self.thumb_ids.insert(path, id).is_none() {
+                    changed = true;
+                }
+            }
+            if changed {
+                self.patch_thumbnails();
+                cx.notify();
+            }
+        }
+
+        // 每次刷新后 `entries` 都是重新扫出来的（`icon` 回到扩展名图标），
+        // 因此这里幂等地再写一遍——否则 F5 或自动刷新会把已经取到的缩略图抹掉。
+        // 成本是每 400ms 一次哈希查表，比「在每条刷新路径上各补一次」可靠得多。
+        if !self.thumb_ids.is_empty() {
+            self.patch_thumbnails();
+        }
+
+        // 只有图标视图用得上：详情视图的图标是 16px，缩略图在那里看不出差别，
+        // 白白解码一遍反而拖慢滚动。
+        if self.tabs.active_state().view_mode() != ViewMode::Icons {
+            return;
+        }
+
+        let size = self.tokens.cell.max(96.0) as u32;
+        let requests: Vec<PathBuf> = self
+            .visible()
+            .iter()
+            .filter(|entry| !entry.is_dir())
+            .filter(|entry| {
+                let extension = fm_services::icon::extension_of(entry.name.as_ref());
+                fm_services::thumbnail::is_previewable(extension.as_deref())
+            })
+            .map(|entry| entry.path.as_ref().clone())
+            .collect();
+
+        for path in requests {
+            self.thumbnails.request(&path, size);
+        }
+    }
+
+    /// 把已取到的缩略图写回条目。
+    ///
+    /// 改的是 `entries` / `filtered` 里的 `icon` 字段，而不是在视图层查表：
+    /// 视图层只认 `Entry`，让它多一个「按路径查缩略图」的入口会把两边的状态
+    /// 绑在一起（刷新、筛选、排序之后极易错位）。
+    fn patch_thumbnails(&mut self) {
+        if self.thumb_ids.is_empty() {
+            return;
+        }
+        let ids = &self.thumb_ids;
+        let patch = |entries: &mut [Entry]| {
+            for entry in entries.iter_mut() {
+                if let Some(id) = ids.get(entry.path.as_ref()) {
+                    entry.icon = *id;
+                }
+            }
+        };
+
+        patch(&mut self.entries);
+        if let Some(filtered) = self.filtered.as_mut() {
+            patch(filtered);
         }
     }
 

@@ -11,8 +11,8 @@ use std::rc::Rc;
 use fm_core::{Entry, EntryKind};
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, Entity, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
-    prelude::FluentBuilder as _,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, Window, div, px, prelude::FluentBuilder as _,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::tooltip::Tooltip;
@@ -483,6 +483,9 @@ pub fn glyph(icon_id: fm_core::IconId, fallback: IconName, size: f32, color: Hsl
             .flex_none()
             .w(px(size))
             .h(px(size))
+            // 缩略图不是正方形（照片 4:3、截图 16:9），必须等比缩放：
+            // 默认 Fill 会把它们拉变形，而方形图标用 Contain 与 Fill 的观感一致。
+            .object_fit(gpui::ObjectFit::Contain)
             .into_any_element();
     }
     Icon::new(fallback)

@@ -79,6 +79,22 @@ pub fn system_icon(_extension: Option<&str>, _directory: bool) -> Option<fm_core
     None
 }
 
+/// 取一个文件的缩略图（最长边不超过 `size` 像素）。
+///
+/// `None` 表示「没有预览可用」（文本、未知类型、被占用…），调用方退回扩展名图标。
+///
+/// **必须在工作线程上调用**：真实解码一张大图可能几十毫秒，放在渲染路径上会让滚动掉帧。
+#[cfg(target_os = "windows")]
+pub fn thumbnail(path: &std::path::Path, size: u32) -> Option<fm_core::RasterIcon> {
+    windows::thumbnail::thumbnail(path, size)
+}
+
+/// 非 Windows 平台没有 shell 缩略图。
+#[cfg(not(target_os = "windows"))]
+pub fn thumbnail(_path: &std::path::Path, _size: u32) -> Option<fm_core::RasterIcon> {
+    None
+}
+
 /// 单实例守卫：保证同一登录会话内只有一个进程实例。
 #[cfg(target_os = "windows")]
 pub use windows::single_instance::SingleInstance;

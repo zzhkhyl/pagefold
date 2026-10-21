@@ -14,6 +14,7 @@ pub mod icon;
 pub mod ipc;
 pub mod known_folders;
 pub mod recycle_bin;
+pub mod thumbnail;
 pub mod shell_menu;
 pub mod single_instance;
 pub mod time;
