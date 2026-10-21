@@ -549,7 +549,7 @@ pub(crate) fn area_menu_builder(cx: &Context<ShellView>) -> fm_views::AreaMenuBu
                     tab.sort_key(),
                     // 「此电脑」与回收站都不是真实目录，那里无处落笔。
                     view.current_dir().is_some(),
-                    !view.clipboard.is_empty(),
+                    view.can_paste(),
                     // 菜单里直接写出「要撤哪一步」，避免用户按下去才知道。
                     view.undo.peek().map(|action| action.describe()),
                 )
@@ -612,7 +612,7 @@ pub(crate) fn new_menu_builder(
     move |menu, window, cx| {
         // 与空白处菜单同源：剪贴板空不空决定「粘贴」是否禁用。
         let can_paste = shell
-            .read_with(&**cx, |view: &ShellView, _| !view.clipboard.is_empty())
+            .read_with(&**cx, |view: &ShellView, _| view.can_paste())
             .unwrap_or(false);
         let nodes = new_menu_spec(can_paste);
         build_menu(menu, &nodes, None, &shell, window, cx)

@@ -166,6 +166,22 @@ pub trait FileSystem: Send + Sync + 'static {
             TransferMode::Move => self.move_into(sources, dest_dir),
         }
     }
+
+    /// 把路径写入**系统**剪贴板，供资源管理器等其它程序粘贴。
+    ///
+    /// 默认实现什么也不做：应用内剪贴板（`services::clipboard`）才是主路径，
+    /// 系统剪贴板只是互通增强，mock 与其它平台不必实现。
+    fn write_file_clipboard(&self, _paths: &[PathBuf], _cut: bool) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// 读取系统剪贴板里的文件列表：`(路径, 是否剪切)`。
+    ///
+    /// `Ok(None)` 表示没有文件（空剪贴板、文本、或不支持的格式）。
+    /// 默认实现永远返回 `None`。
+    fn read_file_clipboard(&self) -> anyhow::Result<Option<(Vec<PathBuf>, bool)>> {
+        Ok(None)
+    }
 }
 
 /// 一次写操作的回执。

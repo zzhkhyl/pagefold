@@ -16,7 +16,7 @@ use fm_core::{
     TabsState, UndoAction, UndoStack, ViewMode, batch_names,
 };
 use fm_platform::{CancelToken, Drive, OpReport, TransferProgress};
-use fm_services::clipboard::{Clipboard, ClipboardMode, PastePlan};
+use fm_services::clipboard::{Clipboard, ClipboardMode, PasteError, PastePlan};
 use fm_services::config::Config;
 use fm_services::directory::{DEFAULT_BATCH, DirectoryService, ScanBatch, SortSpec};
 use fm_services::ops::{self, NewItem, OpResult};
@@ -156,6 +156,14 @@ pub struct ShellView {
     /// 切标签页、刷新目录都会清空选中，但剪贴板必须留着，
     /// 否则「复制 → 切到另一个目录 → 粘贴」这条最基本的路径就不成立。
     pub(crate) clipboard: Clipboard,
+    /// 系统剪贴板里是否有文件（别的程序复制过来的）。
+    ///
+    /// 不能每帧去读：`OpenClipboard` 会与其它程序互斥，而且读一次要枚举路径。
+    /// 由 `ambient_tick` 节流探测（约 1.2s 一次，且只在应用内剪贴板为空时），
+    /// 只用于决定「粘贴」是否可用；真正的路径在按下粘贴时再读。
+    pub(crate) system_clipboard: bool,
+    /// 系统剪贴板探测的节流计数。
+    clipboard_ticks: u32,
     /// 正在内联重命名的条目。
     pub(crate) renaming: Option<RenameState>,
     /// 本次右键是否落在某个条目上（由条目上的处理器置位，空白处菜单的构造器消费）。
@@ -317,6 +325,8 @@ impl ShellView {
             search_editing: false,
             search_input: None,
             clipboard: Clipboard::new(),
+            system_clipboard: false,
+            clipboard_ticks: 0,
             renaming: None,
             area_menu_suppressed: false,
             list_incomplete: false,
@@ -800,19 +810,86 @@ impl ShellView {
 
         let paths = self.selected_paths();
         let count = paths.len();
+        // 系统剪贴板要用一份独立的副本：`put` 会拿走所有权。
+        let for_system = paths.clone();
         // 空选中会被 `put` 转成「清空剪贴板」，因此这里只判断要不要提示。
         self.clipboard.put(mode, paths, origin);
 
         if count > 0 {
-            // 文案与设计稿的 `toast('已复制 N 项到剪贴板')` 一致。
-            window.push_notification(
-                Notification::success(format!("已{} {count} 项到剪贴板", mode.verb())),
-                cx,
-            );
+            // 同步写进系统剪贴板，资源管理器那边才能粘贴。
+            // 失败**不影响主功能**（应用内剪贴板照常工作），因此只降级提示。
+            match self
+                .service
+                .file_system()
+                .write_file_clipboard(&for_system, mode == ClipboardMode::Cut)
+            {
+                Ok(()) => {
+                    // 应用内剪贴板优先，这个标志只影响「系统剪贴板里有没有东西」的判断。
+                    self.system_clipboard = false;
+                    window.push_notification(
+                        Notification::success(format!(
+                            "已{} {count} 项到剪贴板（可在其它程序中粘贴）",
+                            mode.verb()
+                        )),
+                        cx,
+                    );
+                }
+                Err(reason) => {
+                    window.push_notification(
+                        Notification::warning(format!(
+                            "已{} {count} 项到应用内剪贴板；写入系统剪贴板失败（{reason}），只能在本程序内粘贴",
+                            mode.verb()
+                        )),
+                        cx,
+                    );
+                }
+            }
         }
 
         // 剪贴板的状态决定空白处菜单里「粘贴」是否禁用，必须重绘。
         cx.notify();
+    }
+
+    /// 「粘贴」当前是否有内容可粘：应用内剪贴板非空，或系统剪贴板里有文件。
+    pub(crate) fn can_paste(&self) -> bool {
+        !self.clipboard.is_empty() || self.system_clipboard
+    }
+
+    /// 从系统剪贴板构造一份粘贴计划（资源管理器等程序复制过来的文件）。
+    ///
+    /// 返回 `None` 表示没有可用内容：剪贴板里没有文件、条目都已不存在、
+    /// 或者「剪切」过来的条目本来就在当前目录（自己搬自己，没有意义）。
+    fn system_clipboard_plan(&self, dest: &Path) -> Option<PastePlan> {
+        let (paths, cut) = self
+            .service
+            .file_system()
+            .read_file_clipboard()
+            .ok()
+            .flatten()?;
+
+        let sources: Vec<PathBuf> = paths
+            .into_iter()
+            // 剪贴板里可能留着早就删掉的文件：粘之前按磁盘现状过滤。
+            .filter(|path| path.exists())
+            // 从当前目录「剪切」再粘回当前目录，等于什么也没做。
+            .filter(|path| !(cut && path.parent() == Some(dest)))
+            .collect();
+
+        if sources.is_empty() {
+            return None;
+        }
+
+        Some(if cut {
+            PastePlan::Move {
+                sources,
+                dest_dir: dest.to_path_buf(),
+            }
+        } else {
+            PastePlan::Copy {
+                sources,
+                dest_dir: dest.to_path_buf(),
+            }
+        })
     }
 
     /// 粘贴到当前目录。
@@ -826,8 +903,19 @@ impl ShellView {
 
         // 「能不能粘、粘是复制还是移动」是纯逻辑，判定放在 `Clipboard` 里
         // （有单测），这里只消费结果。
+        //
+        // 应用内剪贴板为空时再去看系统剪贴板：从资源管理器复制的文件走这条路径，
+        // 用户不需要先在两边各复制一次。
         let plan = match self.clipboard.plan(&dir) {
             Ok(plan) => plan,
+            Err(PasteError::Empty) => match self.system_clipboard_plan(&dir) {
+                Some(plan) => plan,
+                None => {
+                    window
+                        .push_notification(Notification::warning("剪贴板里没有可粘贴的文件"), cx);
+                    return;
+                }
+            },
             Err(error) => {
                 window.push_notification(Notification::warning(error.message()), cx);
                 return;
@@ -1677,6 +1765,10 @@ impl ShellView {
             return;
         }
 
+        // 系统剪贴板探测放在最前面：它不受「重命名中」「扫描在途」的影响，
+        // 否则用户在别的程序里复制完文件切回来，粘贴按钮会一直是灰的。
+        self.probe_system_clipboard(cx);
+
         // 正在内联重命名时**不自动刷新**。新建一个项目会立刻触发一次文件系统变更，
         // 而重命名的输入框正是在这一刻打开的：400ms 后若来一次刷新，
         // 列表会被清空重建，输入框随之消失，用户刚敲的字也一起没了。
@@ -1694,6 +1786,39 @@ impl ShellView {
         if self.watcher.take_change() {
             tracing::debug!("检测到目录变更，重新扫描当前目录");
             self.reload(cx);
+        }
+    }
+
+    /// 节流探测系统剪贴板里是否有文件，用于「粘贴」的可用态。
+    ///
+    /// 只在应用内剪贴板为空时才有意义（否则应用内优先，系统里有什么都不影响），
+    /// 且每 3 个 tick（约 1.2s）探测一次：`OpenClipboard` 与其它程序互斥，
+    /// 探测太频繁既浪费也容易读到「被占用」的假空。
+    fn probe_system_clipboard(&mut self, cx: &mut Context<Self>) {
+        if !self.clipboard.is_empty() {
+            if self.system_clipboard {
+                self.system_clipboard = false;
+                cx.notify();
+            }
+            return;
+        }
+
+        self.clipboard_ticks = self.clipboard_ticks.wrapping_add(1);
+        if !self.clipboard_ticks.is_multiple_of(3) {
+            return;
+        }
+
+        let has_files = self
+            .service
+            .file_system()
+            .read_file_clipboard()
+            .ok()
+            .flatten()
+            .is_some_and(|(paths, _)| !paths.is_empty());
+
+        if has_files != self.system_clipboard {
+            self.system_clipboard = has_files;
+            cx.notify();
         }
     }
 

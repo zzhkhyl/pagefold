@@ -157,6 +157,14 @@ impl FileSystem for WindowsFileSystem {
             sources, dest_dir, mode, cancel, progress,
         ))
     }
+
+    fn write_file_clipboard(&self, paths: &[PathBuf], cut: bool) -> anyhow::Result<()> {
+        clipboard::write_paths(paths, cut)
+    }
+
+    fn read_file_clipboard(&self) -> anyhow::Result<Option<(Vec<PathBuf>, bool)>> {
+        clipboard::read_paths()
+    }
 }
 
 /// 由 `DirEntry` 构造条目。
