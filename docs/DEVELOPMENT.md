@@ -138,16 +138,19 @@ git tag v0.4.0 && git push origin v0.4.0
 
 | 事项 | 说明 |
 | --- | --- |
-| 触发条件 | `push` 形如 `v*` 的 tag；也支持 Actions 页面手动 Run（**只上传 artifact，不建 Release**，便于先看产物） |
+| 触发条件 | `push` 形如 `v*` 的 tag；也支持 Actions 页面手动 Run：填 `publish_tag` 则**重新发布该 tag**（更新说明与资产），留空则只编译并上传 artifact（试跑） |
 | 版本号 | **以 tag 为准**：`vX.Y.Z` 或 `vX.Y.Z-<后缀>`（后者自动标 prerelease）。版本通过 ISPP 的 `/DAppVersion` 传给 `installer/files.iss`，脚本里用 `#ifndef` 兜底默认值 |
 | 版本一致性 | `Cargo.toml` 与 `installer/files.iss` 的版本**不参与**发布产物命名，只影响本机构建。工作流会比对「tag / Cargo.toml / files.iss」三者，不一致时在作业摘要里给 warning 提醒，**不阻断发布** |
+| 发布说明 | 由提交历史生成：按 `feat` / `fix` / `perf` / `refactor` / `docs` / `ci` 前缀分组，条目带 scope 与短 SHA 链接；顶部固定「下载与安装 + 校验 + 系统要求」，末尾给 `compare` 链接与升级注意。**不用** `--generate-notes`（本项目直接推 main、提交是中文的，自动生成只剩一句 Full Changelog） |
+| 只有构建类改动 | 若区间内没有「新增 / 修复 / 性能 / 重构」条目，说明里会明写「本次发布只包含构建、文档与发布流程的调整」，避免用户对着一行 CI 记录猜更新内容 |
 | 权限 | 只需要 `GITHUB_TOKEN`（工作流已声明 `contents: write`），无需额外 secret |
 | 依赖镜像 | Runner 在境外，工作流会先删掉 `.cargo/config.toml`（USTC 镜像）让 cargo 回落 crates.io——这正是该文件头部写明的用法 |
 | 安装包工具 | 与本地同一版本、同一 SHA-256 校验，解包到 `target/innosetup`，不装进系统 |
-| 重复触发 | 同一 tag 的 Release 已存在时改为 `gh release upload --clobber` 覆盖资产，而不是让流水线失败 |
+| 重复触发 | 同一 tag 的 Release 已存在时改为 `gh release edit`（更新标题与说明）+ `gh release upload --clobber`（覆盖资产）。因此**修正已发布版本的说明不需要删 tag 重打**：手动 Run 填上 `publish_tag` 即可 |
 | 已知依赖 | Runner 需具备 VS 生成工具与 Windows SDK（`rc.exe` 编译图标资源、GPUI 的着色器工具）；`windows-latest` 自带 |
 
-> 手动 Run 的版本号是 `0.0.0-dev.<run_number>`，只用于给 artifact 起名。
+> 手动 Run 且未填 `publish_tag` 时，版本号是 `0.0.0-dev.<run_number>`，只用于给 artifact 起名；
+> 此时的发布说明取最近 20 个提交，仅用于在 artifact 里预览格式。
 
 发版清单（三步）：
 

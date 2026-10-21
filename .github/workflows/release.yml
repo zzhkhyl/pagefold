@@ -1,21 +1,27 @@
 name: Release
 
 # 触发方式：
-#   1) 打 tag 并推送（`git tag v0.4.0 && git push origin v0.4.0`）→ 编译 + 发布 Release；
-#   2) 手动 Run workflow → 只编译并上传 artifact，**不**创建 Release（用于试跑）。
+#   1) 打 tag 并推送（`git tag v0.4.1 && git push origin v0.4.1`）→ 编译 + 发布 Release；
+#   2) 手动 Run：填了 publish_tag 就**重新生成该 tag 的说明与资产**（用于修正已发布的
+#      Release），留空则只编译并上传 artifact（试跑用）。
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      publish_tag:
+        description: "要重新发布的 tag（例如 v0.4.1）；留空则只编译、不发布"
+        required: false
+        default: ""
 
-# `gh release create` 需要写权限；其余权限一律不给。
+# `gh release create/edit` 需要写权限；其余权限一律不给。
 permissions:
   contents: write
 
-# 同一个 tag 重复触发时排队执行，不并发（避免两次 Release 抢同一个名字）。
+# 同一个 tag 重复触发时排队执行，不并发（避免两次发布抢同一个名字）。
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.publish_tag || github.ref }}
   cancel-in-progress: false
 
 env:
@@ -34,6 +40,11 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          # 发布说明要按「上一个 tag 到本 tag」的提交生成，必须拿到完整历史与标签。
+          fetch-depth: 0
+          # 手动重发时按指定 tag 检出，保证产物与说明都对应那一次发布。
+          ref: ${{ inputs.publish_tag || github.ref }}
 
       # 仓库里的 .cargo/config.toml 把 crates.io 换成了 USTC 镜像（国内开发机用）。
       # Runner 在境外，镜像反而更慢甚至不可达；该文件头部也写明了「不在中国大陆
@@ -65,8 +76,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          if ('${{ github.ref_type }}' -eq 'tag') {
-            $tag = '${{ github.ref_name }}'
+          $tag = '${{ inputs.publish_tag }}'
+          if (-not $tag -and '${{ github.ref_type }}' -eq 'tag') { $tag = '${{ github.ref_name }}' }
+
+          if ($tag) {
             # 只接受 vX.Y.Z 或 vX.Y.Z-rc.1 这类形式：安装包的版本列必须可解析。
             if ($tag -notmatch '^v(?<num>\d+\.\d+\.\d+)(?<pre>-[0-9A-Za-z][0-9A-Za-z.-]*)?$') {
               throw "标签格式必须是 vX.Y.Z（可带预发布后缀，如 v1.0.0-rc.1），当前是「$tag」"
@@ -75,22 +88,28 @@ jobs:
             $pre = $Matches['pre']
             $version = "$numeric$pre"
             $prerelease = [bool]$pre
+            $publish = $true
           } else {
-            # 手动触发：版本号只是给 artifact 起名，不参与发布。
+            # 手动试跑：版本号只用于给 artifact 起名，不参与发布。
             $version = "0.0.0-dev.${{ github.run_number }}"
             $numeric = '0.0.0'
             $prerelease = $false
+            $publish = $false
           }
+
           "version=$version" >> $env:GITHUB_OUTPUT
           "numeric=$numeric" >> $env:GITHUB_OUTPUT
-          "prerelease=$prerelease" >> $env:GITHUB_OUTPUT
-          Write-Host "构建版本：$version（预发布：$prerelease）"
+          # 布尔值统一写成小写 true/false：下游用 'true' 比较，不依赖大小写规则。
+          "prerelease=$($prerelease.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "publish=$($publish.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          Write-Host "构建版本：$version（tag=$tag，发布=$publish，预发布=$prerelease）"
 
       # 版本号以 tag 为准（本项目约定）。Cargo.toml 与 files.iss 里的默认值只是
       # 「本机构建时用多少」，发版时应当顺手改成同一个版本；这里比对一次，
       # 不一致就报 warning 提醒，但**不阻断**发布——tag 是唯一事实来源。
       - name: 检查版本一致性
-        if: github.ref_type == 'tag'
+        if: steps.version.outputs.publish == 'true'
         shell: pwsh
         run: |
           $version = '${{ steps.version.outputs.version }}'
@@ -190,6 +209,147 @@ jobs:
             "- SHA-256：$hash"
           ) >> $env:GITHUB_STEP_SUMMARY
 
+      # 发布说明由提交历史生成，而不是 `gh --generate-notes`：
+      # 本项目直接往 main 推、提交是中文的 `feat(shell): …`，自动生成的 notes
+      # 只剩一句 Full Changelog。这里按提交前缀分组，把「新增 / 修复 / 构建」
+      # 分开，再补上下载、校验与升级注意——这几段是用户真正要先看的。
+      - name: 生成发布说明
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ steps.version.outputs.version }}'
+          $tag = '${{ steps.version.outputs.tag }}'
+          $publish = '${{ steps.version.outputs.publish }}' -eq 'true'
+          $repo = '${{ github.repository }}'
+          $server = '${{ github.server_url }}'
+
+          # 中文提交必须按 UTF-8 读入，否则写进说明里全是问号。
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $env:GIT_PAGER = 'cat'
+
+          # 上一个 tag：首个 tag 时退到「仓库第一个提交」。
+          # 纯试跑时不用区间，只取最近 20 个提交（区间写法在提交数不足时会直接报错）。
+          $range = ''
+          if ($publish) {
+            $previous = & git describe --tags --abbrev=0 "$tag^" 2>$null
+            if ($LASTEXITCODE -eq 0 -and $previous) {
+              $range = "$previous..$tag"
+            } else {
+              $first = (& git rev-list --max-parents=0 HEAD | Select-Object -Last 1)
+              $range = "$first..$tag"
+            }
+          }
+          $logArgs = if ($range) { @($range, '--no-merges') } else { @('-n', '20', '--no-merges') }
+          Write-Host "提交来源：$(if ($range) { $range } else { '最近 20 个提交' })"
+
+          # 用 \x1f / \x1e 分隔字段与记录：提交正文里可能有换行，不能按行切。
+          $raw = (& git log @logArgs --pretty=format:'%H%x1f%s%x1e') -join "`n"
+
+          $groups = [ordered]@{
+            '新增'       = @()
+            '修复'       = @()
+            '性能'       = @()
+            '重构'       = @()
+            '文档'       = @()
+            '构建与发布' = @()
+            '测试'       = @()
+            '其他'       = @()
+          }
+
+          foreach ($record in ($raw -split [char]0x1e)) {
+            $record = $record.Trim()
+            if (-not $record) { continue }
+            $fields = $record -split [char]0x1f
+            $sha = $fields[0]
+            $subject = $fields[1]
+            if (-not $subject) { continue }
+
+            $desc = $subject
+            $scope = ''
+            $kind = '其他'
+            if ($subject -match '^(?<type>[A-Za-z]+)(\((?<scope>[^)]+)\))?!?:\s*(?<desc>.+)$') {
+              $type = $Matches['type'].ToLower()
+              $scope = $Matches['scope']
+              $desc = $Matches['desc']
+              $kind = switch ($type) {
+                'feat' { '新增' }
+                'fix' { '修复' }
+                'perf' { '性能' }
+                'refactor' { '重构' }
+                'docs' { '文档' }
+                'ci' { '构建与发布' }
+                'build' { '构建与发布' }
+                'chore' { '构建与发布' }
+                'test' { '测试' }
+                default { '其他' }
+              }
+            }
+
+            $short = $sha.Substring(0, 7)
+            $link = "$server/$repo/commit/$sha"
+            # scope 用加粗保留：同一类改动里，能一眼看出动的是 shell 还是 platform。
+            $item = if ($scope) { "- **$scope**：$desc（[$short]($link)）" } else { "- $desc（[$short]($link)）" }
+            $groups[$kind] += $item
+          }
+
+          $hash = (Get-Content 'dist/SHA256SUMS.txt' -Raw).Trim() -split '\s+' | Select-Object -First 1
+
+          # 含反引号的段落一律用单引号拼接：双引号里的 ` 是转义符，会把 markdown 吃掉。
+          $checksumLine = '- 校验值见附件 `SHA256SUMS.txt`，安装包 SHA-256：`' + $hash + '`'
+          # 固定的一行产品说明：发布页不该只有 changelog，第一次来的用户要知道这是什么。
+          $intro = 'Pagefold（叠页）— Windows 上的轻量文件管理器：多标签、图标 / 详情双视图、批量重命名与可撤销的文件操作。'
+          $lines = @(
+            $intro
+            ''
+            '## 下载与安装'
+            ''
+            "- **Pagefold-$version-x64-setup.exe** — 用户级安装，全程不弹 UAC"
+            '- 需要 Windows 10 或更高版本（x64）'
+            $checksumLine
+            ''
+            "## 本次更新 · v$version"
+            ''
+          )
+
+          # 只有构建/文档类改动时，明说「没有用户可见变化」——比让用户对着
+          # 一条 CI 记录猜「这版到底更新了什么」要好。
+          $userVisible = @('新增', '修复', '性能', '重构') | Where-Object { $groups[$_].Count -gt 0 }
+          if (-not $userVisible) {
+            $lines += '_本次发布只包含构建、文档与发布流程的调整，没有用户可见的功能变化。_'
+            $lines += ''
+          }
+
+          $empty = $true
+          foreach ($name in $groups.Keys) {
+            if ($groups[$name].Count -eq 0) { continue }
+            $empty = $false
+            $lines += "### $name"
+            $lines += ''
+            $lines += $groups[$name]
+            $lines += ''
+          }
+          if ($empty) { $lines += '_本次发布没有代码变更。_'; $lines += '' }
+
+          $lines += '## 完整变更'
+          $lines += ''
+          # 有上一个 tag 就给 compare 链接，否则给提交列表（首个版本的情况）。
+          $linkRef = if ($tag) { $tag } else { 'HEAD' }
+          $compare = "[全部提交]($server/$repo/commits/$linkRef)"
+          if ($range.Contains('..')) {
+            $from = ($range -split '\.\.', 2)[0]
+            if ($from.StartsWith('v')) {
+              $compare = "[$from...$tag]($server/$repo/compare/$from...$tag)"
+            }
+          }
+          $lines += $compare
+          $lines += ''
+          $lines += '> 升级安装会先结束正在运行的实例（含无窗口的热键宿主）；卸载会先还原文件夹接管再删文件，'
+          $lines += '> 用户偏好目录 `%APPDATA%\pagefold` 默认保留。'
+
+          $lines | Out-File -FilePath 'dist/notes.md' -Encoding utf8
+          Write-Host '--- 发布说明预览 ---'
+          Get-Content 'dist/notes.md'
+
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
@@ -197,33 +357,40 @@ jobs:
           path: |
             dist/Pagefold-*-x64-setup.exe
             dist/SHA256SUMS.txt
+            dist/notes.md
           if-no-files-found: error
 
-      # 只有 tag 触发才建 Release；手动触发只留 artifact，方便先看产物对不对。
+      # 发布或更新 Release。已存在时走「更新说明 + 覆盖资产」这条路，
+      # 因此修正某个已发布版本的说明不需要删 tag 重打。
       - name: 发布 Release
-        if: github.ref_type == 'tag'
+        if: steps.version.outputs.publish == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
           $version = '${{ steps.version.outputs.version }}'
-          $tag = '${{ github.ref_name }}'
+          $tag = '${{ steps.version.outputs.tag }}'
+          $prerelease = '${{ steps.version.outputs.prerelease }}' -eq 'true'
+          $installer = "dist/Pagefold-$version-x64-setup.exe"
+
           $arguments = @(
             'release', 'create', $tag,
-            "dist/Pagefold-$version-x64-setup.exe",
+            $installer,
             'dist/SHA256SUMS.txt',
             '--title', "Pagefold $version",
-            '--generate-notes',
+            '--notes-file', 'dist/notes.md',
             '--verify-tag'
           )
-          if ('${{ steps.version.outputs.prerelease }}' -eq 'True') {
-            $arguments += '--prerelease'
-          }
-          # 允许重跑：同名 Release 已存在时改为覆盖上传，而不是整个流水线失败。
+          if ($prerelease) { $arguments += '--prerelease' }
+
           & gh @arguments
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "Release 已存在，改为上传覆盖"
-            & gh release upload $tag "dist/Pagefold-$version-x64-setup.exe" 'dist/SHA256SUMS.txt' --clobber
-            if ($LASTEXITCODE -ne 0) { throw "上传 Release 资产失败" }
+            Write-Host 'Release 已存在：改为更新说明并覆盖资产'
+            $edit = @('release', 'edit', $tag, '--title', "Pagefold $version", '--notes-file', 'dist/notes.md')
+            if ($prerelease) { $edit += '--prerelease' }
+            & gh @edit
+            if ($LASTEXITCODE -ne 0) { throw '更新 Release 说明失败' }
+            & gh release upload $tag $installer 'dist/SHA256SUMS.txt' --clobber
+            if ($LASTEXITCODE -ne 0) { throw '上传 Release 资产失败' }
           }
