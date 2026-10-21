@@ -13,7 +13,8 @@
 | 拖出（把条目拖到资源管理器等） | **已完成**：详情行与图标格挂 `on_drag` + `external_drag_payload(ExternalDragPayload::Files(FileDragPaths))`，载荷是「路径 + 是否目录」；拖已选中项带走整个选中集，拖未选中项只带它自己。**只有拖出窗口边界时**才提升为平台级拖拽（GPUI 的 `promote_external_drag_to_platform` 判定指针离开视口），因此窗口内拖动不会触发它——框选行为完全不变；预览由系统绘制 | 已完成 | — | — |
 | 目录变更实时监听 | **已完成**：`platform::windows::dir_watch` 用 `ReadDirectoryChangesW`（单层、64KB 缓冲、独立线程、`CancelIoEx` 打断）只累加计数器；`services::watch::DirectoryWatcher` 负责换目录时重建、同目录不重建；`ShellView::ambient_tick` 每 400ms 检查一次，有变化才 `reload`。事件不直接改列表，因此与分批扫描的 generation 校验不冲突 | 已完成 | — | — |
 | 列宽拖拽 | **已完成**：表头分隔线可拖动（命中区 6px，绝对定位，不参与 flex 布局因此不会挤窄列）；断点仍决定列是否显示，拖动偏好只覆盖可见列宽度并写入 `config.json` 的 `detail_columns`；内容区宽度不足时按「大小 → 类型 → 日期」顺序收敛，名称列保底 180px | 已完成 | — | — |
-| 标签条横向溢出滚动 + 左右箭头 | 标签多时当前是压缩到 96px 最小宽 + 裁剪；改造需把标签改成「固定宽可溢出」并引入 `ScrollHandle`，属较高风险的布局重构 | 待开始 | — | — |
+| 标签条横向溢出滚动 | **已完成**：标签先按 `flex_shrink` 压到 96px 下限，再溢出时由 `overflow_x_scroll` + `ScrollHandle` 横向滚动；滚轮竖滚被翻译成横滚（标签条只有横向可滚）；切换 / 新建 / 恢复标签时 `reveal_active_tab` 调 `scroll_to_item` 把当前标签滚进视野 | 已完成 | — | — |
+| 标签条左右箭头 | 与上一条配套的显式翻页按钮。当前靠滚轮与自动滚入视野，标签极多（>15）时可能需要它 | 待开始 | — | — |
 | 单实例命令行转发（IPC） | **已完成**：主实例起命名管道 `\\.\pipe\Pagefold.Open.v1` 监听线程，副本写入位置参数后退出；主实例的 `ambient_tick` 取走并在**新标签**中打开。管道未就绪时退回「只激活窗口」。刻意不用 `WM_COPYDATA`（需挂 GPUI 的窗口过程） | 已完成 | — | — |
 
 ### 二、文件操作增强

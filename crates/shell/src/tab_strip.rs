@@ -11,13 +11,14 @@
 //! 因此关闭处理器里显式调用 `stop_propagation`，并且所有定位都走 `TabId` 而不是下标——
 //! 这样即便处理器顺序变化，也不会出现「关掉标签后又选中了别的标签」。
 //!
-//! 待补：标签过多时的横向滚动与左右箭头（当前是压缩标签宽度直到最小宽度）。
+//! 标签过多时先压缩（下限 96px），压不下就**横向滚动**（滚轮 / 触控板）；
+//! 切换、新建、恢复标签时会把当前标签滚进视野（`reveal_active_tab`）。
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, WindowControlArea, div, px,
-    prelude::FluentBuilder as _,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, ScrollWheelEvent,
+    SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window,
+    WindowControlArea, div, point, px, prelude::FluentBuilder as _,
 };
 use gpui_component::button::{
     Button, ButtonCustomVariant, ButtonVariant, ButtonVariants as _, DropdownButton,
@@ -221,6 +222,11 @@ impl ShellView {
                     .min_w(px(0.0))
                     .pt(px(metrics::TABSTRIP_PADDING_TOP))
                     .child(
+                        // 标签很多时**横向滚动**，而不是把每个都压到只剩一两个字。
+                        //
+                        // 压缩下限是 96px（`min_w`）：到了下限就溢出，由这一层滚动接管。
+                        // 滚动位置记在 `tab_scroll` 里，切换/新建标签时
+                        // `reveal_active_tab` 会把当前标签滚进视野。
                         div()
                             .id("tab-list")
                             .flex()
@@ -230,7 +236,28 @@ impl ShellView {
                             .flex_shrink(1.0)
                             .min_w(px(0.0))
                             .h(px(metrics::TAB_HEIGHT))
-                            .overflow_hidden()
+                            .overflow_x_scroll()
+                            .track_scroll(&self.tab_scroll)
+                            // 鼠标滚轮直接横向滚：标签条只有横向可滚，
+                            // 竖向滚轮在这里没有别的含义，不接管它就只能靠触控板。
+                            .on_scroll_wheel(cx.listener(
+                                |this, event: &ScrollWheelEvent, _window, cx| {
+                                    let delta = event.delta.pixel_delta(px(20.0));
+                                    // 横向手势交给默认处理器：那本来就是「横向滚动」。
+                                    if delta.x != px(0.0) || delta.y == px(0.0) {
+                                        return;
+                                    }
+                                    let current = this.tab_scroll.offset();
+                                    let max = this.tab_scroll.max_offset();
+                                    // 偏移是负值：往下滚 = 更负。夹在 [max, 0] 之间，
+                                    // 否则会把标签条滚到一片空白上。
+                                    let shifted =
+                                        (current.x - delta.y).clamp(max.x, px(0.0));
+                                    this.tab_scroll
+                                        .set_offset(point(shifted, current.y));
+                                    cx.stop_propagation();
+                                },
+                            ))
                             .children(tabs),
                     )
                     .child(fm_views::widgets::plain_icon_button(

@@ -28,8 +28,9 @@ use fm_views::preview_panel::{EntrySummary, PreviewBody, PreviewContent};
 use fm_views::{Tokens, widgets};
 use gpui::{
     Anchor, App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle, Focusable as _,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Point, Render, ScrollStrategy,
-    SharedString, Styled as _, Subscription, Task, UniformListScrollHandle, Window, div, px,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Point, Render, ScrollHandle,
+    ScrollStrategy, SharedString, Styled as _, Subscription, Task, UniformListScrollHandle, Window,
+    div, px,
 };
 use gpui_component::button::ButtonVariant;
 use gpui_component::dialog::DialogButtonProps;
@@ -182,6 +183,11 @@ pub struct ShellView {
     preview_text: Option<(PathBuf, Option<SharedString>)>,
     /// 正在读取预览文本的任务。丢了这个句柄，读取会被取消。
     preview_task: Option<Task<()>>,
+    /// 标签条的横向滚动位置。
+    ///
+    /// 标签有最小宽度（96px），多到装不下时靠横向滚动而不是无限压缩——
+    /// 继续压下去标题会只剩一两个字符，反而看不出是哪个目录。
+    pub(crate) tab_scroll: ScrollHandle,
     /// 正在内联重命名的条目。
     pub(crate) renaming: Option<RenameState>,
     /// 本次右键是否落在某个条目上（由条目上的处理器置位，空白处菜单的构造器消费）。
@@ -356,6 +362,7 @@ impl ShellView {
             thumb_ids: std::collections::HashMap::new(),
             preview_text: None,
             preview_task: None,
+            tab_scroll: ScrollHandle::new(),
             renaming: None,
             area_menu_suppressed: false,
             list_incomplete: false,
@@ -2561,7 +2568,19 @@ impl ShellView {
         // 新标签落在与当前标签相同的位置（可能是目录，也可能是「此电脑」）。
         let location = self.tabs.active_state().location().clone();
         self.tabs.open_at(location);
+        self.reveal_active_tab();
         self.reload(cx);
+    }
+
+    /// 把当前标签滚进可视范围。
+    ///
+    /// 标签条只能横向滚动：新标签、`Ctrl+Shift+T` 恢复的标签都可能落在视野之外，
+    /// 不主动滚过去，用户会以为「操作没生效」。
+    fn reveal_active_tab(&self) {
+        let active = self.tabs.active().id();
+        if let Some(index) = self.tabs.tabs().iter().position(|tab| tab.id() == active) {
+            self.tab_scroll.scroll_to_item(index);
+        }
     }
 
     /// 在指定目录打开一个新标签并切过去。
@@ -2571,18 +2590,21 @@ impl ShellView {
     /// 文件落在当前目录（文件没有「自己的目录」可言）。
     pub(crate) fn open_tab_at(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.tabs.open_at(Location::Directory(path));
+        self.reveal_active_tab();
         self.reload(cx);
     }
 
     /// 关闭指定标签，并重新扫描接管焦点的那个标签。
     pub(crate) fn close_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
         self.tabs.close(id);
+        self.reveal_active_tab();
         self.reload(cx);
     }
 
     /// 恢复最近关闭的标签并切过去（Ctrl+Shift+T）。栈空时不做事。
     pub(crate) fn reopen_closed_tab(&mut self, cx: &mut Context<Self>) {
         if self.tabs.reopen_closed().is_some() {
+            self.reveal_active_tab();
             self.reload(cx);
         }
     }
@@ -2607,6 +2629,7 @@ impl ShellView {
             return;
         }
         if self.tabs.select(id) {
+            self.reveal_active_tab();
             self.reload(cx);
         }
     }
