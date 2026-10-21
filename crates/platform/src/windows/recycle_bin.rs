@@ -31,12 +31,17 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
+use fm_core::naming::unique_name;
 use fm_core::{Entry, EntryKind, IconId};
 use windows::Win32::UI::Shell::{
     FILEOPERATION_FLAGS, FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_WANTNUKEWARNING,
-    SHFILEOPSTRUCTW, SHFileOperationW,
+    SHEmptyRecycleBinW, SHFILEOPSTRUCTW, SHFileOperationW,
 };
+use windows::Win32::Storage::FileSystem::GetLongPathNameW;
 use windows::core::PCWSTR;
+
+use super::fs_ops::extended;
+use crate::fs::OpReport;
 
 /// 枚举所有卷上的回收站条目。
 ///
@@ -146,6 +151,169 @@ fn delete_impl(from: Vec<u16>) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// 从回收站还原若干条目，返回逐条回执。
+///
+/// `paths` 是列表里的**物理路径**（`$R...`）——也就是 [`enumerate`] 填进
+/// `Entry.path` 的那个位置，不是原路径。
+///
+/// ## 为什么还原可以自己搬，不必求 shell
+///
+/// 「移入」必须走 shell（配额、`$I` 版本、跨卷换卷都是它的语义）；但「还原」不是：
+/// `$R` 内容与其原始位置**永远在同一个卷**上——这正是回收站的设计前提。
+/// 因此一次 `MoveFile` 就够，既不复制也不跨卷。搬完删掉配对的 `$I`，
+/// 条目就从回收站里消失了。
+pub fn restore(paths: &[PathBuf]) -> OpReport {
+    let mut report = OpReport::default();
+
+    for path in paths {
+        match restore_one(path) {
+            Ok(()) => report.done += 1,
+            // `{error:#}` 展开 anyhow 的整条因果链：
+            // 只有最外层往往看不出是哪一步失败（读元数据？改名？）。
+            Err(error) => report.failed.push((path.clone(), format!("{error:#}"))),
+        }
+    }
+
+    report
+}
+
+fn restore_one(content: &Path) -> anyhow::Result<()> {
+    let (meta, parsed) = read_metadata(content)?;
+    let original = parsed.original_path;
+
+    // 原名被占用时自动改名：用户可能又建了一个同名文件。
+    // 覆盖会毁掉新文件，而直接报错又让他无从下手（他还得自己先去改名）。
+    let parent = original
+        .parent()
+        .with_context(|| format!("「{}」没有父目录", original.display()))?;
+    let name = original
+        .file_name()
+        .with_context(|| format!("「{}」没有文件名", original.display()))?
+        .to_string_lossy()
+        .into_owned();
+    let target_name = unique_name(&name, |candidate| parent.join(candidate).exists());
+    let target = parent.join(&target_name);
+
+    fs::rename(extended(content), extended(&target))
+        .with_context(|| format!("无法还原到「{}」", target.display()))?;
+
+    // `$I` 删不掉不影响结果：内容已经回到原位，枚举会因为找不到 `$R` 而跳过这条残留。
+    if let Err(error) = fs::remove_file(extended(&meta)) {
+        tracing::debug!(?error, meta = %meta.display(), "还原后未能删除回收站元数据");
+    }
+
+    Ok(())
+}
+
+/// 读出 `$R...` 配对的 `$I...` 元数据，并解析出原路径。
+fn read_metadata(content: &Path) -> anyhow::Result<(PathBuf, DeletedItem)> {
+    let name = content
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("回收站条目的名称不是有效 UTF-8")?;
+    let id = name
+        .strip_prefix("$R")
+        .context("这不是回收站的内容文件（应以 $R 开头）")?;
+    let meta = content.with_file_name(format!("$I{id}"));
+
+    let bytes = fs::read(extended(&meta))
+        .with_context(|| format!("无法读取回收站元数据「{}」", meta.display()))?;
+    let parsed = parse_i_file(&bytes).context("回收站元数据已损坏，无法确定原位置")?;
+
+    Ok((meta, parsed))
+}
+
+/// 按**原路径**从回收站还原（撤销「移到回收站」用）。
+///
+/// 移入时 shell 不会告诉我们 `$R` 叫什么，因此只能反查：枚举回收站里的每条 `$I`，
+/// 找 `original_path` 命中的那些。同一路径被删过多次时会全部还原——
+/// 撤销的语义是「把我刚删的那批东西弄回来」，多还一条比少还一条好。
+///
+/// 一条都没命中时返回空回执（调用方据此提示「回收站里已经找不到」）。
+pub fn restore_by_originals(originals: &[PathBuf]) -> OpReport {
+    if originals.is_empty() {
+        return OpReport::default();
+    }
+
+    let mut targets = Vec::new();
+    for entry in enumerate() {
+        let content = entry.path.as_ref().clone();
+        let Ok((_, parsed)) = read_metadata(&content) else {
+            continue;
+        };
+        if originals
+            .iter()
+            .any(|original| same_path(original, &parsed.original_path))
+        {
+            targets.push(content);
+        }
+    }
+
+    restore(&targets)
+}
+
+/// 两个路径是否指向同一个位置。
+///
+/// 比较前先**展开 8.3 短名**：同一个文件可能被两种形式引用——
+/// `C:\Users\ADMINI~1\AppData\...`（短名，`%TEMP%` 就长这样）与
+/// `C:\Users\Administrator\AppData\...`（长名，`$I` 里记的是它）。
+/// 直接比字符串会把同一个文件判成两个，撤销「移到回收站」就会一条也找不到。
+fn same_path(left: &Path, right: &Path) -> bool {
+    normalize(left) == normalize(right)
+}
+
+/// 规范成「长名 + 小写」，用于比较。
+///
+/// 只规范化**父目录**：被删的文件本身已经不存在，没法对它调用
+/// `GetLongPathNameW`；父目录还在，足以把短名展开。
+fn normalize(path: &Path) -> String {
+    let parent = path.parent().map(|parent| {
+        long_path(parent).unwrap_or_else(|| parent.to_path_buf())
+    });
+
+    let joined = match (parent, path.file_name()) {
+        (Some(parent), Some(name)) => parent.join(name),
+        _ => path.to_path_buf(),
+    };
+    joined.to_string_lossy().to_lowercase()
+}
+
+/// 用 `GetLongPathNameW` 把短名展开成长名；路径不存在时返回 `None`。
+fn long_path(path: &Path) -> Option<PathBuf> {
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    // 先按「长度可能翻倍」给足空间，再用返回的实际长度截断。
+    let mut buffer = vec![0u16; wide.len().max(260) * 2];
+    let length = unsafe { GetLongPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buffer)) } as usize;
+
+    if length == 0 || length > buffer.len() {
+        return None;
+    }
+    Some(PathBuf::from(String::from_utf16_lossy(&buffer[..length])))
+}
+
+/// 清空回收站（所有卷）。
+///
+/// 与「移入」同理交给 shell：清空要连同 `$I`、配额与各卷索引一起处理。
+/// 三个标志的取舍：
+///
+/// - `NOCONFIRMATION`：确认框由我们自己出（危险动作，用 danger 样式的按钮）；
+/// - `NOPROGRESSUI` / `NOSOUND`：清空通常很快，弹一个进度框再「叮」一声
+///   反而像是出了什么事。
+pub fn empty() -> anyhow::Result<()> {
+    const SHERB_NOCONFIRMATION: u32 = 1;
+    const SHERB_NOPROGRESSUI: u32 = 2;
+    const SHERB_NOSOUND: u32 = 4;
+
+    unsafe {
+        SHEmptyRecycleBinW(
+            None,
+            PCWSTR::null(),
+            SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND,
+        )
+        .context("清空回收站失败")
+    }
 }
 
 /// 把若干 `FILEOPERATION_FLAGS` 合成 `SHFILEOPSTRUCTW::fFlags` 要的 `u16`。
@@ -343,6 +511,142 @@ mod tests {
     /// 2024-01-01T00:00:00Z 的 FILETIME 值。
     const FILETIME_2024: u64 = 133_485_408_000_000_000;
 
+    /// 造一个隔离的临时目录（每个用例独占一个，结束即删）。
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pagefold-recycle-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("创建临时目录");
+        dir
+    }
+
+    /// 在 `bin` 下造一对 `$I`/`$R`，原路径是 `original`。
+    fn make_entry(bin: &Path, id: &str, original: &Path, content: &[u8]) -> PathBuf {
+        fs::create_dir_all(bin).expect("创建回收站目录");
+        let payload = bin.join(format!("$R{id}"));
+        fs::write(&payload, content).expect("写入内容");
+        let metadata = i_file(2, content.len() as u64, FILETIME_2024, &original.to_string_lossy());
+        fs::write(bin.join(format!("$I{id}")), metadata).expect("写入元数据");
+        payload
+    }
+
+    #[test]
+    fn restore_puts_the_content_back_and_drops_the_metadata() {
+        let root = scratch("restore");
+        let bin = root.join("bin");
+        let origin = root.join("origin");
+        fs::create_dir_all(&origin).expect("创建原目录");
+
+        let original = origin.join("报告.txt");
+        let payload = make_entry(&bin, "ABC.txt", &original, b"hello");
+
+        let report = restore(std::slice::from_ref(&payload));
+
+        assert!(report.failed.is_empty(), "失败项：{:?}", report.failed);
+        assert_eq!(report.done, 1);
+        assert_eq!(fs::read(&original).expect("内容应回到原位"), b"hello");
+        assert!(!payload.exists(), "应当移动，而不是复制");
+        assert!(
+            !bin.join("$IABC.txt").exists(),
+            "还原后必须删掉配对的 $I，否则回收站里会留下一条空壳"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restore_renames_when_the_original_name_is_taken_again() {
+        let root = scratch("restore-collision");
+        let bin = root.join("bin");
+        let origin = root.join("origin");
+        fs::create_dir_all(&origin).expect("创建原目录");
+
+        let original = origin.join("报告.txt");
+        // 用户在原位置又建了一个同名文件：还原不能覆盖它。
+        fs::write(&original, b"new").expect("写入同名文件");
+        let payload = make_entry(&bin, "DEF.txt", &original, b"old");
+
+        let report = restore(std::slice::from_ref(&payload));
+
+        assert_eq!(report.done, 1, "失败项：{:?}", report.failed);
+        assert_eq!(fs::read(&original).unwrap(), b"new", "同名文件不能被覆盖");
+        assert_eq!(
+            fs::read(origin.join("报告 (2).txt")).expect("应自动改名"),
+            b"old"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 端到端：真把文件送进系统回收站，再枚举、还原回来。
+    ///
+    /// 默认 `#[ignore]`：它会**临时**往本机回收站里塞一条记录（还原后即消失），
+    /// 不适合混在日常 `cargo test` 里。需要时手动跑：
+    /// `cargo test -p fm-platform -- --ignored recycle_bin_round_trip`
+    #[test]
+    #[ignore = "会临时往本机回收站写入并还原一个文件"]
+    fn recycle_bin_round_trip() {
+        let root = scratch("round-trip");
+        let dir = root.join("origin");
+        fs::create_dir_all(&dir).expect("创建原目录");
+        // 名字带进程号：上一次失败留下的条目不会让这次匹配到别人的文件。
+        let name = format!("pagefold-rt-{}.txt", std::process::id());
+        let file = dir.join(&name);
+        fs::write(&file, b"round trip").expect("写入文件");
+
+        let count = move_to_recycle_bin(std::slice::from_ref(&file)).expect("移入回收站");
+        assert_eq!(count, 1);
+        assert!(!file.exists(), "移入后原位置不该还有它");
+
+        let entry = enumerate()
+            .into_iter()
+            .find(|entry| entry.name.as_ref() == name)
+            .expect("回收站里应当能列出刚删掉的文件");
+
+        let report = restore(&[entry.path.as_ref().clone()]);
+
+        assert_eq!(report.done, 1, "失败项：{:?}", report.failed);
+        assert_eq!(fs::read(&file).expect("内容应回到原位"), b"round trip");
+
+        // 再删一次，走「撤销」那条路：用**原路径**反查回收站。
+        move_to_recycle_bin(std::slice::from_ref(&file)).expect("再次移入回收站");
+        let report = restore_by_originals(std::slice::from_ref(&file));
+        assert_eq!(report.done, 1, "失败项：{:?}", report.failed);
+        assert_eq!(
+            fs::read(&file).expect("撤销后内容应回到原位"),
+            b"round trip"
+        );
+
+        // 同一条路径已经还原过了，再撤一次应当找不到东西（而不是重复还原）。
+        let again = restore_by_originals(std::slice::from_ref(&file));
+        assert_eq!(again.done, 0, "回收站里已经没有这条了");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restore_reports_a_broken_metadata_file_without_touching_the_content() {
+        let root = scratch("restore-broken");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).expect("创建回收站目录");
+        // 只有 $R，没有 $I：删除中途断电就会留下这种条目。
+        let payload = bin.join("$RXYZ.txt");
+        fs::write(&payload, b"orphan").expect("写入内容");
+
+        let report = restore(std::slice::from_ref(&payload));
+
+        assert_eq!(report.done, 0);
+        assert_eq!(report.failed.len(), 1);
+        assert!(
+            payload.exists(),
+            "元数据读不到时必须原样不动——宁可报错，也不能把内容搬到猜出来的位置"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn parses_version_2_with_the_path_length_field() {
         let bytes = i_file(2, 4096, FILETIME_2024, r"C:\Users\me\报告.docx");
@@ -408,3 +712,4 @@ mod tests {
         assert_eq!(parsed.deleted_at, SystemTime::UNIX_EPOCH);
     }
 }
+

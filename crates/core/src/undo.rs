@@ -32,6 +32,12 @@ pub enum UndoAction {
     Copy { created: Vec<PathBuf> },
     /// 剪切粘贴：撤销即把 `(现在的位置, 原来的位置)` 搬回去。
     Move { moved: Vec<(PathBuf, PathBuf)> },
+    /// 移到回收站：撤销即从回收站还原。
+    ///
+    /// 存的是**原路径**而不是回收站里的 `$R` 路径——移入时 shell 不告诉我们
+    /// `$R` 叫什么，而原路径是我们自己知道的、也是用户认得的东西。
+    /// 还原时按原路径反查回收站（见 `FileSystem::restore_by_original_paths`）。
+    Recycle { paths: Vec<PathBuf> },
     /// 批量重命名：一次操作改了一批名字，撤销时整批改回。
     ///
     /// 与「连续多次单条重命名」不同，这是**一步**：用户按下 `Ctrl+Z` 时期的
@@ -47,6 +53,7 @@ impl UndoAction {
             Self::Create { .. } => "新建",
             Self::Copy { .. } => "复制",
             Self::Move { .. } => "移动",
+            Self::Recycle { .. } => "移到回收站",
             Self::RenameMany { .. } => "批量重命名",
         }
     }
@@ -57,6 +64,7 @@ impl UndoAction {
             Self::Rename { .. } | Self::Create { .. } => 1,
             Self::Copy { created } => created.len(),
             Self::Move { moved } => moved.len(),
+            Self::Recycle { paths } => paths.len(),
             Self::RenameMany { pairs } => pairs.len(),
         }
     }
@@ -81,7 +89,8 @@ impl UndoAction {
                     .unwrap_or_else(|| path.display().to_string());
                 format!("新建「{name}」")
             }
-            Self::Copy { .. } | Self::Move { .. } | Self::RenameMany { .. } => {
+            Self::Copy { .. } | Self::Move { .. } | Self::Recycle { .. }
+            | Self::RenameMany { .. } => {
                 format!("{} {} 项", self.label(), self.count())
             }
         }
@@ -141,6 +150,18 @@ mod tests {
             from: PathBuf::from(from),
             to: PathBuf::from(to),
         }
+    }
+
+    #[test]
+    fn recycle_is_described_by_count_because_it_has_no_single_target() {
+        // 回收站操作可能一次涉及十几项，逐项列名字只会把菜单撑长，
+        // 因此与「复制 / 移动」一样按项数描述。
+        let action = UndoAction::Recycle {
+            paths: vec![PathBuf::from(r"C:\a.txt"), PathBuf::from(r"C:\b.txt")],
+        };
+        assert_eq!(action.label(), "移到回收站");
+        assert_eq!(action.count(), 2);
+        assert_eq!(action.describe(), "移到回收站 2 项");
     }
 
     #[test]

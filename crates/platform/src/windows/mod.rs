@@ -169,6 +169,18 @@ impl FileSystem for WindowsFileSystem {
     fn shell_open(&self, path: &Path) -> anyhow::Result<()> {
         fs_ops::shell_open(path)
     }
+
+    fn restore_from_recycle_bin(&self, paths: &[PathBuf]) -> anyhow::Result<OpReport> {
+        Ok(recycle_bin::restore(paths))
+    }
+
+    fn restore_by_original_paths(&self, originals: &[PathBuf]) -> anyhow::Result<OpReport> {
+        Ok(recycle_bin::restore_by_originals(originals))
+    }
+
+    fn empty_recycle_bin(&self) -> anyhow::Result<()> {
+        recycle_bin::empty()
+    }
 }
 
 /// 由 `DirEntry` 构造条目。

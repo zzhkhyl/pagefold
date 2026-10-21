@@ -183,6 +183,26 @@ pub trait FileSystem: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// 从回收站还原若干条目。`paths` 是**物理路径**（`$R...`），即列表里的 `Entry.path`。
+    ///
+    /// 默认实现报错：回收站是 Windows 的设施，别的平台得各自实现。
+    fn restore_from_recycle_bin(&self, _paths: &[PathBuf]) -> anyhow::Result<OpReport> {
+        anyhow::bail!("当前平台没有回收站还原能力")
+    }
+
+    /// 按**原路径**还原（撤销「移到回收站」用）。
+    ///
+    /// 与 [`FileSystem::restore_from_recycle_bin`] 的区别是入参：
+    /// 那里给的是回收站里的物理路径，这里给的是删除前的原路径。
+    fn restore_by_original_paths(&self, _originals: &[PathBuf]) -> anyhow::Result<OpReport> {
+        anyhow::bail!("当前平台没有回收站还原能力")
+    }
+
+    /// 清空回收站（所有卷）。
+    fn empty_recycle_bin(&self) -> anyhow::Result<()> {
+        anyhow::bail!("当前平台没有清空回收站的能力")
+    }
+
     /// 用系统默认程序打开一个文件（Windows 上是 `ShellExecuteW`）。
     ///
     /// 默认实现直接报错：别的平台要各自接一套「默认程序」机制，

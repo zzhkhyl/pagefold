@@ -156,6 +156,18 @@ pub fn delete_forever(fs: &dyn FileSystem, paths: &[PathBuf]) -> OpResult<OpRepo
         .map_err(|error| describe_error(&error))
 }
 
+/// 从回收站还原若干条目。
+pub fn restore(fs: &dyn FileSystem, paths: &[PathBuf]) -> OpResult<OpReport> {
+    fs.restore_from_recycle_bin(paths)
+        .map_err(|error| describe_error(&error))
+}
+
+/// 清空回收站。
+pub fn empty_bin(fs: &dyn FileSystem) -> OpResult<()> {
+    fs.empty_recycle_bin()
+        .map_err(|error| describe_error(&error))
+}
+
 /// 批量重命名：按 `(原路径, 新名字)` 逐条改名，逐条回执。
 ///
 /// 逐条而不是「一次系统调用」：Windows 没有批量改名的原子接口，
@@ -227,6 +239,22 @@ pub fn undo(fs: &dyn FileSystem, action: &UndoAction) -> OpResult<OpReport> {
                 }
             }
             Ok(total)
+        }
+        UndoAction::Recycle { paths } => {
+            // 还原的入参是**原路径**：移入时 shell 没告诉我们 `$R` 叫什么，
+            // 平台层会按原路径反查回收站。
+            let report = fs
+                .restore_by_original_paths(paths)
+                .map_err(|error| describe_error(&error))?;
+
+            // 一条都没找到（回收站被清空、或被别的程序还原了）时要说清楚，
+            // 否则 UI 会显示一句「已还原 0 项」，像是操作没生效。
+            if report.done == 0 && !report.has_failures() {
+                return Err(String::from(
+                    "回收站里已经找不到这些项目，可能已被清空或还原过了",
+                ));
+            }
+            Ok(report)
         }
         UndoAction::Move { moved } => {
             // 逐项搬回原目录：不同条目的原目录可能不同（一次跨目录的多选剪切），
@@ -612,6 +640,25 @@ mod tests {
         assert!(
             fs.writes().is_empty(),
             "非法名称必须在系统调用之前就被拦下"
+        );
+    }
+
+    #[test]
+    fn undo_of_a_recycle_restores_by_the_original_paths() {
+        let fs = MockFileSystem::new(0);
+        let paths = vec![dir().join("a.txt"), dir().join("b.txt")];
+        let action = UndoAction::Recycle {
+            paths: paths.clone(),
+        };
+
+        let report = undo(&fs, &action).expect("应当能撤销");
+
+        assert_eq!(report.done, 2);
+        // 关键：交给平台的是**原路径**——移入时 shell 不给 `$R` 名字，
+        // 反查回收站只能靠原路径。
+        assert_eq!(
+            fs.writes(),
+            vec![MockWrite::RestoreByOriginalPaths { paths }]
         );
     }
 

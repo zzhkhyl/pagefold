@@ -75,6 +75,10 @@ pub(crate) enum MenuAction {
     Undo,
     /// 批量重命名（前缀 + 起始序号 + 实时预览）。
     BatchRename,
+    /// 从回收站还原选中项。
+    Restore,
+    /// 清空回收站（先弹危险确认框）。
+    EmptyRecycleBin,
 }
 
 impl MenuAction {
@@ -263,11 +267,21 @@ pub(crate) fn entry_menu_spec(
 /// 因此这里**只给「属性」**，而不是把一排永远禁用的项摆上去：
 /// 禁用意味着「以后会有」，而这两项并不在计划内。
 pub(crate) fn recycle_bin_menu_spec() -> Vec<MenuNode> {
-    vec![MenuNode::Item(MenuItemSpec::new(
-        "属性",
-        IconName::Info,
-        MenuAction::ShowPreview,
-    ))]
+    vec![
+        // 还原放在第一位：进回收站多半是为了把删错的东西拿回来，
+        // 那一项应该在第一眼就能看到的位置。
+        MenuNode::Item(MenuItemSpec::new(
+            "还原",
+            IconName::RotateCcw,
+            MenuAction::Restore,
+        )),
+        MenuNode::Separator,
+        MenuNode::Item(MenuItemSpec::new(
+            "属性",
+            IconName::Info,
+            MenuAction::ShowPreview,
+        )),
+    ]
 }
 
 /// 内容区空白处右键菜单的节点清单。
@@ -294,6 +308,7 @@ pub(crate) fn area_menu_spec(
     writable: bool,
     can_paste: bool,
     undo_label: Option<&str>,
+    in_recycle_bin: bool,
 ) -> Vec<MenuNode> {
     let view_node = |label: &str, icon: IconName, mode: ViewMode| {
         MenuNode::Item(
@@ -360,6 +375,17 @@ pub(crate) fn area_menu_spec(
     nodes.push(MenuNode::Separator);
     nodes.push(view_node("详细信息视图", IconName::List, ViewMode::Details));
     nodes.push(view_node("图标视图", IconName::LayoutGrid, ViewMode::Icons));
+
+    // 「清空回收站」只出现在回收站里：在普通目录里它既没有意义，也很危险
+    // （那是一键销毁所有已删文件）。危险动作放在最末尾、并带省略号表示会二次确认。
+    if in_recycle_bin {
+        nodes.push(MenuNode::Separator);
+        nodes.push(MenuNode::Item(MenuItemSpec::new(
+            "清空回收站…",
+            IconName::Trash,
+            MenuAction::EmptyRecycleBin,
+        )));
+    }
 
     nodes
 }
@@ -484,6 +510,8 @@ fn dispatch(
         MenuAction::BatchRename => view.open_batch_rename(window, cx),
         MenuAction::DeletePermanently => view.delete_selection_forever(window, cx),
         MenuAction::Undo => view.undo_last(window, cx),
+        MenuAction::Restore => view.restore_selection(window, cx),
+        MenuAction::EmptyRecycleBin => view.empty_recycle_bin(window, cx),
     });
 
     if applied.is_err() {
@@ -541,7 +569,7 @@ pub(crate) fn area_menu_builder(cx: &Context<ShellView>) -> fm_views::AreaMenuBu
             return menu;
         }
 
-        let Ok((view_mode, sort_key, writable, can_paste, undo_label)) =
+        let Ok((view_mode, sort_key, writable, can_paste, undo_label, in_recycle_bin)) =
             shell.read_with(&**cx, |view: &ShellView, _| {
                 let tab = view.tabs.active_state();
                 (
@@ -552,6 +580,8 @@ pub(crate) fn area_menu_builder(cx: &Context<ShellView>) -> fm_views::AreaMenuBu
                     view.can_paste(),
                     // 菜单里直接写出「要撤哪一步」，避免用户按下去才知道。
                     view.undo.peek().map(|action| action.describe()),
+                    // 只有回收站里才提供「清空回收站」。
+                    view.in_recycle_bin(),
                 )
             })
         else {
@@ -564,6 +594,7 @@ pub(crate) fn area_menu_builder(cx: &Context<ShellView>) -> fm_views::AreaMenuBu
             writable,
             can_paste,
             undo_label.as_deref(),
+            in_recycle_bin,
         );
         build_menu(menu, &nodes, None, &shell, window, cx)
     })
@@ -738,7 +769,7 @@ mod tests {
     #[test]
     fn undo_is_listed_only_when_something_can_be_undone() {
         // 空栈：整项隐藏。禁用态会让人以为「以后会有」，而这里只是「现在没有」。
-        let empty = area_menu_spec(ViewMode::Details, SortKey::Name, true, true, None);
+        let empty = area_menu_spec(ViewMode::Details, SortKey::Name, true, true, None, false);
         assert!(find(&empty, "撤销").is_none());
 
         // 有可撤销操作时，菜单里直接写出「撤的是哪一步」。
@@ -748,6 +779,7 @@ mod tests {
             true,
             true,
             Some("重命名「报告.docx」"),
+            false,
         );
         let spec = find(&nodes, "撤销 重命名「报告.docx」").expect("应出现带描述的撤销项");
         assert_eq!(spec.action, MenuAction::Undo);
@@ -843,11 +875,21 @@ mod tests {
     }
 
     #[test]
-    fn recycle_bin_menu_offers_only_what_actually_works() {
+    fn recycle_bin_menu_leads_with_restore() {
         let nodes = recycle_bin_menu_spec();
 
-        // 只有一项，而且是可用的「属性」——不是一排禁用项。
-        assert_eq!(nodes.len(), 1);
+        // 还原排在最前：进回收站多半就是为了把删错的东西拿回来。
+        let first = nodes
+            .iter()
+            .find_map(|node| match node {
+                MenuNode::Item(spec) => Some(spec),
+                _ => None,
+            })
+            .expect("回收站菜单不该是空的");
+        assert_eq!(first.label, "还原");
+        assert_eq!(first.action, MenuAction::Restore);
+        assert!(!first.disabled);
+
         let spec = find(&nodes, "属性").expect("应当有「属性」");
         assert!(!spec.disabled, "「属性」（显示预览面板）是已实现能力");
         assert_eq!(spec.action, MenuAction::ShowPreview);
@@ -859,8 +901,22 @@ mod tests {
     }
 
     #[test]
+    fn empty_recycle_bin_only_appears_inside_the_bin() {
+        let normal = area_menu_spec(ViewMode::Details, SortKey::Name, true, true, None, false);
+        assert!(
+            find(&normal, "清空回收站…").is_none(),
+            "普通目录里不该出现「清空回收站」——那是一键销毁所有已删文件"
+        );
+
+        let bin = area_menu_spec(ViewMode::Details, SortKey::Name, false, false, None, true);
+        let item = find(&bin, "清空回收站…").expect("回收站里应当有这一项");
+        assert_eq!(item.action, MenuAction::EmptyRecycleBin);
+        assert!(!item.disabled, "回收站为空时也允许点，它会提示没有可清空的内容");
+    }
+
+    #[test]
     fn area_menu_marks_the_current_view_mode_and_sort_key() {
-        let nodes = area_menu_spec(ViewMode::Icons, SortKey::Size, true, true, None);
+        let nodes = area_menu_spec(ViewMode::Icons, SortKey::Size, true, true, None, false);
 
         let icons = find(&nodes, "图标视图").expect("应当有图标视图");
         let details = find(&nodes, "详细信息视图").expect("应当有详细信息视图");
@@ -889,7 +945,7 @@ mod tests {
 
     #[test]
     fn area_menu_offers_the_create_actions_in_a_writable_directory() {
-        let nodes = area_menu_spec(ViewMode::Details, SortKey::Name, true, false, None);
+        let nodes = area_menu_spec(ViewMode::Details, SortKey::Name, true, false, None, false);
 
         let refresh = find(&nodes, "刷新").expect("刷新应当存在");
         assert!(!refresh.disabled, "刷新是已实现能力，不能禁用");
@@ -912,7 +968,7 @@ mod tests {
 
     #[test]
     fn area_menu_enables_paste_once_the_clipboard_has_content() {
-        let nodes = area_menu_spec(ViewMode::Details, SortKey::Name, true, true, None);
+        let nodes = area_menu_spec(ViewMode::Details, SortKey::Name, true, true, None, false);
         let paste = find(&nodes, "粘贴").expect("粘贴应当存在");
         assert!(!paste.disabled);
         assert_eq!(paste.action, MenuAction::Paste);
@@ -922,7 +978,7 @@ mod tests {
     fn area_menu_drops_the_write_group_outside_a_real_directory() {
         // 「此电脑」与回收站都不是真实目录：那里无处落笔，
         // 与其摆一排禁用项让人猜，不如整组不出现（资源管理器也是这样）。
-        let nodes = area_menu_spec(ViewMode::Details, SortKey::Name, false, true, None);
+        let nodes = area_menu_spec(ViewMode::Details, SortKey::Name, false, true, None, false);
 
         for label in ["新建文件夹", "新建文本文档", "粘贴"] {
             assert!(find(&nodes, label).is_none(), "{label} 不该出现在虚拟位置");

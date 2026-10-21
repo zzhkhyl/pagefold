@@ -31,6 +31,12 @@ pub enum MockWrite {
     DeletePermanently { paths: Vec<PathBuf> },
     /// 用系统默认程序打开。
     ShellOpen { path: PathBuf },
+    /// 从回收站还原。
+    RestoreFromRecycleBin { paths: Vec<PathBuf> },
+    /// 按原路径从回收站还原（撤销「移到回收站」）。
+    RestoreByOriginalPaths { paths: Vec<PathBuf> },
+    /// 清空回收站。
+    EmptyRecycleBin,
 }
 
 /// 返回固定伪造数据的 [`FileSystem`]。
@@ -178,6 +184,34 @@ impl FileSystem for MockFileSystem {
             done: paths.len(),
             ..OpReport::default()
         })
+    }
+
+    fn restore_from_recycle_bin(&self, paths: &[std::path::PathBuf]) -> anyhow::Result<OpReport> {
+        self.record(MockWrite::RestoreFromRecycleBin {
+            paths: paths.to_vec(),
+        });
+        Ok(OpReport {
+            done: paths.len(),
+            ..OpReport::default()
+        })
+    }
+
+    fn restore_by_original_paths(
+        &self,
+        originals: &[std::path::PathBuf],
+    ) -> anyhow::Result<OpReport> {
+        self.record(MockWrite::RestoreByOriginalPaths {
+            paths: originals.to_vec(),
+        });
+        Ok(OpReport {
+            done: originals.len(),
+            ..OpReport::default()
+        })
+    }
+
+    fn empty_recycle_bin(&self) -> anyhow::Result<()> {
+        self.record(MockWrite::EmptyRecycleBin);
+        Ok(())
     }
 
     fn shell_open(&self, path: &std::path::Path) -> anyhow::Result<()> {

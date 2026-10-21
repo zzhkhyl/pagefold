@@ -1619,6 +1619,8 @@ impl ShellView {
         cx: &mut Context<Self>,
     ) {
         let fs = Arc::clone(self.service.file_system());
+        // 撤销用的是**原路径**：移入时 shell 不会告诉我们 `$R` 叫什么。
+        let recorded = paths.clone();
 
         self.op_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = cx
@@ -1628,8 +1630,15 @@ impl ShellView {
 
             let _ = this.update_in(cx, move |view, window, cx| match result {
                 Ok(count) => {
+                    // 还原能力已就位（`recycle_bin::restore_by_originals`），
+                    // 因此「移到回收站」现在也是可撤销的。
+                    if count > 0 {
+                        view.undo.push(UndoAction::Recycle { paths: recorded });
+                    }
                     window.push_notification(
-                        Notification::success(format!("已移到回收站 {count} 项")),
+                        Notification::success(format!(
+                            "已移到回收站 {count} 项（Ctrl+Z 撤销）"
+                        )),
                         cx,
                     );
                     view.refresh_after_write(cx);
@@ -1689,6 +1698,89 @@ impl ShellView {
                     true
                 })
         });
+    }
+
+    /// 从回收站还原选中项。
+    ///
+    /// 只在回收站视图里可用：普通目录里的条目没有 `$I` 元数据，
+    /// 拿路径去「还原」只会得到一条看不懂的错误。
+    pub(crate) fn restore_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.in_recycle_bin() {
+            window.push_notification(Notification::warning("只有在回收站里才能还原项目"), cx);
+            return;
+        }
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            window.push_notification(Notification::warning("先选中要还原的项目"), cx);
+            return;
+        }
+
+        let fs = Arc::clone(self.service.file_system());
+        self.op_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { ops::restore(&*fs, &paths) })
+                .await;
+
+            let _ = this.update_in(cx, move |view, window, cx| match result {
+                Ok(report) => {
+                    view.notice_report(window, cx, "还原", &report);
+                    // 还原成功后条目就从回收站里消失了，必须重扫。
+                    view.reload(cx);
+                }
+                Err(reason) => window.push_notification(Notification::error(reason), cx),
+            });
+        }));
+    }
+
+    /// 清空回收站（先弹危险确认框）。
+    pub(crate) fn empty_recycle_bin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.in_recycle_bin() {
+            window.push_notification(Notification::warning("请先进入回收站"), cx);
+            return;
+        }
+        let count = self.visible().len();
+
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _window, _cx| {
+            let view = view.clone();
+            alert
+                .title("清空回收站")
+                .description(format!(
+                    "清空回收站里的全部 {count} 个项目？\n此操作无法撤销。"
+                ))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("清空")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("取消")
+                        .show_cancel(true),
+                )
+                .on_ok(move |_event, window, cx| {
+                    let _ = view.update(cx, |view, cx| view.start_empty_bin(window, cx));
+                    true
+                })
+        });
+    }
+
+    /// 真正执行清空（用户确认之后）。
+    fn start_empty_bin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let fs = Arc::clone(self.service.file_system());
+
+        self.op_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { ops::empty_bin(&*fs) })
+                .await;
+
+            let _ = this.update_in(cx, move |view, window, cx| match result {
+                Ok(()) => {
+                    window.push_notification(Notification::success("回收站已清空"), cx);
+                    view.reload(cx);
+                }
+                Err(reason) => window.push_notification(Notification::error(reason), cx),
+            });
+        }));
     }
 
     /// 真正发起永久删除（用户确认之后）。

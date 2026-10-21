@@ -346,6 +346,7 @@ file-manager/
 | 跨程序文件剪贴板             | `crates/platform/src/windows/clipboard.rs`（`CF_HDROP` 编解码 + `Preferred DropEffect`）；`ShellView::clip_selection` 负责写、`paste` 负责回退读、`probe_system_clipboard` 负责可用态 |
 | 拖入（外部文件拖进来）       | `crates/shell/src/shell.rs` 的 `wrap_list_area`（`on_drop` / `can_drop` / `on_drag_move` / `on_file_drop_exit`）+ `accept_drop` + `begin_transfer`；不需要改平台层 |
 | 双击 / 回车打开              | 平台：`fs_ops::shell_open`（`ShellExecuteW`，错误码经 `describe_shell_code` 翻译）；外壳：`ShellView::open_entry` / `open_path` / `shell_open` |
+| 回收站还原 / 清空            | `crates/platform/src/windows/recycle_bin.rs` 的 `restore`（读 `$I` → `MoveFile` → 删 `$I`）与 `empty`（`SHEmptyRecycleBinW`）；外壳：`restore_selection` / `empty_recycle_bin` / `start_empty_bin` |
 | 应用图标的几何与配色         | `tools/icon-gen/src/design.rs`，改完重新生成（见 `assets/app-icon/README.md`） |
 
 用户数据的两个落点（都在 `%APPDATA%\pagefold\`，损坏时都只告警并回退默认）：
