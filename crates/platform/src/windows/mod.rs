@@ -165,6 +165,10 @@ impl FileSystem for WindowsFileSystem {
     fn read_file_clipboard(&self) -> anyhow::Result<Option<(Vec<PathBuf>, bool)>> {
         clipboard::read_paths()
     }
+
+    fn shell_open(&self, path: &Path) -> anyhow::Result<()> {
+        fs_ops::shell_open(path)
+    }
 }
 
 /// 由 `DirEntry` 构造条目。

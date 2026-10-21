@@ -182,6 +182,14 @@ pub trait FileSystem: Send + Sync + 'static {
     fn read_file_clipboard(&self) -> anyhow::Result<Option<(Vec<PathBuf>, bool)>> {
         Ok(None)
     }
+
+    /// 用系统默认程序打开一个文件（Windows 上是 `ShellExecuteW`）。
+    ///
+    /// 默认实现直接报错：别的平台要各自接一套「默认程序」机制，
+    /// 而本项目当前只交付 Windows。
+    fn shell_open(&self, _path: &Path) -> anyhow::Result<()> {
+        anyhow::bail!("当前平台不支持用默认程序打开")
+    }
 }
 
 /// 一次写操作的回执。

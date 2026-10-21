@@ -20,8 +20,11 @@ use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use fm_core::naming::unique_name;
+use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows::core::PCWSTR;
 
 use crate::fs::{CancelToken, OpReport, TransferMode, TransferProgress};
 
@@ -351,6 +354,54 @@ fn move_tree(from: &Path, to: &Path, run: &mut TransferRun<'_>) -> Result<()> {
     }
 }
 
+/// 用系统默认程序打开一个文件（`ShellExecuteW("open")`）。
+///
+/// 两条与路径有关的注意事项：
+///
+/// - **不能加 `\\?\` 前缀**：长路径前缀会让 shell 的关联查找失效（它按扩展名
+///   去注册表找 handler，而带前缀的路径不被当成普通文件），因此这里用原样路径。
+///   代价是超过 260 字符的路径打不开——那类路径也没有多少程序能正确处理。
+/// - 打开的是**文件**；目录请走导航，不要交给 shell（否则会开一个新的资源管理器窗口）。
+pub fn shell_open(path: &Path) -> Result<()> {
+    let wide: Vec<u16> = path.to_string_lossy().encode_utf16().chain([0]).collect();
+    let operation: Vec<u16> = "open".encode_utf16().chain([0]).collect();
+
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(operation.as_ptr()),
+            PCWSTR(wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+
+    // 返回值是「伪句柄」：**大于 32** 才算成功，0..=32 是错误码。
+    let code = result.0 as isize;
+    if code > 32 {
+        Ok(())
+    } else {
+        bail!("{}", describe_shell_code(code))
+    }
+}
+
+/// 把 `ShellExecuteW` 的错误码翻译成一句人话。
+///
+/// 这些码是 `shellapi.h` 里的 `SE_ERR_*` 与 0：它们的取值固定，但
+/// 文档写得很散。翻译成一句话比抛「错误码 31」有用得多——用户看到
+/// 「没有关联的程序」才知道下一步该干什么。
+fn describe_shell_code(code: isize) -> String {
+    match code {
+        0 => String::from("系统内存不足，无法启动程序"),
+        2 => String::from("找不到该文件，可能已被移动或删除"),
+        3 => String::from("找不到该路径"),
+        5 => String::from("拒绝访问"),
+        31 => String::from("没有与该类型关联的程序，请先在系统设置里指定默认应用"),
+        other => format!("系统拒绝打开（错误码 {other}）"),
+    }
+}
+
 /// 删除条目（移动的收尾）。文件与目录走不同的系统调用。
 fn remove_tree(path: &Path) -> Result<()> {
     let metadata =
@@ -528,6 +579,18 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&source);
+    }
+
+    #[test]
+    fn shell_error_codes_become_readable_sentences() {
+        // 0..=32 是错误码（> 32 才是成功），这几个是最常撞上的：
+        // 「找不到文件」「没有关联程序」——用户需要知道自己该做什么。
+        assert!(describe_shell_code(2).contains("找不到该文件"));
+        assert!(describe_shell_code(3).contains("路径"));
+        assert!(describe_shell_code(5).contains("拒绝访问"));
+        assert!(describe_shell_code(31).contains("没有与该类型关联的程序"));
+        // 其余错误码不能丢：带上原始数字，便于对着文档排查。
+        assert!(describe_shell_code(1155).contains("1155"));
     }
 
     #[test]

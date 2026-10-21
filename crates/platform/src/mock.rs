@@ -29,6 +29,8 @@ pub enum MockWrite {
     Recycle { paths: Vec<PathBuf> },
     /// 永久删除。撤销「新建 / 复制」时会走到这里，因此必须可观测。
     DeletePermanently { paths: Vec<PathBuf> },
+    /// 用系统默认程序打开。
+    ShellOpen { path: PathBuf },
 }
 
 /// 返回固定伪造数据的 [`FileSystem`]。
@@ -176,6 +178,13 @@ impl FileSystem for MockFileSystem {
             done: paths.len(),
             ..OpReport::default()
         })
+    }
+
+    fn shell_open(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        self.record(MockWrite::ShellOpen {
+            path: path.to_path_buf(),
+        });
+        Ok(())
     }
 
     // ── 写操作 ──────────────────────────────────────────────────────

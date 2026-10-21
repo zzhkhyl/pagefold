@@ -38,7 +38,7 @@
 | --- | --- | --- | --- | --- |
 | 缩略图 / 文件内容预览 | 预览面板只显示元信息，不读内容、不生成缩略图 | 待开始 | — | — |
 | 预览面板「在列表中定位」 | **已完成**：单选内容下渲染按钮，回调走 `RevealHandler` → `ShellView::reveal_selected`，复用既有 `scroll_into_view`（网格「下标 → 行号」换算在其中）；同时把焦点项设回该行 | 已完成 | — | — |
-| 双击文件用默认程序打开 | 需 `ShellExecute`（属 `fm-platform`）；此前刻意不做，避免把文件当目录扫描 | 待开始 | — | — |
+| 双击文件用默认程序打开 | **已完成**：平台层 `shell_open` → `ShellExecuteW("open")`，在后台线程执行（启动慢程序不卡窗口）；`return > 32` 才算成功，错误码翻成人话（找不到文件 / 无关联程序 / 拒绝访问）；目录仍走自己的导航（不新开资源管理器窗口），回收站条目拒绝并提示先还原；预览面板的主按钮随类型切换文案与图标 | 已完成 | — | — |
 | 系统文件图标 | **已完成**：`SHGetFileInfoW`（`USEFILEATTRIBUTES` + 假文件名，按扩展名取，32×32）+ `CreateDIBSection`/`DrawIconEx` 转 RGBA；`IconId` 作句柄、位图登记在 `fm_core::icon`；图标网格/详情表/预览面板统一走 `widgets::glyph`，取不到时退回 SVG。位图由自写的「无压缩 deflate」PNG 编码器交给 GPUI（不新增依赖），按 `IconId` 缓存编码结果。驱动器与符号链接仍用 SVG | 已完成 | — | — |
 | 隐藏 / 系统文件过滤 | **已完成**：平台层把 `FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM` 折算成 `Entry::hidden`；`ShellView` 在批次并入时按 `config.show_hidden` 过滤（默认关），因此下标与选中集一致；开关在设置页「视图」分组，切换后重扫（20k 条目约 44ms）。注意：点号开头的文件在 Windows 上**不算**隐藏 | 已完成 | — | — |
 | 递归搜索 / 全盘索引 | 搜索只过滤当前目录已加载条目，不下钻子目录 | 待开始 | — | — |

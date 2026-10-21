@@ -319,11 +319,16 @@ fn single(
     // 文件夹才有「打开」，文件只有「定位」，硬编高度会留下一条空白。
     let mut actions: Vec<AnyElement> = Vec::new();
 
-    // 只有目录才有可执行的「打开」动作：进入目录是我们已经具备的能力。
-    if summary.is_dir
-        && let Some(handler) = on_open
-    {
+    // 主操作随类型变化：目录是「进入」，文件是「交给系统默认程序」。
+    // 文案与图标必须一起变——写着「打开文件夹」却打开一个 .docx，是最容易被
+    // 当成 bug 的那类不一致。
+    if let Some(handler) = on_open {
         let target = summary.path.clone();
+        let (icon, label) = if summary.is_dir {
+            (IconName::FolderOpen, "打开文件夹")
+        } else {
+            (IconName::ExternalLink, "用默认程序打开")
+        };
         actions.push(
             div()
                 .id("preview-open")
@@ -341,8 +346,8 @@ fn single(
                 .on_click(move |_event: &ClickEvent, window, cx| {
                     (*handler)(target.clone(), window, cx);
                 })
-                .child(Icon::new(IconName::FolderOpen).with_size(px(14.0)))
-                .child("打开文件夹")
+                .child(Icon::new(icon).with_size(px(14.0)))
+                .child(label)
                 .into_any_element(),
         );
     }

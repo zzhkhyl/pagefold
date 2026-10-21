@@ -651,18 +651,12 @@ impl ShellView {
 
         let on_open = {
             let view = cx.entity().downgrade();
-            Rc::new(move |path: PathBuf, _window: &mut Window, cx: &mut App| {
+            Rc::new(move |path: PathBuf, window: &mut Window, cx: &mut App| {
                 if view
-                    .update(cx, |view, cx| {
-                        // 与双击同一道闸：回收站里的位置不能按路径进入。
-                        if view.in_recycle_bin() {
-                            return;
-                        }
-                        view.navigate_to(path, cx);
-                    })
+                    .update(cx, |view, cx| view.open_path(path, window, cx))
                     .is_err()
                 {
-                    tracing::debug!("预览面板打开目录时视图已销毁，本次操作被忽略");
+                    tracing::debug!("预览面板打开条目时视图已销毁，本次操作被忽略");
                 }
             })
         };
@@ -1209,24 +1203,15 @@ impl ShellView {
 /// 用户看到的是「路径不存在」这种莫名其妙的报错。
 pub(crate) fn open_handler(cx: &Context<ShellView>) -> fm_views::OpenHandler {
     let view = cx.entity().downgrade();
-    Rc::new(move |entry: Entry, _window: &mut Window, cx: &mut App| {
-        if !entry.is_dir() {
-            return;
-        }
-        let path = entry.path.as_ref().clone();
+    Rc::new(move |entry: Entry, window: &mut Window, cx: &mut App| {
+        // 目录进入与文件「用默认程序打开」都走同一个入口：
+        // 双击的语义是「打开这一项」，而不该按类型分成两条看起来不同的路。
         if view
-            .update(cx, |view, cx| {
-                // 回收站里的条目不能按路径进入：它的 `path` 指向 `$Recycle.Bin` 内部
-                // （受保护的系统目录），按普通目录去扫只会得到「拒绝访问」。
-                if view.in_recycle_bin() {
-                    return;
-                }
-                view.navigate_to(path, cx);
-            })
+            .update(cx, |view, cx| view.open_entry(&entry, window, cx))
             .is_err()
         {
             // 与表头排序一致：不静默吞错，留一条可定位的 debug 日志。
-            tracing::debug!("双击进入目录时视图已销毁，本次操作被忽略");
+            tracing::debug!("打开条目时视图已销毁，本次操作被忽略");
         }
     })
 }

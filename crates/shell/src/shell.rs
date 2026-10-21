@@ -181,6 +181,12 @@ pub struct ShellView {
     pub(crate) area_menu_suppressed: bool,
     /// 写操作的后台任务。持有理由同 [`ShellView::scan_task`]：`Task` 一被丢弃就取消。
     op_task: Option<Task<()>>,
+    /// 传输进度卡的轮询任务。
+    ///
+    /// **必须与 `op_task` 分开**：那个槽位会被每一次写操作（改名、新建、撤销…）
+    /// 覆盖，一旦被覆盖，轮询任务就被 drop —— 后台线程照旧复制，但界面再也不会
+    /// 收到 `finished`，进度卡会永远停在半路。
+    _transfer_task: Option<Task<()>>,
     /// 列表是否可能**不完整**（被我们主动取消了一次在途扫描）。
     ///
     /// 新建条目时为了让「建完立刻改名」成立，会把在途扫描作废并手动把新条目插进列表。
@@ -335,6 +341,7 @@ impl ShellView {
             area_menu_suppressed: false,
             list_incomplete: false,
             op_task: None,
+            _transfer_task: None,
             pending_select: None,
             address_subscription: None,
             search_subscription: None,
@@ -1073,7 +1080,7 @@ impl ShellView {
         }
 
         // UI 侧：每 120ms 刷新一次进度卡，直到后台收工，再统一收尾。
-        self.op_task = Some(cx.spawn_in(window, async move |this, cx| {
+        self._transfer_task = Some(cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(120))
@@ -2387,18 +2394,93 @@ impl ShellView {
     }
 
     /// 打开焦点项（Enter）：目录进入，文件与回收站条目不做任何事（与双击同规则）。
-    pub(crate) fn open_selected(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.cursor.or_else(|| self.selection.single()) else {
             return;
         };
         let Some(entry) = self.visible().get(index).cloned() else {
             return;
         };
-        if !entry.is_dir() || self.in_recycle_bin() {
+        self.open_entry(&entry, window, cx);
+    }
+
+    /// 打开一个条目：目录 → 进入；文件 → 交给系统默认程序。
+    ///
+    /// 两条规则：
+    ///
+    /// - **回收站里的条目一律拒绝**：它们的 `path` 指向 `$Recycle.Bin` 内部，
+    ///   按普通路径打开要么被拒绝、要么把用户丢进系统目录。要做的是「还原」，
+    ///   那属于回收站写操作（尚未实现），因此这里明确提示而不是静默失败。
+    /// - 目录走自己的导航，不交给 shell：否则会新开一个资源管理器窗口，
+    ///   用户点了「打开」却看到两个窗口。
+    pub(crate) fn open_entry(
+        &mut self,
+        entry: &Entry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.in_recycle_bin() {
+            window.push_notification(
+                Notification::warning("回收站里的条目不能直接打开，需要先还原"),
+                cx,
+            );
             return;
         }
+
         let path = entry.path.as_ref().clone();
-        self.navigate_to(path, cx);
+        self.open_path(path, window, cx);
+    }
+
+    /// 按路径打开（预览面板只有一个路径可用，拿不到 `Entry`）。
+    pub(crate) fn open_path(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.in_recycle_bin() {
+            window.push_notification(
+                Notification::warning("回收站里的条目不能直接打开，需要先还原"),
+                cx,
+            );
+            return;
+        }
+        if path.is_dir() {
+            self.navigate_to(path, cx);
+        } else {
+            self.shell_open(path, window, cx);
+        }
+    }
+
+    /// 用系统默认程序打开一个路径（后台线程执行，避免启动慢程序时卡住窗口）。
+    pub(crate) fn shell_open(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let fs = Arc::clone(self.service.file_system());
+        let label = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+
+        self.op_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let target = path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { fs.shell_open(&target) })
+                .await;
+
+            if let Err(reason) = result {
+                let _ = this.update_in(cx, move |_view, window, cx| {
+                    window.push_notification(
+                        Notification::error(format!("无法打开「{label}」：{reason}")),
+                        cx,
+                    );
+                });
+            }
+        }));
     }
 
     /// 在当前标签内进入「此电脑」（驱动器总览）。
@@ -3101,7 +3183,7 @@ impl ShellView {
                     } else if this.search_editing {
                         this.end_search_edit(window, cx);
                     } else if !this.editing_input() {
-                        this.open_selected(cx);
+                        this.open_selected(window, cx);
                     }
                 });
             });
