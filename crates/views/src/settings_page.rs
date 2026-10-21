@@ -57,6 +57,25 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Esc", "关闭菜单 / 取消输入"),
 ];
 
+/// 文件夹接管的当前状态。
+///
+/// 与 `fm_platform::IntegrationState` 同形但**不复用**：views 不依赖平台层，
+/// 而且这里的语义更窄——只管「这两个开关是否处于打开状态」。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FolderIntegration {
+    /// 文件夹右键菜单里是否有本程序的菜单项。
+    pub context_menu: bool,
+    /// 文件夹的默认打开程序是否已指向本程序。
+    pub default_handler: bool,
+}
+
+impl FolderIntegration {
+    /// 两项都装上了（用于给出一句总览）。
+    pub fn is_fully_installed(&self) -> bool {
+        self.context_menu && self.default_handler
+    }
+}
+
 /// 设置页要展示的状态快照（由 shell 从 `Config` 与运行期状态拼装）。
 #[derive(Clone, Debug)]
 pub struct SettingsSnapshot {
@@ -71,6 +90,8 @@ pub struct SettingsSnapshot {
     pub config_path: Option<SharedString>,
     /// 版本号（由 shell 传入，避免各 crate 各写一份）。
     pub version: SharedString,
+    /// 文件夹接管状态（从注册表现读）。
+    pub folder_integration: FolderIntegration,
 }
 
 /// 「设定某个值」类回调的签名。
@@ -96,6 +117,12 @@ pub struct SettingsHandlers {
     pub set_view_mode: Setter<ViewMode>,
     /// 复制配置文件路径到剪贴板。
     pub copy_config_path: Toggle,
+    /// 安装 / 卸载「用 Pagefold 打开」右键菜单项（取反当前状态）。
+    pub toggle_folder_menu: Toggle,
+    /// 设为 / 取消文件夹的默认打开程序（取反当前状态）。
+    pub toggle_folder_default: Toggle,
+    /// 一次性撤销上面两项（恢复资源管理器为默认）。
+    pub restore_folder_integration: Toggle,
 }
 
 /// 渲染整页。
@@ -109,6 +136,7 @@ pub fn page(snapshot: &SettingsSnapshot, tokens: &Tokens, handlers: SettingsHand
         .child(page_header(tokens))
         .child(appearance_card(snapshot, tokens, &handlers))
         .child(view_card(snapshot, tokens, &handlers))
+        .child(integration_card(snapshot, tokens, &handlers))
         .child(about_card(snapshot, tokens, &handlers));
 
     // 滚动容器必须是 `Stateful<Div>`（带 `.id()`）才拿得到 `overflow_y_scroll`；
@@ -324,6 +352,79 @@ fn view_card(
                 "默认视图",
                 "修改后立即作用于当前标签，并作为新标签的初始形态",
                 view_mode,
+                true,
+                tokens,
+            ),
+        ],
+        tokens,
+    )
+}
+
+/// 「系统集成」卡片：文件夹接管的图形面板。
+///
+/// 这两项能力之前只存在于托盘菜单里——一个用户不一定会打开的地方。
+/// 而接管恰好是「装了就想让它生效、卸载前又必须能撤回」的功能：
+/// 看不见的控制面等于没有控制面，所以它必须在设置页里有一块位置。
+fn integration_card(
+    snapshot: &SettingsSnapshot,
+    tokens: &Tokens,
+    handlers: &SettingsHandlers,
+) -> AnyElement {
+    let menu = {
+        let handler = Rc::clone(&handlers.toggle_folder_menu);
+        widgets::switch(
+            "setting-folder-menu",
+            snapshot.folder_integration.context_menu,
+            tokens,
+            move |_: &ClickEvent, window, cx| handler(window, cx),
+        )
+    };
+
+    let default = {
+        let handler = Rc::clone(&handlers.toggle_folder_default);
+        widgets::switch(
+            "setting-folder-default",
+            snapshot.folder_integration.default_handler,
+            tokens,
+            move |_: &ClickEvent, window, cx| handler(window, cx),
+        )
+    };
+
+    let restore = {
+        let handler = Rc::clone(&handlers.restore_folder_integration);
+        widgets::text_button(
+            "setting-folder-restore",
+            "恢复",
+            Some(IconName::RotateCcw),
+            "删除本程序写入的注册表项，右键菜单与双击行为立刻回到系统默认",
+            true,
+            tokens,
+            move |_: &ClickEvent, window, cx| handler(window, cx),
+        )
+    };
+
+    card(
+        "系统集成",
+        "接管只写 HKCU，不需要管理员；移动或卸载本程序前，请先在这里恢复。",
+        vec![
+            setting_row(
+                "在文件夹右键菜单中显示「用 Pagefold 打开」",
+                "只在右键菜单里多一项，不改变任何默认行为",
+                menu,
+                false,
+                tokens,
+            ),
+            setting_row(
+                "设为文件夹默认打开程序",
+                "桌面双击文件夹、以及其它程序调用 ShellExecute 时都会打开本应用，不再打开资源管理器",
+                default,
+                false,
+                tokens,
+            ),
+            setting_row(
+                "恢复资源管理器为默认",
+                "一次撤销上面两项；程序被删除或移动后，也可以用命令行 --restore-folder-integration",
+                restore,
                 true,
                 tokens,
             ),
@@ -627,6 +728,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn integration_state_is_only_complete_when_both_switches_are_on() {
+        // 这两项的开关是独立的：只装右键菜单（零风险）与接管默认打开程序
+        // （会改变双击行为）必须能分开看状态，否则用户无法判断「现在到底接管了多少」。
+        let none = FolderIntegration::default();
+        assert!(!none.is_fully_installed());
+
+        let menu_only = FolderIntegration {
+            context_menu: true,
+            default_handler: false,
+        };
+        assert!(!menu_only.is_fully_installed());
+
+        let full = FolderIntegration {
+            context_menu: true,
+            default_handler: true,
+        };
+        assert!(full.is_fully_installed());
+    }
+
+    #[test]
     fn shortcut_table_covers_every_documented_group() {
         // 帮助页是用户唯一的键位来源，缺项等于「功能不存在」。
         // 这里只断言关键项存在，不锁死顺序：顺序调整不应该让测试失败。
@@ -671,6 +792,7 @@ mod tests {
             view_mode: ViewMode::Details,
             config_path: None,
             version: "0.0.0".into(),
+            folder_integration: FolderIntegration::default(),
         };
         assert!(!snapshot.dark);
 
@@ -683,6 +805,9 @@ mod tests {
             toggle_preview: Rc::new(|_, _| {}),
             set_view_mode: Rc::new(|_, _, _| {}),
             copy_config_path: Rc::new(|_, _| {}),
+            toggle_folder_menu: Rc::new(|_, _| {}),
+            toggle_folder_default: Rc::new(|_, _| {}),
+            restore_folder_integration: Rc::new(|_, _| {}),
         };
         // 只验证字段类型能被调用，真正调用需要窗口句柄。
         assert!(Rc::strong_count(&handlers.set_dark) == 1);

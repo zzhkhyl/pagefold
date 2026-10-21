@@ -375,6 +375,7 @@ file-manager/
 | 缩略图                       | 平台：`platform/src/windows/thumbnail.rs`（`IShellItemImageFactory` + `GetDIBits`）；服务：`services/src/thumbnail.rs`（单线程队列 + 白名单）；外壳：`ShellView::pump_thumbnails` / `patch_thumbnails`（`ambient_tick` 驱动） |
 | 预览面板的正文               | 服务：`services/src/preview.rs`（按内容判断文本、32KB / 200 行上限）；视图：`PreviewBody` + `preview_panel::single`；外壳：`ShellView::pump_preview_text`（后台读取，按路径防重） |
 | 递归搜索                     | 服务：`services/src/search.rs`（深度优先遍历 + 批量回传 + `CancelToken`）；外壳：`start_search` / `pump_search` / `toggle_recursive_search`，结果由 `visible()` 优先返回 |
+| 文件夹接管图形面板           | 平台：`folder_association::{state, set_context_menu, set_default_handler, restore_all}`（托盘菜单与设置页共用同一组）；视图：`settings_page::integration_card` + `FolderIntegration`；外壳：`folder_integration` 缓存 + `toggle_folder_menu` / `toggle_folder_default` / `restore_folder_integration` |
 | 应用图标的几何与配色         | `tools/icon-gen/src/design.rs`，改完重新生成（见 `assets/app-icon/README.md`） |
 
 用户数据的两个落点（都在 `%APPDATA%\pagefold\`，损坏时都只告警并回退默认）：

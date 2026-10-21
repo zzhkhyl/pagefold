@@ -720,6 +720,11 @@ impl ShellView {
             config_path: fm_services::config::Config::path()
                 .map(|path| path.display().to_string().into()),
             version: env!("CARGO_PKG_VERSION").into(),
+            // 接管状态缓存在外壳里：设置页每帧渲染，不能每帧读四次注册表。
+            folder_integration: settings_page::FolderIntegration {
+                context_menu: self.folder_integration.context_menu,
+                default_handler: self.folder_integration.default_handler,
+            },
         };
 
         let handlers = settings_page::SettingsHandlers {
@@ -822,6 +827,39 @@ impl ShellView {
                     cx,
                 );
             }),
+            toggle_folder_menu: {
+                let view = cx.entity().downgrade();
+                Rc::new(move |window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| view.toggle_folder_menu(window, cx))
+                        .is_err()
+                    {
+                        tracing::debug!("切换文件夹右键菜单时视图已销毁");
+                    }
+                })
+            },
+            toggle_folder_default: {
+                let view = cx.entity().downgrade();
+                Rc::new(move |window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| view.toggle_folder_default(window, cx))
+                        .is_err()
+                    {
+                        tracing::debug!("切换文件夹默认打开程序时视图已销毁");
+                    }
+                })
+            },
+            restore_folder_integration: {
+                let view = cx.entity().downgrade();
+                Rc::new(move |window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| view.restore_folder_integration(window, cx))
+                        .is_err()
+                    {
+                        tracing::debug!("恢复资源管理器默认时视图已销毁");
+                    }
+                })
+            },
         };
 
         settings_page::page(&snapshot, &self.tokens, handlers)

@@ -202,6 +202,11 @@ pub struct ShellView {
     search_cancel: CancelToken,
     /// 搜索任务句柄。丢了它搜索会被取消。
     search_task: Option<Task<()>>,
+    /// 文件夹接管的当前状态（右键菜单项 / 默认打开程序）。
+    ///
+    /// 缓存在这里而不是每帧读注册表：设置页每帧都会渲染，
+    /// 而状态只在「进入设置页」与「我们自己改过之后」才可能变。
+    pub(crate) folder_integration: fm_platform::IntegrationState,
     /// 标签条的横向滚动位置。
     ///
     /// 标签有最小宽度（96px），多到装不下时靠横向滚动而不是无限压缩——
@@ -387,6 +392,9 @@ impl ShellView {
             search_running: false,
             search_cancel: CancelToken::new(),
             search_task: None,
+            folder_integration: Self::exe_path()
+                .map(|exe| fm_platform::folder_integration_state(&exe))
+                .unwrap_or_default(),
             tab_scroll: ScrollHandle::new(),
             renaming: None,
             area_menu_suppressed: false,
@@ -2825,6 +2833,12 @@ impl ShellView {
     /// 已经有一个设置标签时**切过去**而不是再开一个：`Ctrl+,` 是「我要看看设置」，
     /// 不是「再开一个设置」。用户手动开多个也不是错误——他只会在关的时候发现。
     pub(crate) fn open_settings(&mut self, cx: &mut Context<Self>) {
+        // 进设置页时重读一次接管状态：用户可能刚在托盘菜单里改过，
+        // 或别的工具动过注册表。读的是注册表，不缓存跨会话的状态。
+        self.folder_integration = Self::exe_path()
+            .map(|exe| fm_platform::folder_integration_state(&exe))
+            .unwrap_or_default();
+
         let existing = self
             .tabs
             .tabs()
@@ -2843,6 +2857,106 @@ impl ShellView {
     /// 打开帮助。与设置页共用「关于与快捷键」分节。
     pub(crate) fn open_help(&mut self, cx: &mut Context<Self>) {
         self.open_settings(cx);
+    }
+
+    /// 自身可执行文件路径。
+    ///
+    /// 接管写进注册表的就是**这个路径**（`"…\pagefold.exe" "%1"`），
+    /// 因此程序被移动或改名之后必须重新装一次接管，否则双击文件夹会指向一个
+    /// 不存在的位置——这也是设置页里那句「移动或卸载前请先恢复」的由来。
+    fn exe_path() -> Option<PathBuf> {
+        std::env::current_exe().ok()
+    }
+
+    /// 重读接管状态。写操作之后必须调用，否则开关会停在用户点击前的样子。
+    fn refresh_folder_integration(&mut self) {
+        if let Some(exe) = Self::exe_path() {
+            self.folder_integration = fm_platform::folder_integration_state(&exe);
+        }
+    }
+
+    /// 切换「在文件夹右键菜单中显示『用 Pagefold 打开』」。
+    pub(crate) fn toggle_folder_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(exe) = Self::exe_path() else {
+            window.push_notification(
+                Notification::error("读不到本程序路径，无法修改注册表"),
+                cx,
+            );
+            return;
+        };
+
+        let enabled = !self.folder_integration.context_menu;
+        match fm_platform::set_context_menu(&exe, enabled) {
+            Ok(()) => {
+                self.refresh_folder_integration();
+                window.push_notification(
+                    Notification::success(if enabled {
+                        "已在文件夹右键菜单中添加「用 Pagefold 打开」"
+                    } else {
+                        "已移除文件夹右键菜单项"
+                    }),
+                    cx,
+                );
+            }
+            Err(error) => window.push_notification(
+                Notification::error(format!("修改右键菜单失败：{error}")),
+                cx,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// 切换「设为文件夹默认打开程序」。
+    pub(crate) fn toggle_folder_default(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(exe) = Self::exe_path() else {
+            window.push_notification(
+                Notification::error("读不到本程序路径，无法修改注册表"),
+                cx,
+            );
+            return;
+        };
+
+        let enabled = !self.folder_integration.default_handler;
+        match fm_platform::set_default_handler(&exe, enabled) {
+            Ok(()) => {
+                self.refresh_folder_integration();
+                window.push_notification(
+                    Notification::success(if enabled {
+                        "已设为文件夹默认打开程序（移动或卸载前请先恢复）"
+                    } else {
+                        "文件夹已交回资源管理器打开"
+                    }),
+                    cx,
+                );
+            }
+            Err(error) => window.push_notification(
+                Notification::error(format!("修改默认打开程序失败：{error}")),
+                cx,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// 一次撤销两项接管（设置页的「恢复」按钮）。
+    pub(crate) fn restore_folder_integration(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match fm_platform::restore_folder_integration() {
+            Ok(()) => {
+                self.refresh_folder_integration();
+                window.push_notification(
+                    Notification::success("已恢复资源管理器为默认"),
+                    cx,
+                );
+            }
+            Err(error) => window.push_notification(
+                Notification::error(format!("恢复失败：{error}")),
+                cx,
+            ),
+        }
+        cx.notify();
     }
 
     /// 后退。返回是否真的发生了导航。
