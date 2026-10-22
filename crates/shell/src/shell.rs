@@ -544,7 +544,10 @@ pub(crate) fn apply_component_theme(config: &Config, cx: &mut App) {
     theme.primary_active = mix(tokens.accent, tokens.fg, 0.28);
     theme.primary_foreground = tokens.surface;
     theme.accent = tokens.accent;
-    theme.accent_foreground = tokens.surface;
+    // 这里是**菜单项 / 列表行悬停时的文字色**（背景读 `tokens.accent`，见函数末尾）。
+    // 曾经写成 `tokens.surface`——浅色下近白、深色下近黑，正好与背景撞在一起，
+    // 于是鼠标一移上去文字就消失。它必须与悬停底色成对，用正常前景色。
+    theme.accent_foreground = tokens.fg;
     theme.danger = tokens.danger;
     theme.danger_foreground = tokens.surface;
     theme.popover = tokens.surface;
@@ -566,8 +569,20 @@ pub(crate) fn apply_component_theme(config: &Config, cx: &mut App) {
     // **快照**，改 `theme.*` 不会同步过去——于是悬停一直是库的默认组合：
     // 浅色下「浅灰底 + 白字」、深色下「深灰底 + 黑字」，鼠标一移上去文字就消失。
     let (hover_background, hover_foreground) = menu_hover_palette(&tokens);
+    // 背景读 `tokens.accent`，文字读 **`theme.accent_foreground`**（本函数上文已设）——
+    // 二者不是同一个来源，这也是之前只改 tokens 却毫无效果的原因。
     theme.tokens.accent = hover_background.into();
+    // 一并写上，给那些读 `tokens.accent_foreground` 的地方（输入框补全菜单）兜底。
     theme.tokens.accent_foreground = hover_foreground.into();
+
+    // 这条日志专门用来排查「悬停文字看不见」：它把组件库真正会读的两个值打出来，
+    // 而不是我们以为它读的值。
+    tracing::debug!(
+        hover_background = ?hover_background,
+        accent_foreground = ?theme.accent_foreground,
+        token_accent = ?theme.tokens.accent.background,
+        "组件库悬停配色已写入"
+    );
     theme.radius_lg = px(fm_views::metrics::RADIUS_LG);
     // 通知（toast）的落点与设计稿的 `.toasts` 对齐：左下角、左 14px、底 40px
     // （设计稿是 `left:14px;bottom:40px`，40 是为了避开 26px 高的状态栏）。

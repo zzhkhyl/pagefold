@@ -348,16 +348,32 @@
 - 而菜单项与列表行的悬停、选中读的是 `theme.tokens.accent` / `tokens.accent_foreground`；
 - **`theme.tokens` 是主题构造时按库自带配色算出的快照**，改 `theme.*` 不会同步过去。
 
-于是悬停一直是库的默认组合：浅色下「浅灰底 + 白字」、深色下「深灰底 + 黑字」——
-鼠标一移上去文字就消失。修复是把这两个字段显式写成我们的取值：
+**更难缠的一点：这一对颜色还来自两个不同的地方。**
 
 ```rust
-theme.tokens.accent = tokens.hover.into();          // 悬停底色：半透明覆盖层
-theme.tokens.accent_foreground = tokens.fg.into();  // 悬停文字：正常前景色
+// 组件库 menu_item.rs 的悬停/选中样式
+this.bg(cx.theme().tokens.accent)          // 底色：tokens 快照
+    .text_color(cx.theme().accent_foreground)  // 文字：theme 字段
 ```
 
-注意文字**不能**用 `surface`（浅色下近白、深色下近黑），那正是之前那个 bug 的形状。
-`menu_hover_palette` 把它抽成纯函数，并有一条回归测试盯着「文字必须是 `fg`」。
+而我们给 `theme.accent_foreground` 的映射是 `tokens.surface`——浅色下近白、
+深色下近黑。于是「浅灰底 + 白字」「深灰底 + 黑字」，鼠标一移上去文字就消失。
+只改 `tokens.accent_foreground` 完全无效，因为那一处根本没读它。
+
+现在两半都写成我们的取值：
+
+```rust
+theme.tokens.accent = tokens.hover.into();   // 悬停底色：半透明覆盖层
+theme.accent_foreground = tokens.fg;         // 悬停文字：正常前景色
+theme.tokens.accent_foreground = tokens.fg.into();  // 给补全菜单等兜底
+```
+
+注意文字**不能**用 `surface`，那正是这个 bug 的形状。`menu_hover_palette` 把它抽成
+纯函数，并有一条回归测试盯着「文字必须是 `fg`、且不等于 `surface`」。
+
+`apply_component_theme` 末尾还有一条 debug 日志，把**组件库真正会读的**两个值打出来
+（`tokens.accent.background` 与 `theme.accent_foreground`）——排查这类问题时要看它，
+而不是看我们以为它读的那个字段。
 
 至于禁用项，组件库的 disabled 样式是「`muted` 底 + `muted_foreground` 字」，而我们把
 这两个字段分别映射成了 `hover` 与 `muted_fg`——两个相邻的灰，叠起来同样读不清。
