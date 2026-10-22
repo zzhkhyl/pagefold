@@ -1194,8 +1194,12 @@ impl ShellView {
                 .id("transfer-card")
                 .occlude()
                 .absolute()
-                .right(px(16.0))
-                .bottom(px(40.0))
+                // 与通知统一到**底部居中**：通知由 `NotificationSettings::placement`
+                // 设为 BottomCenter，这里用「左右都贴 0 + auto 外边距」把定宽卡片推回中线。
+                .bottom(px(16.0))
+                .left_0()
+                .right_0()
+                .mx_auto()
                 .w(px(340.0))
                 .flex()
                 .flex_col()

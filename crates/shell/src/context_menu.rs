@@ -33,8 +33,11 @@ use std::rc::Rc;
 use fm_core::{Entry, EntryKind, SortKey, ViewMode};
 use fm_services::clipboard::ClipboardMode;
 use fm_services::ops::NewItem;
-use gpui::{Action, App, ClickEvent, Context, WeakEntity, Window};
+use gpui::{
+    Action, App, ClickEvent, Context, ParentElement as _, Styled as _, WeakEntity, Window, div,
+};
 use gpui_component::Icon;
+use gpui_component::{ActiveTheme as _, WindowExt as _};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit_assets::IconName;
 
@@ -404,6 +407,35 @@ fn build_menu(
     for node in nodes {
         menu = match node {
             MenuNode::Separator => menu.separator(),
+            // 禁用项改成**自绘**：组件库的 disabled 渲染会给整行铺一层
+            // `muted` 底，并把文字设成 `muted_foreground`——两个颜色在深浅两种
+            // 主题下都太接近，结果就是「灰底上写浅灰字」，几乎读不出来。
+            // 自绘之后颜色由我们定（用与别处一致的 muted_fg），并且仍然可点：
+            // 点了会说明「为什么现在不可用」，比一个死掉的行更有用。
+            MenuNode::Item(spec) if spec.disabled => {
+                let muted = shell
+                    .upgrade()
+                    .map(|view| view.read(cx).tokens.muted_fg)
+                    .unwrap_or_else(|| cx.theme().muted_foreground);
+                let label: gpui::SharedString = spec.label.clone().into();
+                let hint = format!("「{}」当前不可用", spec.label);
+
+                menu.item(
+                    PopupMenuItem::element(move |_window, _cx| {
+                        div()
+                            .w_full()
+                            .text_color(muted)
+                            .child(label.clone())
+                    })
+                    .icon(Icon::new(spec.icon))
+                    .on_click(move |_event: &ClickEvent, window, cx: &mut App| {
+                        window.push_notification(
+                            gpui_component::notification::Notification::warning(hint.clone()),
+                            cx,
+                        );
+                    }),
+                )
+            }
             MenuNode::Item(spec) => {
                 let mut item = PopupMenuItem::new(spec.label.clone())
                     .icon(Icon::new(spec.icon))

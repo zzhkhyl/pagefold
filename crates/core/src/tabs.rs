@@ -174,6 +174,21 @@ impl TabsState {
         self.open_at(self.default_location.clone())
     }
 
+    /// 新建标签并**沿用当前标签的视图模式**。
+    ///
+    /// `TabState::new` 的默认值是图标视图。用户切到详细信息视图后再开新标签，
+    /// 若直接 `open_at`，新标签会被打回图标视图——看起来就像「设置没被记住」。
+    /// 视图模式属于「用户的工作方式」而不是「某个目录的属性」，因此要沿袭。
+    ///
+    /// 放在 core 而不是外壳：这条规则只依赖 `TabsState` 自己的状态，
+    /// 不涉及窗口，因此可以直接单测。
+    pub fn open_at_like_active(&mut self, location: impl Into<Location>) -> TabId {
+        let mode = self.active_state().view_mode();
+        let id = self.open_at(location);
+        self.active_state_mut().set_view_mode(mode);
+        id
+    }
+
     /// 新建标签并直接定位到 `location`，同时选中它。
     pub fn open_at(&mut self, location: impl Into<Location>) -> TabId {
         let id = TabId(self.next_id);
@@ -307,7 +322,8 @@ impl TabsState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use crate::ViewMode;
+    use std::path::{Path, PathBuf};
 
     /// 断言当前标签停在给定真实目录上。
     ///
@@ -315,6 +331,23 @@ mod tests {
     /// 「真实目录能取出路径、虚拟位置取不出」这条不变量。
     fn assert_dir(tabs: &TabsState, expected: &str) {
         assert_eq!(tabs.active_state().directory(), Some(Path::new(expected)));
+    }
+
+    #[test]
+    fn a_new_tab_inherits_the_view_mode_of_the_current_one() {
+        // 用户切到详细信息视图后开新标签，新标签必须还是详细信息视图——
+        // 否则就是「设置没被记住」的那种观感。
+        let mut tabs = TabsState::new(Location::Directory(PathBuf::from(r"C:\Users")));
+        tabs.active_state_mut().set_view_mode(ViewMode::Details);
+
+        tabs.open_at_like_active(Location::Directory(PathBuf::from(r"C:\Windows")));
+
+        assert_eq!(tabs.active_state().view_mode(), ViewMode::Details);
+
+        // 反向也要成立：从图标视图开新标签，得到的仍是图标视图。
+        tabs.active_state_mut().set_view_mode(ViewMode::Icons);
+        tabs.open_at_like_active(Location::Directory(PathBuf::from(r"C:\Temp")));
+        assert_eq!(tabs.active_state().view_mode(), ViewMode::Icons);
     }
 
     #[test]

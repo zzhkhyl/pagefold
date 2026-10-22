@@ -542,6 +542,12 @@ pub(crate) fn apply_component_theme(config: &Config, cx: &mut App) {
     theme.list_active_border = tokens.accent_line;
     theme.list_head = tokens.panel;
     theme.radius = px(fm_views::metrics::RADIUS);
+    // 通知统一落在**底部居中**。组件默认在右上角，而复制/移动的进度卡在底部——
+    // 两个「操作反馈」分处两个对角，用户得来回看。现在它们共享底部这一条带。
+    //
+    // 放在这里而不是 bootstrap：主题切换会重建整个 theme（`Theme::change`），
+    // 只在启动时设一次的话，切一次深浅色就被打回右上角了。
+    theme.notification.placement = gpui::Anchor::BottomCenter;
     theme.radius_lg = px(fm_views::metrics::RADIUS_LG);
     // 通知（toast）的落点与设计稿的 `.toasts` 对齐：左下角、左 14px、底 40px
     // （设计稿是 `left:14px;bottom:40px`，40 是为了避开 26px 高的状态栏）。
@@ -2654,7 +2660,9 @@ impl ShellView {
     pub(crate) fn open_tab(&mut self, cx: &mut Context<Self>) {
         // 新标签落在与当前标签相同的位置（可能是目录，也可能是「此电脑」）。
         let location = self.tabs.active_state().location().clone();
-        self.tabs.open_at(location);
+        // 视图模式要沿用当前标签的：`TabState::new` 默认是图标视图，
+        // 否则用户切到详细信息视图后，每开一个新标签都会被打回图标视图。
+        self.tabs.open_at_like_active(location);
         self.reveal_active_tab();
         self.reload(cx);
     }
@@ -2676,7 +2684,8 @@ impl ShellView {
     /// 右键菜单的「在新标签页中打开」需要一个明确的落点——目录落在它自己身上，
     /// 文件落在当前目录（文件没有「自己的目录」可言）。
     pub(crate) fn open_tab_at(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.tabs.open_at(Location::Directory(path));
+        // 同上：新标签沿用**当前标签**的视图模式。
+        self.tabs.open_at_like_active(Location::Directory(path));
         self.reveal_active_tab();
         self.reload(cx);
     }
