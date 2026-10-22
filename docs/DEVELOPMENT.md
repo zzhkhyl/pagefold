@@ -367,7 +367,9 @@ file-manager/
 | 撤销栈与逆操作               | `crates/core/src/undo.rs`（记录什么）+ `crates/services/src/ops.rs` 的 `undo`（怎么返回）+ `ShellView::undo_last`（入口与提示） |
 | 永久删除                     | `crates/platform/src/windows/fs_ops.rs` 的 `delete_permanently`（含只读清属性）+ `ShellView::delete_selection_forever`（独立确认框） |
 | 批量重命名的命名规则         | `crates/core/src/naming.rs` 的 `BatchSpec` / `batch_names`（纯函数）；面板在 `layout.rs::render_batch_overlay`，状态在 `ShellView::open_batch_rename` |
-| 传输进度与取消               | 平台：`platform/src/fs.rs` 的 `CancelToken` / `TransferProgress` + `fs_ops::transfer_with`；服务：`ops::paste_with`；UI：`ShellView::paste`（线程 + 120ms 轮询）与 `layout.rs::render_transfer_card` |
+| 传输进度与取消               | 平台：`platform/src/fs.rs` 的 `CancelToken` / `TransferProgress`（含 `bytes_done` / `bytes_total`）+ `fs_ops::transfer_with`（1MB 分块、`copy_mtime`）；服务：`ops::paste_with`；UI：`ShellView::paste`（线程 + 120ms 轮询）与 `layout.rs::render_transfer_card`（进度条 + 百分比） |
+| 网络共享（UNC）              | 平台：`platform/src/windows/network.rs`（`is_network_root` / `host_of` / `shares` 走 `NetShareEnum` / `connect_interactive` 走 `WNetAddConnection2W`）；`windows/mod.rs::scan` 分流；外壳：`commit_address_edit` 接受主机根并区分网络错误文案 |
+| 热键宿主                     | `platform/src/windows/hotkey_host.rs`：钩子回调只判 `Win+E`，所有耗时动作经 `spawn_off_thread`；窗口过程里只有托盘右键菜单留在消息线程 |
 | 跨程序文件剪贴板             | `crates/platform/src/windows/clipboard.rs`（`CF_HDROP` 编解码 + `Preferred DropEffect`）；`ShellView::clip_selection` 负责写、`paste` 负责回退读、`probe_system_clipboard` 负责可用态 |
 | 拖入（外部文件拖进来）       | `crates/shell/src/shell.rs` 的 `wrap_list_area`（`on_drop` / `can_drop` / `on_drag_move` / `on_file_drop_exit`）+ `accept_drop` + `begin_transfer`；不需要改平台层 |
 | 双击 / 回车打开              | 平台：`fs_ops::shell_open`（`ShellExecuteW`，错误码经 `describe_shell_code` 翻译）；外壳：`ShellView::open_entry` / `open_path` / `shell_open` |

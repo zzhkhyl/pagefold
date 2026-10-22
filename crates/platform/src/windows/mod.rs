@@ -14,6 +14,7 @@ pub mod icon;
 pub mod ipc;
 pub mod known_folders;
 pub mod recycle_bin;
+pub mod network;
 pub mod thumbnail;
 pub mod shell_menu;
 pub mod single_instance;
@@ -24,6 +25,7 @@ use std::os::windows::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use fm_core::{Entry, EntryKind, IconId};
 
 use crate::fs::{Drive, FileSystem, OpReport};
@@ -65,7 +67,34 @@ impl FileSystem for WindowsFileSystem {
         let batch = batch.max(1);
         let mut buffer = Vec::with_capacity(batch);
 
-        for item in fs::read_dir(dir)? {
+        // `\\主机` 不是目录（`read_dir` 必然失败），要按共享列表来列。
+        // 资源管理器打开 `\\主机` 时走的也是这条网络 API。
+        if network::is_network_root(dir) {
+            let host = network::host_of(dir)
+                .with_context(|| format!("无法从「{}」里取出主机名", dir.display()))?;
+            for chunk in network::shares(&host)?.chunks(batch) {
+                if !sink(chunk.to_vec()) {
+                    return Ok(());
+                }
+            }
+            return Ok(());
+        }
+
+        // 网络共享在「还没连过、需要凭据」时 `read_dir` 会失败。
+        // 这里先让系统弹一次凭据框（资源管理器的行为），成功后再重试一次；
+        // 用户取消或连接仍失败，就把**原始错误**带回去——那是真正的原因。
+        let reader = match fs::read_dir(dir) {
+            Ok(reader) => reader,
+            Err(error) if dir.as_os_str().to_string_lossy().starts_with(r"\\") => {
+                match network::connect_interactive(dir) {
+                    Ok(()) => fs::read_dir(dir)?,
+                    Err(_) => return Err(error.into()),
+                }
+            }
+            Err(error) => return Err(error.into()),
+        };
+
+        for item in reader {
             // 单个条目失败（权限不足、路径超长、恰好在扫描瞬间被删除）不应中断整个目录：
             // 文件管理器宁可少一行，也不能整屏报错。
             let Ok(item) = item else {

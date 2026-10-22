@@ -184,25 +184,29 @@ unsafe extern "system" fn window_proc(
                 // 低 16 位是鼠标事件类型（高 16 位是图标 id，这里用不着）。
                 let event = (lparam.0 as u32) & 0xffff;
                 match event {
-                    WM_LBUTTONUP => open_or_launch(),
+                    // 托盘左键与菜单动作一律挪到后台线程（见 `spawn_off_thread`）。
+                    WM_LBUTTONUP => spawn_off_thread(open_or_launch),
+                    // 右键菜单必须留在消息线程：`TrackPopupMenu` 自带模态消息循环。
                     WM_RBUTTONUP => show_tray_menu(window),
                     _ => {}
                 }
                 LRESULT(0)
             }
             WM_HOST_ACTIVATE => {
-                open_or_launch();
+                spawn_off_thread(open_or_launch);
                 LRESULT(0)
             }
             WM_COMMAND => {
                 match wparam.0 & 0xffff {
-                    CMD_OPEN => open_or_launch(),
-                    CMD_TOGGLE_CONTEXT_MENU => toggle_context_menu(),
-                    CMD_TOGGLE_DEFAULT_HANDLER => toggle_default_handler(),
-                    CMD_RESTORE_EXPLORER => report(
-                        folder_association::restore_all(),
-                        "恢复资源管理器为默认",
-                    ),
+                    CMD_OPEN => spawn_off_thread(open_or_launch),
+                    CMD_TOGGLE_CONTEXT_MENU => spawn_off_thread(toggle_context_menu),
+                    CMD_TOGGLE_DEFAULT_HANDLER => spawn_off_thread(toggle_default_handler),
+                    CMD_RESTORE_EXPLORER => spawn_off_thread(|| {
+                        report(
+                            folder_association::restore_all(),
+                            "恢复资源管理器为默认",
+                        )
+                    }),
                     // 退出即彻底失效：钩子与图标随进程结束一起消失。
                     // 注意**不会**还原文件夹接管——那是独立的开关，
                     // 用户可能就是要退出宿主但保留文件关联。
@@ -269,6 +273,31 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 fn win_key_down() -> bool {
     let pressed = |key: i32| unsafe { (GetAsyncKeyState(key) as u16 & 0x8000) != 0 };
     pressed(i32::from(VK_LWIN.0)) || pressed(i32::from(VK_RWIN.0))
+}
+
+/// 把耗时动作挪到后台线程执行。
+///
+/// ## 为什么这不是「优化」而是必须
+///
+/// 这个线程装着**全系统**的低层键盘钩子（`WH_KEYBOARD_LL`）。钩子回调与消息循环
+/// 跑在同一个线程上，所以只要它在处理某个动作时阻塞，**所有键盘输入**都要排队——
+/// 用户看到的就是「打字卡顿、某些键好像失灵」。
+///
+/// 更糟的是系统有硬限制：回调超过 `LowLevelHooksTimeout`（默认 300ms）没返回，
+/// Windows 会**直接把钩子摘掉**，之后 `Win+E` 就静默失效了。
+///
+/// 而这里的动作恰好都是慢的：拉起进程（冷启动可达数百毫秒）、读写注册表、
+/// 弹系统提示框。因此一律丢到独立线程，消息线程只负责「收到、转发、立刻返回」。
+///
+/// 唯一不能挪的是托盘右键菜单：`TrackPopupMenu` 必须在拥有窗口的线程上调用。
+fn spawn_off_thread(action: impl FnOnce() + Send + 'static) {
+    if let Err(error) = std::thread::Builder::new()
+        .name(String::from("pagefold-hotkey-action"))
+        .spawn(action)
+    {
+        // 线程起不来只是这次动作丢失，绝不能让宿主退出——否则 `Win+E` 也没了。
+        tracing::warn!(%error, "热键宿主的后台动作线程启动失败");
+    }
 }
 
 /// 激活已运行的主窗口；没有就拉起一个新实例。

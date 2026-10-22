@@ -105,6 +105,8 @@ pub fn transfer_with(
         cancel,
         progress,
         files_done: 0,
+        bytes_done: 0,
+        bytes_total: known_bytes(sources),
         cancelled: false,
     };
 
@@ -138,29 +140,84 @@ pub fn transfer_with(
     report
 }
 
-/// 一次传输的运行态：取消标志、进度回调与已完成文件数。
+/// 一次传输的运行态：取消标志、进度回调与已完成的文件数 / 字节数。
 struct TransferRun<'a> {
     cancel: &'a CancelToken,
     progress: &'a mut dyn FnMut(TransferProgress),
     files_done: u64,
+    bytes_done: u64,
+    bytes_total: u64,
     cancelled: bool,
 }
 
 impl TransferRun<'_> {
-    /// 在每个文件真正开始复制之前调用：检查取消、累进并回调。
+    /// 在每个文件真正开始复制之前调用：检查取消、把「当前文件」报到界面上。
+    ///
+    /// **不累加文件数**：`files_done` 的语义是「已完成」，在开始写之前就 +1
+    /// 会让进度卡显示「已处理 1 个文件」而实际一个都还没写完。
     fn tick(&mut self, path: &Path) -> Result<()> {
         if self.cancel.is_cancelled() {
             self.cancelled = true;
             // 错误内容不重要：调用方看到 `cancelled` 就把它当取消处理。
             anyhow::bail!("已取消");
         }
+        self.report(path);
+        Ok(())
+    }
+
+    /// 一个文件写完了：累加已完成数并回调。
+    ///
+    /// 这里**不**再检查取消：文件已经完整落盘，把它记进「已完成」才是事实。
+    /// 取消的判定留给下一个文件的 `tick`（以及块级 `advance`），
+    /// 否则会出现「文件复制好了却被算作失败」的错账。
+    fn finish(&mut self, path: &Path) {
         self.files_done += 1;
+        self.report(path);
+    }
+
+    /// 一块数据写完：累计字节、检查取消、回调进度。
+    ///
+    /// 取消检查放在**每块之后**而不是每文件之前，这样几 GB 的单个大文件
+    /// 也能在写下一块时停下——已经写完的那部分是一个完整的前缀，
+    /// 不会留下半截的数据块。
+    fn advance(&mut self, path: &Path, bytes: u64) -> Result<()> {
+        self.bytes_done += bytes;
+        self.report(path);
+        if self.cancel.is_cancelled() {
+            self.cancelled = true;
+            anyhow::bail!("已取消");
+        }
+        Ok(())
+    }
+
+    fn report(&mut self, path: &Path) {
         (self.progress)(TransferProgress {
             files_done: self.files_done,
             current: path.to_path_buf(),
+            bytes_done: self.bytes_done,
+            bytes_total: self.bytes_total,
         });
-        Ok(())
     }
+}
+
+/// 能在开始前廉价算出的总字节数。
+///
+/// 只统计**顶层是文件**的源：目录的内容大小要遍历才知道，而那等于先把整棵树
+/// 走一遍——对一个几十万文件的目录，这会让「点击粘贴」多等好几秒，
+/// 换来的只是一个百分比。目录参与时返回 `0`（界面据此显示「未知」）。
+fn known_bytes(sources: &[PathBuf]) -> u64 {
+    let mut total = 0u64;
+    for source in sources {
+        let Ok(metadata) = fs::symlink_metadata(extended(source)) else {
+            // 元数据读不到就不计入：这个源随后会以「失败」出现在回执里。
+            continue;
+        };
+        if metadata.is_dir() {
+            return 0;
+        }
+        total = total.saturating_add(metadata.len());
+    }
+    total
 }
 
 /// 永久删除若干条目（不进回收站），逐条回执。
@@ -328,8 +385,101 @@ fn copy_tree(from: &Path, to: &Path, run: &mut TransferRun<'_>) -> Result<()> {
 
     // 在真正写文件之前检查取消并回调进度：这样「已取消」时不会多写一个文件。
     run.tick(from)?;
-    fs::copy(extended(from), extended(to)).with_context(|| format!("无法复制「{}」", from.display()))?;
+    copy_file(from, to, run)?;
+    run.finish(from);
     Ok(())
+}
+
+/// 每块复制多少字节。
+///
+/// 1MB 是「回调次数」与「单次 IO 开销」的折中：复制 5GB 会产生约 5000 次回调，
+/// 而界面每 120ms 才取一次进度，足够平滑；块再小收益就只剩回调开销了。
+const COPY_CHUNK_BYTES: usize = 1024 * 1024;
+
+/// 分块复制单个文件：边写边回报字节进度，并保留修改时间。
+///
+/// 相比 `fs::copy` 只有一处不同：能报进度、能在文件**内部**取消。
+/// 代价是取消时必须把写了一半的目标删掉——半截文件比「少复制一个」危险得多。
+fn copy_file(from: &Path, to: &Path, run: &mut TransferRun<'_>) -> Result<()> {
+    use std::io::{Read as _, Write as _};
+
+    let mut reader = fs::File::open(extended(from))
+        .with_context(|| format!("无法打开「{}」", from.display()))?;
+    let mut writer = fs::File::create(extended(to))
+        .with_context(|| format!("无法创建「{}」", to.display()))?;
+    let mut buffer = vec![0u8; COPY_CHUNK_BYTES];
+
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .with_context(|| format!("读取「{}」失败", from.display()))?;
+        if read == 0 {
+            break;
+        }
+        writer
+            .write_all(&buffer[..read])
+            .with_context(|| format!("写入「{}」失败", to.display()))?;
+
+        if let Err(error) = run.advance(from, read as u64) {
+            // 取消（或后续写失败）：这一块已经落盘，但整个文件不完整。
+            // 直接删掉目标，而不是留给用户一个看起来正常、实际截断的文件。
+            drop(writer);
+            let _ = fs::remove_file(extended(to));
+            return Err(error);
+        }
+    }
+
+    writer
+        .flush()
+        .with_context(|| format!("写入「{}」失败", to.display()))?;
+    drop(writer);
+
+    copy_mtime(from, to);
+    Ok(())
+}
+
+/// 把源文件的修改时间写到目标上。
+///
+/// `std::fs::copy` 自带这一步；改成自己分块写之后就得显式补。
+/// 少了它，复制出来的文件「修改时间」全部变成现在——按日期排序时整批跑到最前面，
+/// 用户会以为文件被改过。
+///
+/// 失败**不算错**：时间戳是尽力而为，内容已经写对了。
+fn copy_mtime(from: &Path, to: &Path) {
+    use std::os::windows::io::AsRawHandle as _;
+
+    use windows::Win32::Foundation::{FILETIME, HANDLE};
+    use windows::Win32::Storage::FileSystem::{GetFileTime, SetFileTime};
+
+    let Ok(source) = fs::File::open(extended(from)) else {
+        return;
+    };
+    let Ok(target) = fs::OpenOptions::new().write(true).open(extended(to)) else {
+        return;
+    };
+
+    unsafe {
+        let mut created = FILETIME::default();
+        let mut accessed = FILETIME::default();
+        let mut written = FILETIME::default();
+        let read = GetFileTime(
+            HANDLE(source.as_raw_handle()),
+            Some(&mut created),
+            Some(&mut accessed),
+            Some(&mut written),
+        );
+        if read.is_err() {
+            return;
+        }
+        // 只补「修改时间」：创建时间与访问时间在现代 Windows 上受策略影响，
+        // 照抄反而会覆盖系统刚写下的合理值。
+        let _ = SetFileTime(
+            HANDLE(target.as_raw_handle()),
+            None,
+            None,
+            Some(&written as *const FILETIME),
+        );
+    }
 }
 
 /// 移动。同卷用 `fs::rename`（瞬间完成、不产生副本），跨卷退化为复制 + 删源。
@@ -337,8 +487,9 @@ fn move_tree(from: &Path, to: &Path, run: &mut TransferRun<'_>) -> Result<()> {
     match fs::rename(extended(from), extended(to)) {
         Ok(()) => {
             // 同卷改名是瞬间的，但进度面板仍需前进一格，否则「移动大目录」
-            // 会停在 0 直到全部做完。
+            // 会停在 0 直到全部做完。改名即完成，因此直接记一次 finished。
             run.tick(from)?;
+            run.finish(from);
             Ok(())
         }
         Err(error) if is_cross_device(&error) => {
@@ -521,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn transfer_reports_progress_once_per_file() {
+    fn transfer_reports_finished_files_monotonically() {
         let root = scratch_dir("transfer-progress");
         let source = scratch_dir("transfer-progress-src");
         fs::write(source.join("a.txt"), b"a").unwrap();
@@ -538,8 +689,107 @@ mod tests {
 
         assert_eq!(report.done, 2);
         assert!(!report.cancelled);
-        assert_eq!(seen, vec![1, 2], "每复制完一个文件回调一次，计数递增");
+        // 字节级进度让「每个文件多次回调」成为常态，因此不能断言回调次数，
+        // 只能断言**语义**：计数单调不减、两个文件各出现过一次、最后是 2。
+        assert!(
+            seen.windows(2).all(|pair| pair[0] <= pair[1]),
+            "已完成数只能递增：{seen:?}"
+        );
+        assert!(seen.contains(&1) && seen.contains(&2), "{seen:?}");
+        assert_eq!(seen.last(), Some(&2), "最后一个文件完成后计数应为 2");
         assert!(root.join("a.txt").exists() && root.join("b.txt").exists());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&source);
+    }
+
+    #[test]
+    fn transfer_reports_bytes_inside_a_single_large_file() {
+        // 一个 2.5MB 的文件：整块 1MB × 2 + 半块，应当能看到多次字节增量。
+        // 这条测试守的是「大文件复制时进度不动」那个问题的回归。
+        let root = scratch_dir("transfer-bytes");
+        let source = scratch_dir("transfer-bytes-src");
+        let size = 5 * 1024 * 1024 / 2; // 2.5MB
+        let payload = vec![7u8; size];
+        let file = source.join("big.bin");
+        fs::write(&file, &payload).unwrap();
+
+        let mut samples: Vec<(u64, u64)> = Vec::new();
+        let report = transfer_with(
+            std::slice::from_ref(&file),
+            &root,
+            TransferMode::Copy,
+            &CancelToken::new(),
+            &mut |progress| samples.push((progress.bytes_done, progress.bytes_total)),
+        );
+
+        assert_eq!(report.done, 1);
+        assert_eq!(
+            samples.first().map(|(_, total)| *total),
+            Some(size as u64),
+            "总字节数在开始前就该算出来（单文件可以廉价得到）"
+        );
+        assert!(
+            samples.len() >= 3,
+            "2.5MB 至少要回调三次才算「有进度」，实际 {} 次",
+            samples.len()
+        );
+        assert!(
+            samples.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+            "字节数只能单调递增：{samples:?}"
+        );
+        assert_eq!(
+            samples.last().map(|(done, _)| *done),
+            Some(size as u64),
+            "最后一条必须等于文件大小"
+        );
+        assert_eq!(
+            fs::read(root.join("big.bin")).unwrap().len(),
+            size,
+            "内容必须完整"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&source);
+    }
+
+    #[test]
+    fn chunked_copy_preserves_the_modified_time() {
+        // `fs::copy` 自带这一步；分块复制之后必须自己补，否则复制出来的文件
+        // 「修改时间」全变成现在，按日期排序时整批跑到最前面。
+        //
+        // 做法：让源文件的修改时间比「现在」早 (sleep 期间)，然后比较目标文件
+        // 与源文件的时间差。补了 `copy_mtime` 时两者只差毫秒级；
+        // 没补时目标会是「现在」，差出整个 sleep 时长，断言就会失败。
+        let root = scratch_dir("transfer-mtime");
+        let source = scratch_dir("transfer-mtime-src");
+        let file = source.join("stamped.txt");
+        fs::write(&file, b"content").unwrap();
+
+        let source_time = fs::metadata(&file).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+
+        let report = transfer_with(
+            std::slice::from_ref(&file),
+            &root,
+            TransferMode::Copy,
+            &CancelToken::new(),
+            &mut |_| {},
+        );
+        assert_eq!(report.done, 1);
+
+        let copied_time = fs::metadata(root.join("stamped.txt"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let drift = copied_time
+            .duration_since(source_time)
+            .map(|gap| gap.as_millis())
+            .unwrap_or(u64::MAX as u128);
+        assert!(
+            drift < 500,
+            "修改时间应当被保留（与源相差 {drift}ms；没有 copy_mtime 时会差约 1200ms）"
+        );
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&source);
@@ -559,10 +809,11 @@ mod tests {
             &root,
             TransferMode::Copy,
             &cancel,
-            &mut |_| {
+            &mut |progress| {
                 calls += 1;
-                // 第一个文件复制完之后喊停。
-                if calls == 1 {
+                // 第一个文件**复制完**之后喊停（按已完成的文件数判断，
+                // 不能按回调次数：带有字节进度的实现每个文件会回调多次）。
+                if progress.files_done == 1 {
                     cancel.cancel();
                 }
             },

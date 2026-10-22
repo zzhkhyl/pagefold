@@ -71,6 +71,21 @@ pub fn describe_error(error: &anyhow::Error) -> String {
 /// 该文件是否被标记为隐藏或系统文件。
 ///
 /// 递归搜索要用它做过滤：那里拿到的只是 `Metadata`，没有 `Entry`，
+/// `\\主机` 这种「只有服务器名、没有共享名」的路径。
+///
+/// 它不是目录（`is_dir` 恒为 false）：列它的共享要走 `NetShareEnum`。
+/// 地址栏与导航都用这个判定，否则会给出「路径不存在」的误导提示。
+#[cfg(target_os = "windows")]
+pub fn is_network_root(path: &std::path::Path) -> bool {
+    windows::network::is_network_root(path)
+}
+
+/// 非 Windows 平台没有 UNC 路径。
+#[cfg(not(target_os = "windows"))]
+pub fn is_network_root(_path: &std::path::Path) -> bool {
+    false
+}
+
 /// 而「隐藏」这件事由平台层判断（Windows 看属性位，别的平台可能没有）。
 #[cfg(target_os = "windows")]
 pub fn is_hidden(metadata: &std::fs::Metadata) -> bool {

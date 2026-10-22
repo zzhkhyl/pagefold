@@ -1122,7 +1122,7 @@ impl ShellView {
     /// 这里给出的是确定的信息：已复制多少文件、当前是哪一个。
     pub(crate) fn render_transfer_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let transfer = self.transfer.as_ref()?;
-        let (label, files_done, total, current, cancelling) = {
+        let (label, files_done, total, current, cancelling, bytes_done, bytes_total) = {
             let state = transfer.lock().ok()?;
             (
                 state.label.clone(),
@@ -1130,6 +1130,8 @@ impl ShellView {
                 state.total,
                 state.current.clone(),
                 state.cancelling,
+                state.bytes_done,
+                state.bytes_total,
             )
         };
 
@@ -1139,12 +1141,35 @@ impl ShellView {
             crate::shell::truncate(&current.display().to_string(), 46)
         };
 
+        // 字节进度：总大小已知时给百分比，未知时只给「已复制多少」。
+        //
+        // 为什么会有「未知」：源里含目录时，总大小要遍历整棵树才知道，
+        // 而多遍历一遍等于第二次 IO。此时宁可少给一个百分比，
+        // 也不要给一个随发现不断跳动的假数字。
+        let fraction = if bytes_total > 0 {
+            (bytes_done as f32 / bytes_total as f32).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let byte_text = if bytes_total > 0 {
+            format!(
+                "{}% · {} / {}",
+                (fraction * 100.0).floor() as u32,
+                fm_core::format_size(bytes_done),
+                fm_core::format_size(bytes_total)
+            )
+        } else if bytes_done > 0 {
+            format!("已复制 {}", fm_core::format_size(bytes_done))
+        } else {
+            String::from("准备中…")
+        };
+
         let cancel = if cancelling {
             widgets::text_button(
                 "transfer-cancel",
                 "正在取消…",
                 None,
-                "当前文件写完后停止",
+                "下一块写完就停下（块级取消）",
                 false,
                 &self.tokens,
                 |_: &gpui::ClickEvent, _: &mut Window, _: &mut App| {},
@@ -1154,7 +1179,7 @@ impl ShellView {
                 "transfer-cancel",
                 "取消",
                 None,
-                "停止复制（当前文件会写完，不会留下半截文件）",
+                "停止复制（写到一半的文件会被删掉，不会留下半截）",
                 true,
                 &self.tokens,
                 cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
@@ -1200,11 +1225,36 @@ impl ShellView {
                         )
                         .child(cancel),
                 )
+                // 进度条：只在总大小已知时出现。未知时留一条空槽会把
+                // 「不知道」画成「0%」，比没有进度条更误导。
+                .when(bytes_total > 0, |element| {
+                    element.child(
+                        div()
+                            .w_full()
+                            .h(px(4.0))
+                            .rounded(px(2.0))
+                            .bg(tokens.border)
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(gpui::relative(fraction))
+                                    .rounded(px(2.0))
+                                    .bg(tokens.accent),
+                            ),
+                    )
+                })
                 .child(
                     div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
                         .text_size(px(metrics::FONT_XS))
                         .text_color(tokens.muted_fg)
-                        .child(format!("已处理 {files_done} 个文件 · 共 {total} 项")),
+                        .child(format!("已处理 {files_done} 个文件 · 共 {total} 项"))
+                        .child(div().child("·"))
+                        .child(byte_text),
                 )
                 .child(
                     div()
@@ -1235,10 +1285,9 @@ impl ShellView {
 
 /// 构造「双击打开」处理器，两个视图共用。
 ///
-/// 只有目录会被导航进入。文件的双击**明确不做任何事**：
-/// 用默认程序打开需要 `ShellExecute`（属 `fm-platform` 的后续工作），
-/// 在那之前绝不能把文件也交给 `navigate_to` —— 那会去扫描一个文件路径，
-/// 用户看到的是「路径不存在」这种莫名其妙的报错。
+/// 双击的语义是「打开这一项」，与类型无关：目录进入、文件交给系统默认程序
+/// （`ShellView::open_entry`）。文件**绝不能**交给 `navigate_to`——
+/// 那会去扫描一个文件路径，用户看到的是「路径不存在」这种莫名其妙的报错。
 pub(crate) fn open_handler(cx: &Context<ShellView>) -> fm_views::OpenHandler {
     let view = cx.entity().downgrade();
     Rc::new(move |entry: Entry, window: &mut Window, cx: &mut App| {

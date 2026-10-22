@@ -631,6 +631,10 @@ pub(crate) struct Transfer {
     pub(crate) total: usize,
     /// 已完成的文件数。
     pub(crate) files_done: u64,
+    /// 已复制的字节数（整个操作累计）。
+    pub(crate) bytes_done: u64,
+    /// 要复制的总字节数；`0` 表示未知（源里有目录）。
+    pub(crate) bytes_total: u64,
     /// 正在处理的路径。
     pub(crate) current: PathBuf,
     /// 取消标志：UI 点「取消」后，后台在下一个文件边界停下。
@@ -1100,6 +1104,8 @@ impl ShellView {
             label: format!("{verb} {count} 项 → {}", dest_dir.display()),
             total: count,
             files_done: 0,
+            bytes_done: 0,
+            bytes_total: 0,
             current: PathBuf::new(),
             cancel: CancelToken::new(),
             cancelling: false,
@@ -1124,6 +1130,8 @@ impl ShellView {
                 let mut progress = |step: TransferProgress| {
                     if let Ok(mut state) = io_transfer.lock() {
                         state.files_done = step.files_done;
+                        state.bytes_done = step.bytes_done;
+                        state.bytes_total = step.bytes_total;
                         state.current = step.current;
                     }
                 };
@@ -3598,8 +3606,21 @@ impl ShellView {
         }
 
         let path = PathBuf::from(&text);
-        if path.is_dir() {
+        // `\\主机` 不是目录，但它是合法目标（列出共享）。
+        // 不做这个例外，「\\10.x.x.x」就只会得到一句误导的「路径不存在」。
+        if path.is_dir() || fm_platform::is_network_root(&path) {
             self.navigate_to(path, cx);
+        } else if text.starts_with(r"\\") {
+            // 网络路径失败的成因与本地不同，提示要跟着不同：
+            // 「路径不存在」会让用户去查名字，而真正的原因往往是凭据。
+            self.error = Some(
+                format!(
+                    "无法访问网络路径：{}（共享不存在、主机不可达，或需要先在资源管理器里输入凭据）",
+                    truncate(&text, 60)
+                )
+                .into(),
+            );
+            cx.notify();
         } else {
             // 回显时截断，避免超长输入把内容区提示撑破。
             self.error = Some(format!("路径不存在：{}", truncate(&text, 80)).into());

@@ -34,6 +34,10 @@ windows = { version = "0.62", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
     "Win32_System_Threading",
+    # NetShareEnum（列 \\主机 的共享）与 NetApiBufferFree。
+    "Win32_NetworkManagement_NetManagement",
+    # WNetAddConnection2W：需要凭据的共享可以弹系统凭据框。
+    "Win32_NetworkManagement_WNet",
     "Win32_System_Time",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
