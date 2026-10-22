@@ -1,7 +1,7 @@
 name: Release
 
 # 触发方式：
-#   1) 打 tag 并推送（`git tag v0.5.2 && git push origin v0.5.2`）→ 编译 + 发布 Release；
+#   1) 打 tag 并推送（`git tag v0.5.3 && git push origin v0.5.3`）→ 编译 + 发布 Release；
 #   2) 手动 Run：填了 publish_tag 就**重新生成该 tag 的说明与资产**（用于修正已发布的
 #      Release），留空则只编译并上传 artifact（试跑用）。
 on:
@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       publish_tag:
-        description: "要重新发布的 tag（例如 v0.5.2）；留空则只编译、不发布"
+        description: "要重新发布的 tag（例如 v0.5.3）；留空则只编译、不发布"
         required: false
         default: ""
 
