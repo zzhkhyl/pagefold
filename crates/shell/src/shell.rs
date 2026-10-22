@@ -511,6 +511,18 @@ pub(crate) fn build_tokens(config: &Config, cx: &App) -> Tokens {
 /// 之所以需要这一步：地址栏与搜索框用的是组件库的 `Input`，它的描边、底色、圆角
 /// 都读 `Theme`。不同步的话，这一个控件会与周围的「设计稿配色」明显割裂。
 /// 只同步会影响观感的字段，不做全量覆盖——组件库还有通知层等自用色。
+/// 组件库菜单项 / 列表行在**悬停与选中**时该用的底色与文字色。
+///
+/// 单独抽出来是为了能单测：这对颜色曾经一直是库的默认值
+/// （`theme.tokens` 是主题构造时的快照，改 `theme.accent` 不会同步过去），
+/// 表现为「鼠标一移上去文字就消失」。
+///
+/// 两半各司其职：底色用 `hover`（半透明覆盖层，压在面板底上就是浅浅一层），
+/// 文字必须用**正常前景色**——用 `surface` 会在浅色下变白、深色下变黑。
+fn menu_hover_palette(tokens: &fm_views::Tokens) -> (gpui::Hsla, gpui::Hsla) {
+    (tokens.hover, tokens.fg)
+}
+
 pub(crate) fn apply_component_theme(config: &Config, cx: &mut App) {
     let tokens = Tokens::new(
         config.dark,
@@ -548,6 +560,14 @@ pub(crate) fn apply_component_theme(config: &Config, cx: &mut App) {
     // 放在这里而不是 bootstrap：主题切换会重建整个 theme（`Theme::change`），
     // 只在启动时设一次的话，切一次深浅色就被打回右上角了。
     theme.notification.placement = gpui::Anchor::BottomCenter;
+
+    // 菜单项与列表行的**悬停配色**读的是 `theme.tokens` 里的这两个字段，
+    // 而不是上面那些 `theme.accent`。`tokens` 是主题构造时按库自带配色算出的
+    // **快照**，改 `theme.*` 不会同步过去——于是悬停一直是库的默认组合：
+    // 浅色下「浅灰底 + 白字」、深色下「深灰底 + 黑字」，鼠标一移上去文字就消失。
+    let (hover_background, hover_foreground) = menu_hover_palette(&tokens);
+    theme.tokens.accent = hover_background.into();
+    theme.tokens.accent_foreground = hover_foreground.into();
     theme.radius_lg = px(fm_views::metrics::RADIUS_LG);
     // 通知（toast）的落点与设计稿的 `.toasts` 对齐：左下角、左 14px、底 40px
     // （设计稿是 `left:14px;bottom:40px`，40 是为了避开 26px 高的状态栏）。
@@ -4059,8 +4079,33 @@ impl LoadSource {
 
 #[cfg(test)]
 mod tests {
-    use super::{mix, truncate};
+    use super::{menu_hover_palette, mix, truncate};
+    use fm_core::{Density, IconZoom};
     use gpui::hsla;
+
+    #[test]
+    fn menu_hover_uses_the_theme_text_color_not_the_background_color() {
+        // 回归测试：悬停文字曾经被设成 `surface`（浅色主题下是近白、
+        // 深色主题下是近黑），于是鼠标一移上去字就消失。
+        // 正确取值是「hover 覆盖层 + 正常前景色」。
+        for dark in [false, true] {
+            let tokens = fm_views::Tokens::new(
+                dark,
+                Density::Normal,
+                IconZoom::Medium,
+                ".SystemUIFont",
+                "Consolas",
+            );
+            let (background, foreground) = menu_hover_palette(&tokens);
+
+            assert_eq!(background, tokens.hover, "悬停底色应当是 hover 覆盖层");
+            assert_eq!(foreground, tokens.fg, "悬停文字必须是正常前景色");
+            assert_ne!(
+                foreground, tokens.surface,
+                "文字色不能用 surface：那正是浅色下变白、深色下变黑的成因"
+            );
+        }
+    }
 
     #[test]
     fn short_text_is_untouched() {

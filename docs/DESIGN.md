@@ -340,16 +340,33 @@
 
 ## 三处界面细节：禁用项可读、视图模式沿袭、提示统一在底部
 
-### 一、禁用菜单项不要用组件库的 disabled 渲染
+### 一、菜单项悬停 / 禁用看不清：`theme.tokens` 是快照
 
-组件库的禁用样式是「铺一层 `muted` 底 + 文字设成 `muted_foreground`」。而我们在
-`apply_component_theme` 里把 `muted` 映射成 `hover`（很浅/很深的灰）、把
-`muted_foreground` 映射成 `muted_fg`（中灰）——两个颜色本来就相邻，叠在一起就是
-「灰底上写浅灰字」，深浅两种主题下都读不出来。
+真正的成因不是「颜色调浅了」，而是**组件库有两套颜色，我们只同步了一套**：
 
-因此禁用项改用 `PopupMenuItem::element` 自绘：颜色由我们定（`tokens.muted_fg`，
-与界面其它次级文字一致），底就是正常的菜单底。并且**保留可点**——点了弹一句
-「『粘贴』当前不可用」，比一个完全没反应的行更有用。
+- `apply_component_theme` 改的是 `theme.accent` / `theme.accent_foreground` 这些字段；
+- 而菜单项与列表行的悬停、选中读的是 `theme.tokens.accent` / `tokens.accent_foreground`；
+- **`theme.tokens` 是主题构造时按库自带配色算出的快照**，改 `theme.*` 不会同步过去。
+
+于是悬停一直是库的默认组合：浅色下「浅灰底 + 白字」、深色下「深灰底 + 黑字」——
+鼠标一移上去文字就消失。修复是把这两个字段显式写成我们的取值：
+
+```rust
+theme.tokens.accent = tokens.hover.into();          // 悬停底色：半透明覆盖层
+theme.tokens.accent_foreground = tokens.fg.into();  // 悬停文字：正常前景色
+```
+
+注意文字**不能**用 `surface`（浅色下近白、深色下近黑），那正是之前那个 bug 的形状。
+`menu_hover_palette` 把它抽成纯函数，并有一条回归测试盯着「文字必须是 `fg`」。
+
+至于禁用项，组件库的 disabled 样式是「`muted` 底 + `muted_foreground` 字」，而我们把
+这两个字段分别映射成了 `hover` 与 `muted_fg`——两个相邻的灰，叠起来同样读不清。
+因此禁用项改用 `PopupMenuItem::element` 自绘（文字取 `tokens.muted_fg`，底就是正常菜单底），
+并**保留可点**：点了弹一句「『粘贴』当前不可用」，比一个完全没反应的行更有用。
+
+另有一条配色守卫：`tokens` 的测试用 WCAG 公式算「悬停底色 × 前景色」与
+「面板底 × 次级文字」的对比度，深浅两套都要求 ≥ 4.5:1。半透明色先合成到面板底上再算——
+直接拿它的 RGB 会得出「对比度 1:1」这种假结果。
 
 ### 二、新标签要沿袭视图模式
 

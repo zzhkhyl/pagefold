@@ -398,6 +398,74 @@ mod tests {
         assert!(light.fg.l < dark.fg.l);
     }
 
+    /// 把 `top` 按自身 alpha 叠到 `bottom` 上，得到实际看到的 RGB。
+    ///
+    /// 必需的一步：`hover` 是「fg + 6% alpha」的**半透明覆盖层**，
+    /// 直接拿它的 RGB 去算亮度会得到与 fg 相同的结果（对比度 1:1），
+    /// 那是算法错，不是配色错。
+    fn over(top: Hsla, bottom: Hsla) -> (f32, f32, f32) {
+        let (top, bottom) = (top.to_rgb(), bottom.to_rgb());
+        let alpha = top.a.clamp(0.0, 1.0);
+        (
+            top.r * alpha + bottom.r * (1.0 - alpha),
+            top.g * alpha + bottom.g * (1.0 - alpha),
+            top.b * alpha + bottom.b * (1.0 - alpha),
+        )
+    }
+
+    /// WCAG 相对亮度（sRGB → 线性 → 加权）。
+    fn luminance(rgb: (f32, f32, f32)) -> f32 {
+        let channel = |value: f32| {
+            if value <= 0.039_28 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(rgb.0) + 0.7152 * channel(rgb.1) + 0.0722 * channel(rgb.2)
+    }
+
+    /// 对比度：1.0 表示完全看不见，4.5 是 WCAG AA 对小字的门槛。
+    fn contrast_ratio(a: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
+        let (a, b) = (luminance(a), luminance(b));
+        let (light, dark) = if a > b { (a, b) } else { (b, a) };
+        (light + 0.05) / (dark + 0.05)
+    }
+
+    #[test]
+    fn hover_and_secondary_text_stay_readable_in_both_themes() {
+        // 这条测试守的是「鼠标一移上去文字就消失」那类回归：
+        // 菜单项 / 列表行悬停时是「hover 叠在面板底上 + fg 字」，
+        // 禁用项与说明文字是「面板底 + muted_fg」。两组都必须达到 AA 门槛。
+        for dark in [false, true] {
+            let tokens = Tokens::new(
+                dark,
+                Density::Normal,
+                IconZoom::Medium,
+                ".SystemUIFont",
+                "Consolas",
+            );
+            let name = if dark { "深色" } else { "浅色" };
+
+            // 悬停底色是半透明的，必须合成到面板底上再看。
+            let hover_bg = over(tokens.hover, tokens.surface);
+            let hover_text = over(tokens.fg, tokens.surface);
+            let hover = contrast_ratio(hover_bg, hover_text);
+            assert!(
+                hover >= 4.5,
+                "{name}主题：悬停底色上的文字对比度只有 {hover:.2}:1（需要 ≥ 4.5）"
+            );
+
+            let surface = over(tokens.surface, tokens.surface);
+            let muted_text = over(tokens.muted_fg, tokens.surface);
+            let muted = contrast_ratio(surface, muted_text);
+            assert!(
+                muted >= 4.5,
+                "{name}主题：面板底上的次级文字对比度只有 {muted:.2}:1（需要 ≥ 4.5）"
+            );
+        }
+    }
+
     #[test]
     fn density_and_zoom_are_applied_from_the_enum() {
         let tokens = Tokens::new(
