@@ -3,17 +3,21 @@
 //! 形态照搬设计稿的 `.preview`：306px 宽、panel 底色、左侧 1px 分隔线，
 //! 三段结构 = 标题栏 / 可滚动正文 / 底部动作。
 //!
-//! 数据来源限定为「已经加载到内存的条目信息」：缩略图与文本预览需要读文件内容
-//! （属平台层的后续工作），因此这里只呈现名称、类型、大小、修改时间与位置，
-//! 不额外发起任何 IO——预览不应该成为一个会让界面卡住的入口。
+//! 元数据来自「已经加载到内存的条目信息」，不额外发起 IO；
+//! 文本正文与缩略图则由 shell 在后台读好、按句柄或实体交给这里——
+//! 预览不应该成为一个会让界面卡住的入口。
+//!
+//! 正文里唯一「活」的控件是那个只读输入框：它让用户可以框选并复制文件内容。
+//! 见 [`PreviewBody::Text`] 的说明。
 
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement, ParentElement as _,
+    AnyElement, App, ClickEvent, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
+use gpui_component::input::{Textarea, TextareaState};
 use gpui_component::{Icon, Sizable as _};
 use gpui_kit_assets::IconName;
 
@@ -35,8 +39,20 @@ pub enum PreviewBody {
     #[default]
     None,
     /// 文本文件的开头（已截断；shell 负责读取与判断）。
-    Text(SharedString),
+    ///
+    /// 装的是**输入框实体**而不是一段字符串：正文要能被框选、能被复制，
+    /// 而 GPUI 的普通文本没有选区。这里用一个只读的多行输入框承载，
+    /// 选中与 `Ctrl+C` 都沿用输入框自身的能力（见 [`single`]）。
+    /// 实体由 shell 持有，视图每帧只借用。
+    Text(Entity<TextareaState>),
 }
+
+/// 正文框的高度。
+///
+/// 固定而不是按行数撑开：面板宽度只有 306px，长行会自动折行，
+/// 按「行数 × 行高」算出来的高度必然偏小、把最后几行切掉。
+/// 固定高度后由输入框自己滚动——嵌套滚动在这种短文字上并不难受。
+const PREVIEW_TEXT_HEIGHT: f32 = 220.0;
 
 /// 选中项的摘要信息。字段全部由 shell 预先算好（时区换算、类型文案都在那里完成）。
 #[derive(Clone, Debug)]
@@ -278,7 +294,13 @@ fn single(
 
     // 文本正文：等宽字体 + 弱化色，与「元信息」区分开——
     // 用户一眼要能看出下面是文件的**内容**，而不是又一段属性。
-    if let PreviewBody::Text(text) = &summary.body {
+    //
+    // 用**只读的多行输入框**渲染：普通文本在 GPUI 里没有选区，
+    // 而 `readonly` 的输入框仍可聚焦、框选与复制（只是拒绝改动）。
+    // 代价是它会夺走焦点——列表快捷键挂在内容区上，此时不生效——
+    // 但反过来想，这正是用户想要的：此时 Ctrl+C 复制的是**选中的文字**，
+    // 而不是文件。点回列表即恢复。
+    if let PreviewBody::Text(state) = &summary.body {
         body = body.child(
             div()
                 .flex_none()
@@ -292,7 +314,15 @@ fn single(
                 .font_family(tokens.mono_font.clone())
                 .text_size(px(metrics::FONT_XS))
                 .text_color(tokens.muted_fg)
-                .child(text.clone()),
+                .child(
+                    Textarea::new(state)
+                        .readonly(true)
+                        // 去掉输入框自己的底色与描边：外层的板子已经画过了，
+                        // 再套一层会变成「框里的框」。
+                        .appearance(false)
+                        .bordered(false)
+                        .h(px(PREVIEW_TEXT_HEIGHT)),
+                ),
         );
     }
 

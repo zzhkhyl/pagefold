@@ -35,7 +35,7 @@ use gpui::{
 };
 use gpui_component::button::ButtonVariant;
 use gpui_component::dialog::DialogButtonProps;
-use gpui_component::input::{InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState, TextareaState};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme as _, Edges, Theme, ThemeMode, WindowExt as _};
 
@@ -184,6 +184,12 @@ pub struct ShellView {
     preview_text: Option<(PathBuf, Option<SharedString>)>,
     /// 正在读取预览文本的任务。丢了这个句柄，读取会被取消。
     preview_task: Option<Task<()>>,
+    /// 预览正文的只读输入框实体。
+    ///
+    /// 与 `preview_text` 一一对应，但单独持有：正文要能被框选复制，
+    /// 而 GPUI 的普通文本没有选区，只能交给输入框。实体必须由外壳持有——
+    /// 视图每帧重建，在渲染函数里 `cx.new` 会让每帧都得到一个全新的输入框。
+    preview_text_input: Option<Entity<TextareaState>>,
     /// 是否在当前目录**及其子文件夹**中搜索。
     ///
     /// 默认关闭：递归搜索会遍历整棵树，用户只是想在当前目录里筛一下时
@@ -386,6 +392,7 @@ impl ShellView {
             thumb_ids: std::collections::HashMap::new(),
             preview_text: None,
             preview_task: None,
+            preview_text_input: None,
             search_recursive: false,
             search_results: None,
             search_shared: Arc::new(Mutex::new(SearchState::default())),
@@ -2104,6 +2111,35 @@ impl ShellView {
         }
     }
 
+    /// 把预览正文同步进只读输入框。
+    ///
+    /// 只能在**有 `window`** 的地方调用（输入框的 `set_value` 需要它），
+    /// 因此挂在 `render` 开头，而不是 `ambient_tick`——后者只有 `Context`。
+    ///
+    /// 两条要点：
+    /// - 没有正文时把实体一起丢掉：否则下次选中别的文件，面板会先闪一下上一条的内容；
+    /// - **只在内容变化时写入**：`set_value` 会重置选区，每帧无条件写一次
+    ///   会把用户刚框选的文字清空。
+    fn sync_preview_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = match &self.preview_text {
+            Some((_, Some(text))) => Some(text.clone()),
+            _ => None,
+        };
+
+        let Some(text) = text else {
+            self.preview_text_input = None;
+            return;
+        };
+
+        let state = self
+            .preview_text_input
+            .get_or_insert_with(|| cx.new(|cx| TextareaState::new(window, cx)));
+
+        if state.read(cx).value() != text {
+            state.update(cx, |state, cx| state.set_value(text, window, cx));
+        }
+    }
+
     /// 当前单选中的**文件**（目录不读内容）。
     fn single_selected_file(&self) -> Option<PathBuf> {
         let index = self.selection.single()?;
@@ -2557,9 +2593,9 @@ impl ShellView {
                     icon_id: entry.icon,
                     // 只在这一条**就是**上次读过的那个路径时给出正文：
                     // 用户切走了但读取还没回来时，面板不该显示上一条的内容。
-                    body: match &self.preview_text {
-                        Some((path, Some(text))) if path == entry.path.as_ref() => {
-                            PreviewBody::Text(text.clone())
+                    body: match (&self.preview_text, &self.preview_text_input) {
+                        (Some((path, Some(_))), Some(state)) if path == entry.path.as_ref() => {
+                            PreviewBody::Text(state.clone())
                         }
                         _ => PreviewBody::None,
                     },
@@ -3874,6 +3910,11 @@ impl Render for ShellView {
         if window.focused(cx).is_none() {
             window.focus(&self.shell_focus, cx);
         }
+
+        // 预览正文的输入框实体必须在这里同步：它需要一个 `&mut Window`，
+        // 而 `ambient_tick` 里的回调只有 `Context`。放在渲染之前，
+        // 面板这一帧看到的就已经是最新内容。
+        self.sync_preview_input(window, cx);
 
         let viewport = Viewport::for_width(f32::from(window.viewport_size().width));
         // 缓存网格列数：`scroll_into_view` 在没有 window 的地方（扫描收尾的
