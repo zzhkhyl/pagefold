@@ -3690,7 +3690,17 @@ impl ShellView {
             .directory()
             .map(|dir| dir.display().to_string())
             .unwrap_or_default();
-        let state = cx.new(|cx| InputState::new(window, cx).default_value(initial));
+        // 光标位置与选中态：**不能用 `default_value`**——它把光标停在 0，
+        // 于是用户看到的是「从开头开始编辑」，而且退格键在位置 0 删不掉任何东西
+        // （那就是「退格不生效」的直接原因）。
+        //
+        // `set_value` 对单行输入会把光标放到**末尾**；再整体选中一次，
+        // 与资源管理器一致：点进地址栏就是全选，直接打字即替换整条路径。
+        let state = cx.new(|cx| InputState::new(window, cx));
+        state.update(cx, |state, cx| {
+            state.set_value(initial, window, cx);
+            state.select_all(window, cx);
+        });
 
         // 回车提交、失焦取消：设计稿的地址栏没有「跳转」按钮，这两个入口必须自己接。
         self.address_subscription = Some(cx.subscribe_in(
