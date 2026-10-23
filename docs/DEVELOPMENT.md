@@ -129,7 +129,7 @@ target\innosetup-6.7.3.exe /PORTABLE=1 /VERYSILENT /SUPPRESSMSGBOXES /NORESTART 
 `.github/workflows/release.yml` 负责把上面两条命令搬到 GitHub Runner 上：
 
 ```bash
-git tag v0.6.0 && git push origin v0.6.0
+git tag v0.6.1 && git push origin v0.6.1
 ```
 
 推送 tag 后自动执行：`cargo build --release --locked` → `cargo test --workspace --release --locked`
@@ -152,12 +152,12 @@ git tag v0.6.0 && git push origin v0.6.0
 > 手动 Run 且未填 `publish_tag` 时，版本号是 `0.0.0-dev.<run_number>`，只用于给 artifact 起名；
 > 此时的发布说明取最近 20 个提交，仅用于在 artifact 里预览格式。
 
-发版清单（以 0.6.0 为例）：
+发版清单（以 0.6.1 为例）：
 
 ```bash
 # 1. 对齐版本：下面三处必须是同一个版本
-#    - Cargo.toml            → workspace.package.version = "0.6.0"
-#    - installer/files.iss   → AppVersion "0.6.0" / AppVersionQuad "0.6.0.0"
+#    - Cargo.toml            → workspace.package.version = "0.6.1"
+#    - installer/files.iss   → AppVersion "0.6.1" / AppVersionQuad "0.6.1.0"
 #    （工作流只提醒不一致，不会替你改；README 里的「当前版本」也顺手改一下）
 
 # 2. 本地预检：全部通过再打 tag，别让失败发生在 CI 上
@@ -167,18 +167,18 @@ cargo build --release -p fm-app            # 本机可运行的 exe
 
 # 3. 本地打一次安装包（可选但值得）：验证 files.iss 与资源真的能编译
 MSYS_NO_PATHCONV=1 target/innosetup/ISCC.exe \
-  /DAppVersion=0.6.0 /DAppVersionQuad=0.6.0.0 installer/files.iss
-# 产物：dist/Pagefold-0.6.0-x64-setup.exe
+  /DAppVersion=0.6.1 /DAppVersionQuad=0.6.1.0 installer/files.iss
+# 产物：dist/Pagefold-0.6.1-x64-setup.exe
 # （MSYS_NO_PATHCONV=1 必须加：否则 MSYS 会把 /DAppVersion 当成路径改写）
 
 # 4. 提交、打 tag、推送
-git commit -am "chore(release): v0.6.0"
-git tag v0.6.0 && git push origin v0.6.0
+git commit -am "chore(release): v0.6.1"
+git tag v0.6.1 && git push origin v0.6.1
 
 # 5. 发布后核对三件事
-#    - Release 里有 Pagefold-0.6.0-x64-setup.exe 与 SHA256SUMS.txt
+#    - Release 里有 Pagefold-0.6.1-x64-setup.exe 与 SHA256SUMS.txt
 #    - 发布说明的分组与条目完整（不是「Full Changelog」一句）
-#    - 下载安装后，设置页底部显示的版本号是 0.6.0（取自 CARGO_PKG_VERSION）
+#    - 下载安装后，设置页底部显示的版本号是 0.6.1（取自 CARGO_PKG_VERSION）
 ```
 
 安装包的名字与版本列**永远取自 tag**，因此即使漏改上面三处，发布出去的包也是对的；
@@ -186,7 +186,7 @@ git tag v0.6.0 && git push origin v0.6.0
 界面版本号与发布产物对不上。
 
 > 若发布后才发现说明或资产有问题：**不要删 tag 重打**（已下载的用户会指向不存在的版本）。
-> 在 Actions 页面手动 Run 并填 `publish_tag=v0.6.0`，工作流会 `gh release edit` 更新说明、
+> 在 Actions 页面手动 Run 并填 `publish_tag=v0.6.1`，工作流会 `gh release edit` 更新说明、
 > `upload --clobber` 覆盖资产。
 
 安装包的行为约定：
