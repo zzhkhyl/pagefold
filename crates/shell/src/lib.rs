@@ -16,6 +16,8 @@ pub mod actions;
 pub mod context_menu;
 pub mod layout;
 pub mod shell;
+pub mod shortcut_handlers;
+pub mod shortcuts;
 pub mod sidebar;
 pub mod status_bar;
 pub mod tab_strip;

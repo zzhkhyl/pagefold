@@ -11,6 +11,7 @@ pub mod folder_association;
 pub mod fs_ops;
 pub mod hotkey_host;
 pub mod icon;
+pub mod hotkey;
 pub mod ipc;
 pub mod known_folders;
 pub mod recycle_bin;

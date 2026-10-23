@@ -725,6 +725,40 @@ impl ShellView {
                 context_menu: self.folder_integration.context_menu,
                 default_handler: self.folder_integration.default_handler,
             },
+            shortcuts: {
+                // 合并默认值 + 用户覆盖，并顺手算一次冲突。
+                // 这些都在视图之外算好：视图只画，不做判断。
+                let items = fm_core::resolve(&self.config.shortcuts);
+                let conflicts = fm_core::conflicts(&items);
+
+                // 全局热键的问题只做**纯规则**判断（语法、Win 组合、与内部命令撞车）。
+                //
+                // 刻意**不在这里调用 `probe_hotkey`**：那个函数会真的去注册一次再注销，
+                // 而设置页每帧都会重建快照——每帧一次注册/注销既不必要，
+                // 而且宿主正常情况下已经占着这个组合，探测必然失败，会误报成「被占用」。
+                // 「是否被别的程序占着」只在用户**尝试改成新组合**时探测（见 `assign_global_hotkey`）。
+                let global_keys = self.config.global_hotkey.keys.clone();
+                let global_problem = if self.config.global_hotkey.enabled {
+                    match fm_core::KeyCombo::parse(&global_keys) {
+                        None => Some(String::from("键位无法识别，请在设置里重新录制")),
+                        Some(combo) if combo.win => {
+                            Some(String::from("Win 组合被系统占用，无法注册"))
+                        }
+                        Some(_) => fm_core::shortcut::occupant(&items, &global_keys)
+                            .map(|other| format!("与「{}」重复", other.label)),
+                    }
+                } else {
+                    None
+                };
+
+                settings_page::ShortcutsSnapshot {
+                    items,
+                    conflicts,
+                    global_keys,
+                    global_enabled: self.config.global_hotkey.enabled,
+                    global_problem,
+                }
+            },
         };
 
         let handlers = settings_page::SettingsHandlers {
@@ -857,6 +891,73 @@ impl ShellView {
                         .is_err()
                     {
                         tracing::debug!("恢复资源管理器默认时视图已销毁");
+                    }
+                })
+            },
+            edit_shortcut: {
+                let view = cx.entity().downgrade();
+                Rc::new(move |id: String, window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| {
+                            view.begin_shortcut_capture(
+                                crate::shortcut_handlers::Target::Command(id),
+                                window,
+                                cx,
+                            )
+                        })
+                        .is_err()
+                    {
+                        tracing::debug!("打开快捷键录制时视图已销毁");
+                    }
+                })
+            },
+            toggle_shortcut: {
+                let view = cx.entity().downgrade();
+                Rc::new(move |id: String, window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| view.toggle_shortcut_enabled(&id, window, cx))
+                        .is_err()
+                    {
+                        tracing::debug!("切换快捷键启用态时视图已销毁");
+                    }
+                })
+            },
+            edit_global_hotkey: {
+                let view = cx.entity().downgrade();
+                Rc::new(move |window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| {
+                            view.begin_shortcut_capture(
+                                crate::shortcut_handlers::Target::Global,
+                                window,
+                                cx,
+                            )
+                        })
+                        .is_err()
+                    {
+                        tracing::debug!("打开全局热键录制时视图已销毁");
+                    }
+                })
+            },
+            toggle_global_hotkey: {
+                let view = cx.entity().downgrade();
+                Rc::new(move |window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| view.toggle_global_hotkey(window, cx))
+                        .is_err()
+                    {
+                        tracing::debug!("切换全局热键时视图已销毁");
+                    }
+                })
+            },
+            reset_shortcuts: {
+                let view = cx.entity().downgrade();
+                Rc::new(move |window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| view.reset_shortcuts(window, cx))
+                        .is_err()
+                    {
+                        tracing::debug!("恢复默认快捷键时视图已销毁");
                     }
                 })
             },

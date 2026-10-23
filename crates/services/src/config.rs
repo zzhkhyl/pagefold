@@ -10,10 +10,12 @@
 //! 刻意不把「上次浏览到哪个目录」这类会话状态写进来：
 //! 那属于标签页恢复，需要连同历史一起建模，否则恢复出来的位置没有任何上下文。
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-use fm_core::{ColumnWidths, Density, IconZoom, ViewMode};
+use fm_core::shortcut::DEFAULT_GLOBAL_HOTKEY;
+use fm_core::{ColumnWidths, Density, IconZoom, ShortcutBinding, ViewMode};
 use serde::{Deserialize, Serialize};
 
 /// 应用配置。
@@ -48,6 +50,16 @@ pub struct Config {
     /// `None` = 没拖过，用断点默认值。三列各自独立，因此窄屏隐藏某列时
     /// 它的偏好仍然保留，宽屏回来时不会丢。
     pub detail_columns: ColumnWidths,
+    /// 用户改过的应用内快捷键：`命令 id` → 键位 + 是否启用。
+    ///
+    /// **只存改过的项**：没出现的命令一律用 `fm_core::shortcut::COMMANDS` 里的默认值，
+    /// 这样将来新增命令时，老配置会自动获得新默认值，不必写迁移代码。
+    pub shortcuts: BTreeMap<String, ShortcutBinding>,
+    /// 全局唤醒热键（应用没运行时也能把窗口叫出来）。
+    ///
+    /// 走 `RegisterHotKey` 而不是键盘钩子：钩子会连带弹出开始菜单
+    /// （吞掉 `E` 之后系统以为只是单独按了 Win），而这正是本功能要解决的问题。
+    pub global_hotkey: ShortcutBinding,
 }
 
 impl Default for Config {
@@ -63,6 +75,8 @@ impl Default for Config {
             // 与资源管理器一致：默认不显示隐藏与系统文件。
             show_hidden: false,
             detail_columns: ColumnWidths::default(),
+            shortcuts: BTreeMap::new(),
+            global_hotkey: ShortcutBinding::new(DEFAULT_GLOBAL_HOTKEY),
         }
     }
 }
@@ -177,6 +191,11 @@ mod tests {
                 date: Some(150.0),
                 kind: None,
                 size: Some(96.0),
+            },
+            shortcuts: BTreeMap::from([(String::from("tab.new"), ShortcutBinding::new("ctrl-shift-n"))]),
+            global_hotkey: ShortcutBinding {
+                keys: String::from("ctrl-alt-shift-p"),
+                enabled: false,
             },
         };
         let text = serde_json::to_string(&config).unwrap();

@@ -92,6 +92,25 @@ pub struct SettingsSnapshot {
     pub version: SharedString,
     /// 文件夹接管状态（从注册表现读）。
     pub folder_integration: FolderIntegration,
+    /// 快捷键配置（应用内 + 全局唤醒）。
+    pub shortcuts: ShortcutsSnapshot,
+}
+
+/// 快捷键设置要展示的全部信息。
+///
+/// 由外壳算好再传进来（与其它设置项一致）：视图层只负责画，
+/// 不做「谁和谁撞车」这种判断——那是 `fm_core::shortcut` 的职责，且已经单测过。
+#[derive(Clone, Debug, Default)]
+pub struct ShortcutsSnapshot {
+    /// 已合并默认值的命令清单。
+    pub items: Vec<fm_core::ResolvedShortcut>,
+    /// 应用内互相冲突的键位。
+    pub conflicts: Vec<fm_core::shortcut::Conflict>,
+    /// 全局唤醒热键的键位（`Binding` 形式）。
+    pub global_keys: String,
+    pub global_enabled: bool,
+    /// 全局热键的问题（被占用、与内部命令冲突等），`None` = 正常。
+    pub global_problem: Option<String>,
 }
 
 /// 「设定某个值」类回调的签名。
@@ -123,6 +142,16 @@ pub struct SettingsHandlers {
     pub toggle_folder_default: Toggle,
     /// 一次性撤销上面两项（恢复资源管理器为默认）。
     pub restore_folder_integration: Toggle,
+    /// 打开某条应用内命令的录制浮层。
+    pub edit_shortcut: Setter<String>,
+    /// 启用 / 禁用某条应用内命令。
+    pub toggle_shortcut: Setter<String>,
+    /// 打开全局唤醒热键的录制浮层。
+    pub edit_global_hotkey: Toggle,
+    /// 启用 / 禁用全局唤醒热键。
+    pub toggle_global_hotkey: Toggle,
+    /// 全部恢复默认。
+    pub reset_shortcuts: Toggle,
 }
 
 /// 渲染整页。
@@ -137,6 +166,7 @@ pub fn page(snapshot: &SettingsSnapshot, tokens: &Tokens, handlers: SettingsHand
         .child(appearance_card(snapshot, tokens, &handlers))
         .child(view_card(snapshot, tokens, &handlers))
         .child(integration_card(snapshot, tokens, &handlers))
+        .child(shortcuts_card(snapshot, tokens, &handlers))
         .child(about_card(snapshot, tokens, &handlers));
 
     // 滚动容器必须是 `Stateful<Div>`（带 `.id()`）才拿得到 `overflow_y_scroll`；
@@ -723,6 +753,228 @@ fn info_line(label: &'static str, value: SharedString, tokens: &Tokens) -> AnyEl
         .into_any_element()
 }
 
+/// 「快捷键」卡片：全局唤醒热键 + 应用内命令。
+///
+/// 两块放同一张卡里是有意的：用户改键位时最需要看到的是**冲突**，
+/// 而冲突可能跨过这两块的边界（内部命令撞上全局热键）。放在一起，
+/// 一眼就能看出「这个组合到底被谁占了」。
+fn shortcuts_card(
+    snapshot: &SettingsSnapshot,
+    tokens: &Tokens,
+    handlers: &SettingsHandlers,
+) -> AnyElement {
+    let shortcuts = &snapshot.shortcuts;
+
+    // —— 全局唤醒热键 ——
+    let global_keys = fm_core::KeyCombo::parse(&shortcuts.global_keys)
+        .map(|combo| combo.display())
+        .unwrap_or_else(|| shortcuts.global_keys.clone());
+
+    let edit_global = {
+        let handler = Rc::clone(&handlers.edit_global_hotkey);
+        widgets::text_button(
+            "shortcut-edit-global",
+            "修改",
+            None,
+            "按下新的组合（支持 Ctrl / Alt / Shift）",
+            true,
+            tokens,
+            move |_: &ClickEvent, window, cx| handler(window, cx),
+        )
+    };
+    let toggle_global = {
+        let handler = Rc::clone(&handlers.toggle_global_hotkey);
+        widgets::switch(
+            "shortcut-global-enabled",
+            shortcuts.global_enabled,
+            tokens,
+            move |_: &ClickEvent, window, cx| handler(window, cx),
+        )
+    };
+
+    // —— 应用内命令：按分组排列 ——
+    let mut rows: Vec<AnyElement> = Vec::new();
+    let mut current_group: Option<fm_core::Group> = None;
+    for item in &shortcuts.items {
+        if current_group != Some(item.group) {
+            current_group = Some(item.group);
+            rows.push(
+                div()
+                    .pt(px(6.0))
+                    .text_size(px(metrics::FONT_XS))
+                    .text_color(tokens.muted_fg)
+                    .child(item.group.label())
+                    .into_any_element(),
+            );
+        }
+        rows.push(shortcut_row(item, tokens, handlers));
+    }
+
+    let reset = {
+        let handler = Rc::clone(&handlers.reset_shortcuts);
+        widgets::text_button(
+            "shortcut-reset",
+            "恢复默认",
+            Some(IconName::RotateCcw),
+            "把全部快捷键（含全局唤醒）恢复成默认值",
+            true,
+            tokens,
+            move |_: &ClickEvent, window, cx| handler(window, cx),
+        )
+    };
+
+    // 冲突提示：跨行汇总，说明「谁和谁撞了」，而不是只在某一行上标红——
+    // 撞车的两条可能相隔很远，标在一行上会让人找不到另一条。
+    let mut warnings: Vec<AnyElement> = Vec::new();
+    if let Some(problem) = &shortcuts.global_problem {
+        warnings.push(
+            div()
+                .text_size(px(metrics::FONT_XS))
+                .text_color(tokens.danger)
+                .child(format!("全局唤醒：{problem}"))
+                .into_any_element(),
+        );
+    }
+    for conflict in &shortcuts.conflicts {
+        warnings.push(
+            div()
+                .text_size(px(metrics::FONT_XS))
+                .text_color(tokens.danger)
+                .child(format!(
+                    "{} 被重复分配：{}",
+                    conflict.keys,
+                    conflict.labels.join("、")
+                ))
+                .into_any_element(),
+        );
+    }
+
+    card(
+        "快捷键",
+        "应用内快捷键在窗口有焦点时生效；全局唤醒热键在程序常驻后台时也能把窗口叫出来。改动立即生效。",
+        vec![
+            setting_row(
+                "全局唤醒热键",
+                "Win 组合被系统占用，无法注册；建议用 Ctrl / Alt 组合。",
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(kbd_hint(global_keys, tokens))
+                    .child(toggle_global)
+                    .child(edit_global)
+                    .into_any_element(),
+                false,
+                tokens,
+            ),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .pt(px(6.0))
+                .children(rows)
+                .into_any_element(),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .pt(px(6.0))
+                .children(warnings)
+                .into_any_element(),
+            setting_row(
+                "恢复默认",
+                "清空所有自定义键位，包括全局唤醒热键。",
+                reset,
+                true,
+                tokens,
+            ),
+        ],
+        tokens,
+    )
+}
+
+/// 一行应用内快捷键：名称 + 当前键位 + 启用开关 + 修改。
+fn shortcut_row(
+    item: &fm_core::ResolvedShortcut,
+    tokens: &Tokens,
+    handlers: &SettingsHandlers,
+) -> AnyElement {
+    let id_for_edit = item.id.clone();
+    let edit_handler = Rc::clone(&handlers.edit_shortcut);
+    let edit = widgets::text_button(
+        format!("shortcut-edit-{}", item.id),
+        "修改",
+        None,
+        "按下新的组合",
+        true,
+        tokens,
+        move |_: &ClickEvent, window, cx| edit_handler(id_for_edit.clone(), window, cx),
+    );
+
+    let id_for_toggle = item.id.clone();
+    let toggle_handler = Rc::clone(&handlers.toggle_shortcut);
+    let toggle = widgets::switch(
+        format!("shortcut-enabled-{}", item.id),
+        item.enabled,
+        tokens,
+        move |_: &ClickEvent, window, cx| toggle_handler(id_for_toggle.clone(), window, cx),
+    );
+
+    // 禁用时整体弱化：它确实不生效，不该看起来和启用的一样。
+    let label_color = if item.enabled {
+        tokens.fg
+    } else {
+        tokens.muted_fg
+    };
+
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .py(px(3.0))
+        .child(
+            div()
+                .flex_grow(1.0)
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .text_size(px(metrics::FONT_SM))
+                .text_color(label_color)
+                .child(item.label.clone()),
+        )
+        .when(item.danger, |element| {
+            element.child(
+                div()
+                    .flex_none()
+                    .text_size(px(metrics::FONT_XS))
+                    .text_color(tokens.danger)
+                    .child("危险"),
+            )
+        })
+        .child(kbd_hint(item.display_keys(), tokens))
+        .child(toggle)
+        .child(edit)
+        .into_any_element()
+}
+
+/// 键位的展示样式：等宽 + 描边，像一枚键帽。
+fn kbd_hint(keys: String, tokens: &Tokens) -> AnyElement {
+    div()
+        .flex_none()
+        .px(px(6.0))
+        .py(px(2.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(tokens.border)
+        .bg(tokens.bg)
+        .font_family(tokens.mono_font.clone())
+        .text_size(px(metrics::FONT_XS))
+        .text_color(tokens.muted_fg)
+        .child(keys)
+        .into_any_element()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -793,6 +1045,7 @@ mod tests {
             config_path: None,
             version: "0.0.0".into(),
             folder_integration: FolderIntegration::default(),
+            shortcuts: ShortcutsSnapshot::default(),
         };
         assert!(!snapshot.dark);
 
@@ -808,6 +1061,11 @@ mod tests {
             toggle_folder_menu: Rc::new(|_, _| {}),
             toggle_folder_default: Rc::new(|_, _| {}),
             restore_folder_integration: Rc::new(|_, _| {}),
+            edit_shortcut: Rc::new(|_, _, _| {}),
+            toggle_shortcut: Rc::new(|_, _, _| {}),
+            edit_global_hotkey: Rc::new(|_, _| {}),
+            toggle_global_hotkey: Rc::new(|_, _| {}),
+            reset_shortcuts: Rc::new(|_, _| {}),
         };
         // 只验证字段类型能被调用，真正调用需要窗口句柄。
         assert!(Rc::strong_count(&handlers.set_dark) == 1);

@@ -137,7 +137,7 @@ pub struct ShellView {
     /// 没有编辑会话时，焦点必须落在这里：GPUI 的按键分发从**焦点节点**向上冒泡，
     /// 一个焦点都没有时起点会退化成窗口根节点，挂在内容根上的处理器根本不在
     /// 分发路径上——表现为「所有全局快捷键都没反应」。
-    shell_focus: FocusHandle,
+    pub(crate) shell_focus: FocusHandle,
     /// 搜索关键词。
     pub(crate) query: String,
     /// 右侧预览面板是否展开（宽屏下的持久化开关）。
@@ -213,6 +213,10 @@ pub struct ShellView {
     /// 缓存在这里而不是每帧读注册表：设置页每帧都会渲染，
     /// 而状态只在「进入设置页」与「我们自己改过之后」才可能变。
     pub(crate) folder_integration: fm_platform::IntegrationState,
+    /// 正在录制的新快捷键（设置页点「修改」后进入）。
+    pub(crate) shortcut_capture: Option<crate::shortcut_handlers::Capture>,
+    /// 录制浮层的焦点句柄：它必须能拿到按键，否则录不到任何东西。
+    pub(crate) shortcut_focus: FocusHandle,
     /// 标签条的横向滚动位置。
     ///
     /// 标签有最小宽度（96px），多到装不下时靠横向滚动而不是无限压缩——
@@ -324,6 +328,10 @@ impl ShellView {
         Theme::change(theme_mode(config.dark), None, cx);
         apply_component_theme(&config, cx);
 
+        // 键位表也来自配置：用户改过的组合在这里生效，没改过的用目录默认值。
+        // 必须在窗口接收按键之前装好，因此放在构造函数里而不是首帧渲染。
+        crate::shortcuts::apply(cx, &config);
+
         let tokens = build_tokens(&config, cx);
         let preview_open = config.show_preview;
 
@@ -402,6 +410,8 @@ impl ShellView {
             folder_integration: Self::exe_path()
                 .map(|exe| fm_platform::folder_integration_state(&exe))
                 .unwrap_or_default(),
+            shortcut_capture: None,
+            shortcut_focus: cx.focus_handle(),
             tab_scroll: ScrollHandle::new(),
             renaming: None,
             area_menu_suppressed: false,
@@ -4028,6 +4038,10 @@ impl Render for ShellView {
         // 它属于「内容区的一次操作」，不该盖住系统级提示。
         if let Some(batch) = self.render_batch_overlay(cx) {
             body = body.child(batch);
+        }
+        // 快捷键录制浮层：只有设置页里点了「修改」才会存在。
+        if let Some(capture) = self.render_shortcut_overlay(cx) {
+            body = body.child(capture);
         }
         // 进度卡固定在右下角，不遮内容：它只占 340px 宽的一小块。
         if let Some(card) = self.render_transfer_card(cx) {

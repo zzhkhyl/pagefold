@@ -12,10 +12,11 @@ use fm_core::Location;
 use fm_platform::{FileSystem, SingleInstance, activate_window, platform_file_system};
 use fm_services::config::Config;
 use fm_services::directory::DirectoryService;
-use fm_shell::actions::*;
-use fm_shell::{KEY_CONTEXT, ShellView};
+use fm_shell::ShellView;
 use fm_views::metrics;
-use gpui::{App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+use gpui::{
+    App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size,
+};
 use gpui_component::Root;
 
 /// 主窗口的初始尺寸。
@@ -57,9 +58,14 @@ pub fn run() {
         std::process::exit(exit_code);
     }
 
+    // 先把「要注册哪个全局热键」写进约定文件，再拉起宿主——
+    // 顺序反了的话，宿主会读到上一次（或空的）配置，表现为「改了热键要重启才生效」。
+    // 配置读取本身很便宜，且失败会回退默认值，不会拖慢启动。
+    sync_global_hotkey_spec();
+
     // 无论本次启动最终是主实例还是被拦截的副本，都先确保宿主在跑：
     // 放在单实例判断之前，才不会出现「宿主被杀掉后，副本启动又不管它」的空窗。
-    ensure_hotkey_host();
+    fm_platform::spawn_hotkey_host();
 
     // 单实例守卫。注意用 `_guard` 而不是 `let _ =` 绑定：
     // `let _ =` 会**立刻** drop 守卫、释放互斥体，单实例保护等于没做。
@@ -109,44 +115,8 @@ pub fn run() {
         .run(|cx: &mut App| {
             gpui_component::init(cx);
 
-            // 全局快捷键。键位以设计稿的 keydown 为准，另加 Ctrl+L 与 Ctrl+1/2/3。
-            // 处理器挂在 ShellView 的根元素上（见 `ShellView::apply_shortcuts`）。
-            //
-            // **每一条都必须带 `KEY_CONTEXT`**。无上下文的绑定在这个 GPUI 版本里
-            // 优先级等于「最深上下文」，并且同深度时后注册者胜——那会让
-            // `backspace` / `enter` / `ctrl-a/c/v/z` 全部压过输入框自己的绑定，
-            // 表现为地址栏、搜索框、内联重命名里的这些键全部失效。
-            cx.bind_keys([
-                KeyBinding::new("ctrl-t", NewTab, Some(KEY_CONTEXT)),
-                KeyBinding::new("ctrl-w", CloseTab, Some(KEY_CONTEXT)),
-                KeyBinding::new("ctrl-shift-t", ReopenClosedTab, Some(KEY_CONTEXT)),
-                KeyBinding::new("alt-left", GoBack, Some(KEY_CONTEXT)),
-                KeyBinding::new("alt-right", GoForward, Some(KEY_CONTEXT)),
-                KeyBinding::new("backspace", GoUp, Some(KEY_CONTEXT)),
-                KeyBinding::new("f5", Refresh, Some(KEY_CONTEXT)),
-                KeyBinding::new("ctrl-l", FocusAddressBar, Some(KEY_CONTEXT)),
-                KeyBinding::new("ctrl-1", SetViewDetails, Some(KEY_CONTEXT)),
-                KeyBinding::new("ctrl-2", SetViewIcons, Some(KEY_CONTEXT)),
-                KeyBinding::new("ctrl-3", ToggleTheme, Some(KEY_CONTEXT)),
-                // Windows 惯例：Ctrl+, 打开设置。逗号在 GPUI 的键位解析里
-                // 是合法单字符键（按 `-` 切分后剩一个 `,`），不需要转义。
-                KeyBinding::new("ctrl-,", OpenSettings, Some(KEY_CONTEXT)),
-                KeyBinding::new("ctrl-a", SelectAll, Some(KEY_CONTEXT)),
-                KeyBinding::new("ctrl-c", CopyItems, Some(KEY_CONTEXT)),
-                KeyBinding::new("ctrl-x", CutItems, Some(KEY_CONTEXT)),
-                KeyBinding::new("ctrl-v", PasteItems, Some(KEY_CONTEXT)),
-                KeyBinding::new("f2", RenameItem, Some(KEY_CONTEXT)),
-                KeyBinding::new("delete", DeleteItems, Some(KEY_CONTEXT)),
-                // 永久删除：与回收站删除只差一个修饰键，与资源管理器一致。
-                // 两个动作的确认框文案不同，因此误按也不会删错东西。
-                KeyBinding::new("shift-delete", DeletePermanently, Some(KEY_CONTEXT)),
-                KeyBinding::new("ctrl-z", Undo, Some(KEY_CONTEXT)),
-                KeyBinding::new("enter", OpenItem, Some(KEY_CONTEXT)),
-                KeyBinding::new("up", MoveCursorUp, Some(KEY_CONTEXT)),
-                KeyBinding::new("down", MoveCursorDown, Some(KEY_CONTEXT)),
-                KeyBinding::new("shift-up", ExtendCursorUp, Some(KEY_CONTEXT)),
-                KeyBinding::new("shift-down", ExtendCursorDown, Some(KEY_CONTEXT)),
-            ]);
+            // 键位表由 `fm_shell::shortcuts` 依据配置装配（用户可自定义），
+            // 因此这里不再硬编码任何绑定；`ShellView::new` 会在窗口创建前调用它。
 
             // 平台实现与目录服务在整个进程内共享一份：
             // 这既省内存，也让扩展名句柄在全局唯一。
@@ -302,31 +272,24 @@ fn run_hotkey_host() {
     }
 }
 
-/// 确保热键宿主在后台运行。
+
+/// 把当前配置里的全局唤醒热键写进宿主约定文件。
 ///
-/// 这里**无条件**拉起、由宿主自己用互斥体判断是否重复：这样省掉了
-/// 「先探测再启动」的竞态（探测与启动之间宿主可能正好退出）。
-/// 宿主是独立后台进程，必须带上 `DETACHED_PROCESS | CREATE_NO_WINDOW`，
-/// 否则它会继承父进程的控制台，或在 release 下弹出一个黑窗。
-fn ensure_hotkey_host() {
-    use std::os::windows::process::CommandExt as _;
+/// 宿主是独立进程，读的是 `%APPDATA%\pagefold\hotkey.txt`：主程序负责写，
+/// 宿主负责读。这样「改热键」只需要写文件 + 发一条重载消息，
+/// 不必在进程间传递字符串，也不必让宿主依赖 `fm-services`。
+///
+/// 停用状态写空文件——宿主看到空内容就不注册任何热键。
+fn sync_global_hotkey_spec() {
+    let config = Config::load();
+    let keys = config
+        .global_hotkey
+        .enabled
+        .then(|| config.global_hotkey.keys.clone());
 
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    let Ok(exe_path) = std::env::current_exe() else {
-        tracing::warn!("无法定位自身可执行文件，跳过热键宿主启动");
-        return;
-    };
-
-    let mut command = std::process::Command::new(exe_path);
-    command
-        .arg(HOTKEY_HOST_FLAG)
-        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
-
-    match command.spawn() {
-        Ok(_) => tracing::info!("已请求启动热键宿主"),
-        Err(error) => tracing::warn!(%error, "热键宿主启动失败，Win+E 将继续由系统处理"),
+    if let Err(error) = fm_platform::write_hotkey_spec(keys.as_deref()) {
+        // 写不进去只影响热键，不该拦住程序启动。
+        tracing::warn!(%error, "写入全局热键配置失败，热键可能仍按上次的值生效");
     }
 }
 

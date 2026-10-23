@@ -180,14 +180,83 @@ pub fn activate_window(_title: &str) -> bool {
     false
 }
 
-/// 运行热键宿主（托盘图标 + `Win+E` 接管）。**会阻塞**直到用户在托盘菜单退出。
+/// 运行热键宿主（托盘图标 + 全局唤醒热键）。**会阻塞**直到用户在托盘菜单退出。
 #[cfg(target_os = "windows")]
 pub use windows::hotkey_host::run as run_hotkey_host;
 
-/// 非 Windows 平台没有键盘钩子能力。
+/// 非 Windows 平台没有热键宿主。
 #[cfg(not(target_os = "windows"))]
 pub fn run_hotkey_host(_app_title: &str, _exe_path: std::path::PathBuf) -> anyhow::Result<()> {
     anyhow::bail!("热键宿主仅在 Windows 上可用")
+}
+
+/// 启动热键宿主进程（若已在运行则什么也不做）。
+///
+/// 宿主是独立进程：主窗口关掉之后热键仍然有效。
+/// 启动时带 `DETACHED_PROCESS | CREATE_NO_WINDOW`，否则它会继承父进程的控制台，
+/// 或在 release 下弹出一个黑窗。
+#[cfg(target_os = "windows")]
+pub fn spawn_hotkey_host() {
+    use std::os::windows::process::CommandExt as _;
+
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let Ok(exe_path) = std::env::current_exe() else {
+        tracing::warn!("无法定位自身可执行文件，跳过热键宿主启动");
+        return;
+    };
+
+    let mut command = std::process::Command::new(exe_path);
+    command
+        .arg("--hotkey-host")
+        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
+
+    match command.spawn() {
+        Ok(_) => tracing::info!("已请求启动热键宿主"),
+        Err(error) => tracing::warn!(%error, "热键宿主启动失败"),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn spawn_hotkey_host() {}
+
+/// 把全局热键写进宿主要读的约定文件。`None` = 不注册。
+#[cfg(target_os = "windows")]
+pub fn write_hotkey_spec(keys: Option<&str>) -> anyhow::Result<()> {
+    windows::hotkey::write_spec(keys)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn write_hotkey_spec(_keys: Option<&str>) -> anyhow::Result<()> {
+    anyhow::bail!("全局热键仅在 Windows 上可用")
+}
+
+/// 通知正在运行的宿主重新读取热键。
+///
+/// 返回 `false` 表示宿主没在运行——不是错误，只是热键此刻不生效。
+#[cfg(target_os = "windows")]
+pub fn notify_hotkey_host() -> bool {
+    windows::hotkey::notify_host()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn notify_hotkey_host() -> bool {
+    false
+}
+
+/// 探测一个组合能否被注册为全局热键。
+///
+/// `Err` 里是给用户看的一句话（「已被其它程序占用」之类）。
+/// 注意：**宿主已经占着的组合会探测失败**，调用方要自己识别这种情况。
+#[cfg(target_os = "windows")]
+pub fn probe_hotkey(keys: &str) -> Result<(), String> {
+    windows::hotkey::probe(keys)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn probe_hotkey(_keys: &str) -> Result<(), String> {
+    Err(String::from("当前平台不支持全局热键"))
 }
 
 /// 文件夹接管的当前状态。

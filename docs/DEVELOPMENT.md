@@ -378,6 +378,8 @@ file-manager/
 | 预览面板的正文               | 服务：`services/src/preview.rs`（按内容判断文本、32KB / 200 行上限）；视图：`PreviewBody` + `preview_panel::single`（只读 `Textarea` 承载，可框选复制）；外壳：`ShellView::pump_preview_text`（后台读取，按路径防重）+ `sync_preview_input`（实体同步，在 `render` 里做，因为需要 `window`） |
 | 递归搜索                     | 服务：`services/src/search.rs`（深度优先遍历 + 批量回传 + `CancelToken`）；外壳：`start_search` / `pump_search` / `toggle_recursive_search`，结果由 `visible()` 优先返回 |
 | 文件夹接管图形面板           | 平台：`folder_association::{state, set_context_menu, set_default_handler, restore_all}`（托盘菜单与设置页共用同一组）；视图：`settings_page::integration_card` + `FolderIntegration`；外壳：`folder_integration` 缓存 + `toggle_folder_menu` / `toggle_folder_default` / `restore_folder_integration` |
+| 快捷键自定义                 | 领域：`core/src/shortcut.rs`（`KeyCombo` 解析/规范化、`COMMANDS` 目录、`resolve`、`conflicts`、`occupant`）；服务：`Config.shortcuts` / `Config.global_hotkey`；外壳：`shell/src/shortcuts.rs`（配置 → `KeyBinding` 表，含 id→Action 的 match）+ `shell/src/shortcut_handlers.rs`（录制浮层、改键、启停、恢复默认、同步宿主）；视图：`settings_page::shortcuts_card` |
+| 全局热键（系统注册）         | 平台：`platform/src/windows/hotkey.rs`（`mods_and_vk` / `register` / `probe` / `hotkey.txt` 读写 / `WM_HOST_RELOAD`）；宿主：`hotkey_host.rs` 的 `register_configured_hotkey` + `WM_HOTKEY` 分支 |
 | 应用图标的几何与配色         | `tools/icon-gen/src/design.rs`，改完重新生成（见 `assets/app-icon/README.md`） |
 
 用户数据的两个落点（都在 `%APPDATA%\pagefold\`，损坏时都只告警并回退默认）：
