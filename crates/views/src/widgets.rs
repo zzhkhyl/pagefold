@@ -501,6 +501,8 @@ pub fn entry_icon(entry: &Entry, extension: Option<&str>) -> IconName {
         // 快捷方式在资源管理器里也是「带箭头的目标」，这里用外链图标表达同一语义。
         EntryKind::Symlink => IconName::ExternalLink,
         EntryKind::File { .. } => file_icon(extension),
+        // 共享打印机：用打印机图标，与「文件 / 目录」一眼区分得开。
+        EntryKind::Printer => IconName::Printer,
     }
 }
 

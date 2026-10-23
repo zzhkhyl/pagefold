@@ -939,6 +939,9 @@ impl ShellView {
 
     /// 重命名当前唯一选中的项（选中条上的按钮）。
     pub(crate) fn rename_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_printer_writes(window, cx) {
+            return;
+        }
         let paths = self.selected_paths();
         // 只处理「恰好一项」：按钮在多选下本来就是禁用的，
         // 而「随便挑一项改名」这种自作主张比什么都不做更糟。
@@ -958,6 +961,9 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.refuse_printer_writes(window, cx) {
+            return;
+        }
         let Some(origin) = self.current_dir() else {
             window.push_notification(
                 Notification::warning("当前位置的项目不支持复制或剪切"),
@@ -1716,6 +1722,9 @@ impl ShellView {
     /// 染红只说了「有点危险」，而对话框能说清「要把哪一项移入回收站」，
     /// 并把误点的代价从「东西进回收站了」降到「多点一下」。
     pub(crate) fn delete_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_printer_writes(window, cx) {
+            return;
+        }
         let paths = self.selected_paths();
         if paths.is_empty() || self.current_dir().is_none() {
             return;
@@ -1811,6 +1820,9 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.refuse_printer_writes(window, cx) {
+            return;
+        }
         let paths = self.selected_paths();
         if paths.is_empty() || self.current_dir().is_none() {
             return;
@@ -2614,6 +2626,7 @@ impl ShellView {
                 Some(extension) => format!("{} 文件", extension.to_uppercase()),
                 None => String::from("文件"),
             },
+            EntryKind::Printer => String::from("共享打印机"),
         }
     }
 
@@ -2719,6 +2732,30 @@ impl ShellView {
     /// 双击、右键「打开」、预览面板的「打开」三处都过这个判断。
     pub(crate) fn in_recycle_bin(&self) -> bool {
         matches!(self.tabs.active_state().location(), Location::RecycleBin)
+    }
+
+    /// 选中项里是否有共享打印机。
+    ///
+    /// 打印机在列表里只是「一个共享名」，不是文件系统对象：复制、重命名、删除
+    /// 都会在系统调用那一步失败，而那些错误码对用户没有任何指导意义。
+    fn selection_has_printer(&self) -> bool {
+        self.selection.iter().any(|index| {
+            self.visible()
+                .get(index)
+                .is_some_and(|entry| matches!(entry.kind, EntryKind::Printer))
+        })
+    }
+
+    /// 选中项含打印机时，拦下写操作并说明原因。返回 `true` 表示已拦下。
+    fn refuse_printer_writes(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.selection_has_printer() {
+            return false;
+        }
+        window.push_notification(
+            Notification::warning("共享打印机不是文件，不能复制、重命名或删除；双击可以打开打印队列"),
+            cx,
+        );
+        true
     }
 }
 
@@ -4027,6 +4064,22 @@ impl Render for ShellView {
         // 每帧强行夺回会让它们收不到按键。
         if window.focused(cx).is_none() {
             window.focus(&self.shell_focus, cx);
+        }
+
+        // 录制浮层只在设置页里有效：切到别的标签 / 页面时必须自己收掉，
+        // 否则它会一直盖在上面（而底下已经换成了文件列表）。
+        if self.shortcut_capture.is_some() && !self.in_settings() {
+            self.shortcut_capture = None;
+        }
+        // 录制期间把焦点钉在浮层上。`begin_shortcut_capture` 里虽然 focus 过一次，
+        // 但那时元素还没渲染出来，焦点可能落空——每帧校正一次最省心，
+        // 也让「点了一下标题栏」之类的意外不会把键盘输入抢走。
+        if self.shortcut_capture.is_some()
+            && window
+                .focused(cx)
+                .is_none_or(|focused| focused != self.shortcut_focus)
+        {
+            window.focus(&self.shortcut_focus, cx);
         }
 
         // 预览正文的输入框实体必须在这里同步：它需要一个 `&mut Window`，

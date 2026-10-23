@@ -267,7 +267,8 @@ fn attach_extras(interner: &ExtInterner, icons: &IconCache, entry: &mut Entry) {
             let extension = ext.and_then(|id| interner.resolve(id));
             icons.id_for(extension.as_deref(), false)
         }
-        EntryKind::Drive | EntryKind::Symlink => return,
+        // 驱动器与符号链接不取系统图标；打印机也用内置图标（见 views 的 entry_icon）。
+        EntryKind::Drive | EntryKind::Symlink | EntryKind::Printer => return,
     };
 }
 

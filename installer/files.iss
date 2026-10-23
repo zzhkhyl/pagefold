@@ -81,7 +81,7 @@ Name: "chinese"; MessagesFile: "compiler:Default.isl,languages\ChineseSimplified
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; Flags: checkedonce
-Name: "startup"; Description: "开机自动启动（让 Win+E 随时可用）"; Flags: unchecked
+Name: "startup"; Description: "开机自动启动（让全局唤醒热键随时可用）"; Flags: unchecked
 Name: "folderintegration"; Description: "接管文件夹：设为默认打开方式，并加入右键菜单"; Flags: unchecked
 
 [Files]

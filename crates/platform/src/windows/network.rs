@@ -17,7 +17,7 @@ use anyhow::bail;
 use fm_core::{Entry, EntryKind, IconId};
 use windows::Win32::NetworkManagement::NetManagement::NetApiBufferFree;
 use windows::Win32::Storage::FileSystem::{
-    NetShareEnum, SHARE_INFO_1, STYPE_DISKTREE, STYPE_MASK, STYPE_SPECIAL,
+    NetShareEnum, SHARE_INFO_1, STYPE_DISKTREE, STYPE_MASK, STYPE_PRINTQ, STYPE_SPECIAL,
 };
 use windows::core::PCWSTR;
 
@@ -40,7 +40,15 @@ pub fn host_of(path: &Path) -> Option<String> {
     (!host.is_empty()).then(|| host.to_string())
 }
 
-/// 列出 `\\host` 下的**磁盘**共享。
+/// 列出 `\\host` 下的共享：**磁盘共享进列表，打印机也进列表**。
+///
+/// 三类的处理各不相同：
+///
+/// | 类型 | 处理 |
+/// | --- | --- |
+/// | `STYPE_DISKTREE` | 普通目录，可进入浏览 |
+/// | `STYPE_PRINTQ` | 共享打印机：列出来（`EntryKind::Printer`），双击交给系统打开打印队列 |
+/// | 其它（`IPC$` 等） | 跳过：管道不是用户要找的东西 |
 ///
 /// 管理共享（`C$` / `ADMIN$`，带 `STYPE_SPECIAL` 位）标记为隐藏：
 /// 它们默认不出现在列表里，与资源管理器一致；打开「显示隐藏文件」后可见。
@@ -80,10 +88,11 @@ pub fn shares(host: &str) -> anyhow::Result<Vec<Entry>> {
         if !buffer.is_null() {
             let items = std::slice::from_raw_parts(buffer as *const SHARE_INFO_1, read as usize);
             for item in items {
-                if item.shi1_type.0 & STYPE_MASK.0 != STYPE_DISKTREE.0 {
-                    // 打印机、IPC$ 之类的非磁盘共享不列：本程序只能浏览目录。
+                // 磁盘共享与共享打印机都列；IPC$ 之类的管道跳过。
+                let Some(entry_kind) = kind_of(item.shi1_type.0) else {
                     continue;
-                }
+                };
+
                 let name = item.shi1_netname.to_string().unwrap_or_default();
                 if name.is_empty() {
                     continue;
@@ -91,7 +100,7 @@ pub fn shares(host: &str) -> anyhow::Result<Vec<Entry>> {
                 entries.push(Entry {
                     path: Arc::new(PathBuf::from(format!(r"\\{host}\{name}"))),
                     name: Arc::from(name.as_str()),
-                    kind: EntryKind::Directory,
+                    kind: entry_kind,
                     size: 0,
                     // 共享本身没有「修改时间」；列里显示破折号比编一个更诚实。
                     modified: None,
@@ -103,14 +112,39 @@ pub fn shares(host: &str) -> anyhow::Result<Vec<Entry>> {
         }
     }
 
+    // 目录在前、打印机在后，同类按名称排序：一台机器上打印机通常只有一两台，
+    // 混在目录里反而更难找。
     entries.sort_by(|left, right| {
-        left.name
-            .to_lowercase()
-            .cmp(&right.name.to_lowercase())
+        let rank = |entry: &Entry| if entry.is_dir() { 0 } else { 1 };
+        rank(left)
+            .cmp(&rank(right))
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
     });
 
-    tracing::debug!(host, shares = entries.len(), "已枚举网络共享");
+    tracing::debug!(
+        host,
+        shares = entries.len(),
+        printers = entries.iter().filter(|entry| !entry.is_dir()).count(),
+        "已枚举网络共享"
+    );
+
     Ok(entries)
+}
+
+/// 把 `SHARE_INFO_1::shi1_type` 翻成条目的类型。
+///
+/// 只认两类用户真正要找的东西：磁盘共享与共享打印机。
+/// `STYPE_IPC`（`IPC$` 那样的命名管道）与 `STYPE_DEVICE` 一律 `None`——它们
+/// 既不能浏览也不能打开，列出来只会让人点一下得到一条错误。
+///
+/// 抽成纯函数是为了能单测：共享类型的位组合（`STYPE_SPECIAL`、
+/// `STYPE_TEMPORARY` 之类的附加位）很容易判错，判错的后果是「打印机看不见」。
+fn kind_of(share_type: u32) -> Option<EntryKind> {
+    match share_type & STYPE_MASK.0 {
+        value if value == STYPE_DISKTREE.0 => Some(EntryKind::Directory),
+        value if value == STYPE_PRINTQ.0 => Some(EntryKind::Printer),
+        _ => None,
+    }
 }
 
 /// 把 `Net*` 的返回码翻成一句人话。
@@ -180,6 +214,39 @@ pub fn connect_interactive(path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn share_types_map_to_the_right_entry_kind() {
+        // 磁盘共享 → 目录；共享打印机 → 打印机；IPC$ / 保留类型 → 不列。
+        assert_eq!(
+            kind_of(STYPE_DISKTREE.0),
+            Some(EntryKind::Directory),
+            "磁盘共享应当可以浏览"
+        );
+        assert_eq!(
+            kind_of(STYPE_PRINTQ.0),
+            Some(EntryKind::Printer),
+            "共享打印机必须列出来（这正是「有打印机却看不到」的修复点）"
+        );
+
+        // 真实共享几乎总带着 `STYPE_SPECIAL` 位（管理共享）或其它附加位，
+        // 所以判定必须先与 `STYPE_MASK` 取与，这一点靠下面两条钉住。
+        assert_eq!(
+            kind_of(STYPE_DISKTREE.0 | STYPE_SPECIAL.0),
+            Some(EntryKind::Directory)
+        );
+        assert_eq!(
+            kind_of(STYPE_PRINTQ.0 | STYPE_SPECIAL.0),
+            Some(EntryKind::Printer)
+        );
+
+        // IPC$：0x3（STYPE_IPC），不列。
+        // 注意 `STYPE_DISKTREE` 本身是 **0**，所以「0 → None」是错的断言：
+        // 磁盘共享的类型值就是 0，这也是这个函数必须按 STYPE_MASK 判定的原因。
+        assert_eq!(kind_of(0x3), None, "IPC$ 不该进列表");
+        assert_eq!(kind_of(0x2), None, "STYPE_DEVICE 也不该进列表");
+        assert_eq!(kind_of(0), Some(EntryKind::Directory));
+    }
 
     #[test]
     fn only_a_bare_host_counts_as_network_root() {

@@ -334,6 +334,10 @@ impl ShellView {
     /// 做成整窗遮罩而不是系统对话框：按键要落在我们自己的元素上才录得到，
     /// 而系统对话框拿不到 GPUI 的按键事件。
     pub(crate) fn render_shortcut_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // 只在设置页渲染：即便状态没来得及清掉，也不会盖到列表上。
+        if !self.in_settings() {
+            return None;
+        }
         let capture = self.shortcut_capture.as_ref()?;
         let tokens = &self.tokens;
 
@@ -361,11 +365,11 @@ impl ShellView {
             .text_color(tokens.fg)
             .font_family(tokens.font_family.clone())
             .shadow_lg()
-            .on_key_down(cx.listener(
-                |this, event: &gpui::KeyDownEvent, window, cx| {
-                    this.capture_keystroke(&event.keystroke, window, cx);
-                },
-            ))
+            // 卡片自己吃掉鼠标按下：否则点卡片空白处会冒泡到遮罩，被当成「点击外部」关掉。
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|_, _: &gpui::MouseDownEvent, _, cx| cx.stop_propagation()),
+            )
             .child(
                 div()
                     .text_size(px(fm_views::metrics::FONT_LG))
@@ -442,6 +446,20 @@ impl ShellView {
                 .items_center()
                 .justify_center()
                 .track_focus(&self.shortcut_focus)
+                // 按键必须挂在**拿到焦点的这一层**上：焦点事件只沿焦点路径分发，
+                // 挂在子卡片上时（焦点在遮罩）永远收不到 —— 这正是「按什么都没反应」。
+                .on_key_down(cx.listener(
+                    |this, event: &gpui::KeyDownEvent, window, cx| {
+                        this.capture_keystroke(&event.keystroke, window, cx);
+                    },
+                ))
+                // 点遮罩空白处 = 取消。卡片自己 stop_propagation，所以点卡片不会误关。
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _: &gpui::MouseDownEvent, window, cx| {
+                        this.cancel_shortcut_capture(window, cx);
+                    }),
+                )
                 .child(card)
                 .into_any_element(),
         )
