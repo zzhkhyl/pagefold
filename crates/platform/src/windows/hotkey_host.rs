@@ -293,14 +293,6 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 let window = HWND(state.window as *mut core::ffi::c_void);
                 let _ = PostMessageW(Some(window), WM_HOST_ACTIVATE, WPARAM(0), LPARAM(0));
             }
-
-            // 我们吞掉了 `E`，于是 shell 只看到「单独按了一下 Win」，松开时会弹开始菜单。
-            // 补一个**无害按键**让它认为这是一次组合即可（详见 `send_neutral_chord_key`）。
-            //
-            // 必须**另起线程**：在低层钩子回调里直接 `SendInput` 会等输入队列处理，
-            // 而输入队列此刻正停在我们这个回调上——两边互等就是死锁。
-            spawn_off_thread(send_neutral_chord_key);
-
             // 返回 1 = 吞掉这一次 `E` 的按下，既不交给资源管理器，也不交给前台程序。
             return LRESULT(1);
         }
@@ -314,7 +306,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 enum HookAction {
     /// 原样放行。
     Pass,
-    /// 吞掉，并唤起主窗口。
+    /// 吞掉这一次 `E`，并唤起主窗口。
     Activate,
 }
 
@@ -334,8 +326,11 @@ struct KeyboardInput {
 /// 判定一次按键该怎么处理，并顺带维护 Win 键状态。
 ///
 /// 抽成纯函数是为了能单测——这段判断的正确性直接决定「接管 Win+E 之后，
-/// 别人的键盘还能不能正常用」。它只有一条会返回 [`HookAction::Activate`] 的路径：
-/// **Win 按住 + 单独按 E + 没有别的修饰键 + 不是合成事件**。
+/// 别人的键盘还能不能正常用」。
+///
+/// **全函数只有一条会吞东西的路径**：Win 按住、单独按 E、没有别的修饰键、
+/// 且不是合成事件。除此之外全部放行，包括 Win 自己的按下与抬起——
+/// 吞一次 Win 抬起，系统就再也收不到释放，之后所有按键都会被当成 Win+组合。
 fn decide_key(input: KeyboardInput, win_down: &mut bool) -> HookAction {
     // 合成事件一律放行，也不据它改状态：否则自动化/屏幕键盘会误触发，
     // 或者被我们吞掉后让调用方以为按键丢了。
@@ -344,8 +339,6 @@ fn decide_key(input: KeyboardInput, win_down: &mut bool) -> HookAction {
     }
 
     if is_win_key(input.vk) {
-        // 只记状态，不吞：Win 的按下与抬起必须原样交给系统，
-        // 否则系统会认为 Win 一直按着（见 `WIN_DOWN` 的注释）。
         *win_down = input.is_down;
         return HookAction::Pass;
     }
@@ -366,63 +359,6 @@ fn is_win_key(vk: u32) -> bool {
     vk == u32::from(VK_LWIN.0) || vk == u32::from(VK_RWIN.0)
 }
 
-/// 让 shell 认为「Win 被用于一次组合」的无害按键：`VK_F24`。
-///
-/// ## 为什么需要它
-///
-/// 我们吞掉了 `E`，shell 那边就只剩「Win 按下 → Win 抬起」，于是按完 `Win+E`
-/// 会顺带弹出开始菜单。要压掉它必须在这中间塞一个键：
-/// shell 判定「Win 是组合键的一部分」靠的是**是否还有别的键在这期间按下**。
-///
-/// ## 为什么选 `VK_F24`
-///
-/// - 它是保留键（`0x87`），标准键盘上不存在，绝大多数程序不会处理它；
-/// - 它没有字符输出，也不改变任何修饰键状态——注入 down+up 之后键盘状态是平衡的。
-///
-/// ## 为什么不能靠「补发一个 Win 抬起」
-///
-/// 实测：注入的 Win 按下/抬起**不会**触发开始菜单，也不会被 shell 当成「用了组合」，
-/// 所以补发 Win 抬起既压不掉开始菜单，还会让按键序列变得奇怪。只有「补一个别的键」
-/// 才是 shell 认的信号。
-///
-/// 代价：前台程序会收到一次 `F24` 的按下与抬起。这是刻意接受的——它比让 Win 卡在
-/// 按下状态（会让后续按键变成 Win+字母）轻得多。
-fn send_neutral_chord_key() {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
-    };
-
-    /// 保留键。
-    const NEUTRAL_VK: u16 = 0x87;
-
-    let event = |up: bool| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(NEUTRAL_VK),
-                wScan: 0,
-                dwFlags: if up {
-                    KEYEVENTF_KEYUP
-                } else {
-                    Default::default()
-                },
-                time: 0,
-                // 标记来源，便于将来需要时在钩子里认出自己的事件。
-                dwExtraInfo: NEUTRAL_KEY_MARKER,
-            },
-        },
-    };
-
-    let inputs = [event(false), event(true)];
-    let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
-    if sent != inputs.len() as u32 {
-        // 注入失败不致命：只是开始菜单会照常弹出。
-        tracing::debug!(sent, "补发无关键失败，开始菜单可能照常弹出");
-    }
-}
-
-/// 我们用 [`send_neutral_chord_key`] 注入事件时带的标记。
-const NEUTRAL_KEY_MARKER: usize = 0x5046_4B42; // "PFKB"，仅为可读性留的标识
 
 /// 钩子安装那一刻 Win 是否已经按着。
 ///
@@ -732,10 +668,13 @@ mod tests {
     }
 }
 
+
+
 #[cfg(test)]
 mod hook_tests {
     use super::*;
 
+    const VK_LWIN: u32 = 0x5B;
     const VK_E: u32 = b'E' as u32;
 
     fn input(is_down: bool, vk: u32) -> KeyboardInput {
@@ -754,7 +693,7 @@ mod hook_tests {
 
         // Win 按下：放行，但记住状态。
         assert_eq!(
-            decide_key(input(true, u32::from(VK_LWIN.0)), &mut win_down),
+            decide_key(input(true, VK_LWIN), &mut win_down),
             HookAction::Pass
         );
         assert!(win_down);
@@ -765,39 +704,47 @@ mod hook_tests {
             HookAction::Activate
         );
         // 同一个 E 的抬起不该再触发一次。
+        assert_eq!(decide_key(input(false, VK_E), &mut win_down), HookAction::Pass);
+
+        // Win 抬起必须放行：吞掉它系统就收不到释放（见下一条测试）。
         assert_eq!(
-            decide_key(input(false, VK_E), &mut win_down),
+            decide_key(input(false, VK_LWIN), &mut win_down),
+            HookAction::Pass
+        );
+        assert!(!win_down, "Win 抬起要清掉状态");
+    }
+
+    #[test]
+    fn a_plain_win_press_is_never_swallowed() {
+        // 单独按 Win（开开始菜单）是最常见的按键，任何一次吞掉都会让用户
+        // 觉得「Win 键时灵时不灵」。
+        let mut win_down = false;
+        assert_eq!(
+            decide_key(input(true, VK_LWIN), &mut win_down),
+            HookAction::Pass
+        );
+        assert_eq!(
+            decide_key(input(false, VK_LWIN), &mut win_down),
             HookAction::Pass
         );
     }
 
     #[test]
-    fn e_alone_and_win_release_are_never_swallowed() {
+    fn e_alone_is_never_swallowed() {
         // 没按 Win 时 E 就是普通字母，必须原样放行——否则用户在别的程序里打不出 e。
         let mut win_down = false;
-        assert_eq!(
-            decide_key(input(true, VK_E), &mut win_down),
-            HookAction::Pass
-        );
-
-        // Win 抬起也放行：吞掉它会让系统认为 Win 一直按着。
-        let mut win_down = true;
-        assert_eq!(
-            decide_key(input(false, u32::from(VK_LWIN.0)), &mut win_down),
-            HookAction::Pass
-        );
-        assert!(!win_down, "Win 抬起必须清掉状态");
+        assert_eq!(decide_key(input(true, VK_E), &mut win_down), HookAction::Pass);
     }
 
     #[test]
     fn after_win_is_released_e_works_again() {
-        // 回归测试：旧实现吞掉 Win 抬起之后，系统（以及它自己的 GetAsyncKeyState）
-        // 认为 Win 还按着，于是之后每一次 E 都被当成 Win+E 吞掉——
+        // 回归测试：曾经吞掉 Win 抬起，系统（以及旧实现的 GetAsyncKeyState）
+        // 认为 Win 还按着，于是之后每次 E 都被当成 Win+E 吞掉——
         // 用户表现为「e 键失灵，还老是弹出文件管理器」。
         let mut win_down = false;
-        decide_key(input(true, u32::from(VK_LWIN.0)), &mut win_down);
+        decide_key(input(true, VK_LWIN), &mut win_down);
         decide_key(input(true, VK_E), &mut win_down);
-        decide_key(input(false, u32::from(VK_LWIN.0)), &mut win_down);
+        decide_key(input(false, VK_LWIN), &mut win_down);
 
         assert_eq!(
             decide_key(input(true, VK_E), &mut win_down),
@@ -807,10 +754,41 @@ mod hook_tests {
     }
 
     #[test]
+    fn only_the_e_of_win_plus_e_is_ever_swallowed() {
+        // 不变量：整个键盘上，我们只吞「Win 按住时按下的 E」这一个事件。
+        // 这条测试把所有常见键都扫一遍，防止将来某次改动顺手多吞了别的键
+        // ——那种 bug 的表现是「某些键在别的程序里失灵」，极难排查。
+        let mut win_down = false;
+        let everything_except_e = [
+            0x08, 0x09, 0x0D, 0x1B, 0x20, // Backspace / Tab / Enter / Esc / Space
+            0x25, 0x26, 0x27, 0x28, // 方向键
+            0x10, 0x11, 0x12, 0x5B, 0x5C, // Shift / Ctrl / Alt / LWin / RWin
+            0x41, 0x44, 0x51, 0x53, 0x5A, // A / D / Q / S / Z
+            0x70, 0x7B, 0x87, // F1 / F12 / F24
+        ];
+
+        // Win 按住时，除了 E 全放行。
+        decide_key(input(true, VK_LWIN), &mut win_down);
+        for vk in everything_except_e {
+            assert_eq!(
+                decide_key(input(true, vk as u32), &mut win_down),
+                HookAction::Pass,
+                "Win 按住时按下的 0x{vk:02X} 不该被吞"
+            );
+            assert_eq!(
+                decide_key(input(false, vk as u32), &mut win_down),
+                HookAction::Pass,
+                "0x{vk:02X} 的抬起不该被吞"
+            );
+        }
+    }
+
+    #[test]
     fn injected_and_modified_combos_are_left_alone() {
         let mut win_down = true;
 
         // 其它程序用 SendInput 合成的 Win+E：不碰，否则自动化会误触发。
+        // （Windows 本身也会丢弃合成的 Win 事件，我们不做二次过滤之外的判断。）
         let injected = KeyboardInput {
             injected: true,
             ..input(true, VK_E)
