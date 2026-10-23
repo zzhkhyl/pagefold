@@ -18,6 +18,19 @@
 //!
 //! 低层键盘钩子的回调由**安装它的线程**接收，因此钩子必须装在拥有消息循环的线程上。
 //! 这里让宿主主线程同时也是消息循环线程，不额外起线程。
+//!
+//! ## 只吞一个键
+//!
+//! 这是本模块最重要的约束：**除了「Win 按住时按下的 E」，任何事件都原样放行**，
+//! 包括 Win 自己的按下与抬起。
+//!
+//! 原因很实在：吞掉 Win 的「抬起」，系统就会认为 Win 一直按着（它没收到释放），
+//! 之后每一次 `E` 都被当成 `Win+E`——用户在记事本里打不出 `e`，还会反复把本程序
+//! 叫到前台；更广义地说，任何被吞掉的键都会让「系统看到的键盘」与「物理键盘」
+//! 逐渐错位，最终表现成别人家的快捷键乱跳。
+//!
+//! 代价：我们吞掉 `E` 之后，系统只看到「单独按了一下 Win」，可能弹一下开始菜单。
+//! 这比让 Win 卡在按下状态轻得多，因此接受它。
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -35,10 +48,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, HICON,
     IDI_APPLICATION, IMAGE_ICON, IsWindowVisible, KBDLLHOOKSTRUCT, LoadIconW, LoadImageW,
-    LR_SHARED, MB_ICONERROR, MB_OK, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW,
+    LLKHF_INJECTED, LR_SHARED, MB_ICONERROR, MB_OK, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG,
+    MessageBoxW,
     PostMessageW, PostQuitMessage, RegisterClassW, SM_CXSMICON, SW_SHOW, SetForegroundWindow,
     SetWindowsHookExW, ShowWindow, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_COMMAND, WM_DESTROY, WM_KEYDOWN, WM_KEYUP,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_COMMAND, WM_DESTROY, WM_KEYDOWN,
     WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WINDOW_EX_STYLE,
     WINDOW_STYLE,
 };
@@ -89,11 +103,18 @@ static STATE: OnceLock<HostState> = OnceLock::new();
 /// 托盘图标是否已添加。退出时必须对称地删除，否则系统托盘里会留下一个幽灵图标。
 static TRAY_ADDED: AtomicBool = AtomicBool::new(false);
 
-/// 是否需要在收到 Win 键抬起时吞掉它。
+/// Win 键当前是否按下。**由钩子自己维护**，不读 `GetAsyncKeyState`。
 ///
-/// 接管 `Win+E` 时必须连 Win 键的抬起一起吞：我们吃掉了 `E`，
-/// 系统就只看到「单独按下并松开 Win」，于是会弹出开始菜单。
-static SWALLOW_WIN_KEYUP: AtomicBool = AtomicBool::new(false);
+/// ## 为什么不能读系统状态
+///
+/// 旧实现用 `GetAsyncKeyState(VK_LWIN)` 判断，并且会**吞掉 Win 的抬起**（为了压掉开始菜单）。
+/// 吞掉一个「抬起」等于让系统永远认为 Win 还按着——于是接下来每一次 `E` 都被当成
+/// `Win+E` 吞掉：用户在记事本里打不出 `e`，还会反复把本程序叫到前台。
+/// 那正是「接管后其它软件键盘失灵/触发别的动作」的成因。
+///
+/// 现在改为：只吞那一个 `E` 的按下，**Win 的按下与抬起一律原样放行**，
+/// 系统看到的键状态因此始终与物理一致；Win 是否按下由钩子自己的事件流维护。
+static WIN_DOWN: AtomicBool = AtomicBool::new(false);
 
 /// 运行热键宿主。**该函数会阻塞**，直到用户在托盘菜单里选择退出。
 pub fn run(app_title: &str, exe_path: PathBuf) -> anyhow::Result<()> {
@@ -149,6 +170,10 @@ pub fn run(app_title: &str, exe_path: PathBuf) -> anyhow::Result<()> {
         // 所以下面这个消息循环同时也是钩子的派发循环。
         let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), Some(instance), 0)
             .context("安装键盘钩子失败")?;
+
+        // 钩子可能是「Win 正按着」的时候装上的（例如用户先按住 Win 再启动本程序）。
+        // 这时的状态只能问系统一次；之后全部由钩子自己的事件流维护。
+        WIN_DOWN.store(win_key_physically_down(), Ordering::Relaxed);
 
         tracing::info!("热键宿主已启动：托盘图标就绪，Win+E 已接管（托盘菜单可退出）");
 
@@ -226,7 +251,16 @@ unsafe extern "system" fn window_proc(
     }
 }
 
-/// 低层键盘钩子：吞掉 `Win+E`，改为投递一条「激活主窗口」的消息。
+/// 低层键盘钩子：只吞 `Win+E` 里的那一个 `E`，其余全部原样放行。
+///
+/// ## 三条不能破的规矩
+///
+/// 1. **只吞一个键**：除了「Win 按住时按下的 E」，任何键（包括 Win 自己的按下与抬起）
+///    都不许吞。键盘状态一旦与物理状态脱节，别的程序就会收到错误的组合键。
+/// 2. **不猜测、不延时**：回调里只做几次原子操作与一次 `PostMessage`，
+///    耗时动作全部走 [`spawn_off_thread`]（回调超时会被系统摘掉钩子）。
+/// 3. **不碰注入事件**：其它程序用 `SendInput` 合成的事件直接放行，
+///    否则自动化工具、屏幕键盘都会莫名失效。
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     // SAFETY: 低层键盘钩子的 `lParam` 恒为指向 `KBDLLHOOKSTRUCT` 的有效指针，
     // 且在整个回调期间保持有效（由系统保证）。函数体整体是一层 FFI 封装，
@@ -240,39 +274,108 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         let event = wparam.0 as u32;
         let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
 
-        match event {
-            WM_KEYDOWN | WM_SYSKEYDOWN => {
-                if info.vkCode == u32::from(b'E') && win_key_down() {
-                    SWALLOW_WIN_KEYUP.store(true, Ordering::Relaxed);
-                    if let Some(state) = STATE.get() {
-                        let window = HWND(state.window as *mut core::ffi::c_void);
-                        let _ = PostMessageW(Some(window), WM_HOST_ACTIVATE, WPARAM(0), LPARAM(0));
-                    }
-                    // 返回 1 = 吞掉这次按键，既不交给资源管理器，也不交给前台程序。
-                    return LRESULT(1);
-                }
+        let mut win_down = WIN_DOWN.load(Ordering::Relaxed);
+        let action = decide_key(
+            KeyboardInput {
+                is_down: matches!(event, WM_KEYDOWN | WM_SYSKEYDOWN),
+                // `SYS` 变体意味着 Alt 正按着：那不是 `Win+E`，交给系统。
+                with_alt: matches!(event, WM_SYSKEYDOWN | WM_SYSKEYUP),
+                vk: info.vkCode,
+                injected: info.flags.0 & LLKHF_INJECTED.0 != 0,
+                other_modifier_down: modifier_down(),
+            },
+            &mut win_down,
+        );
+        WIN_DOWN.store(win_down, Ordering::Relaxed);
+
+        if action == HookAction::Activate {
+            if let Some(state) = STATE.get() {
+                let window = HWND(state.window as *mut core::ffi::c_void);
+                let _ = PostMessageW(Some(window), WM_HOST_ACTIVATE, WPARAM(0), LPARAM(0));
             }
-            WM_KEYUP | WM_SYSKEYUP => {
-                let is_win_key =
-                    info.vkCode == u32::from(VK_LWIN.0) || info.vkCode == u32::from(VK_RWIN.0);
-                if is_win_key && SWALLOW_WIN_KEYUP.swap(false, Ordering::Relaxed) {
-                    return LRESULT(1);
-                }
-            }
-            _ => {}
+            // 返回 1 = 吞掉这一次 `E` 的按下，既不交给资源管理器，也不交给前台程序。
+            return LRESULT(1);
         }
 
         CallNextHookEx(None, code, wparam, lparam)
     }
 }
 
-/// Win 键当前是否按下。
+/// 钩子对一次键盘事件的处理决定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HookAction {
+    /// 原样放行。
+    Pass,
+    /// 吞掉，并唤起主窗口。
+    Activate,
+}
+
+/// 一次键盘事件里与判定相关的字段。
+#[derive(Debug, Clone, Copy)]
+struct KeyboardInput {
+    is_down: bool,
+    /// `WM_SYSKEY*`：Alt 组合。
+    with_alt: bool,
+    vk: u32,
+    /// `LLKHF_INJECTED`：由 `SendInput` 等合成的事件。
+    injected: bool,
+    /// Ctrl / Shift / Alt 之一正按着。
+    other_modifier_down: bool,
+}
+
+/// 判定一次按键该怎么处理，并顺带维护 Win 键状态。
 ///
-/// 用 `GetAsyncKeyState` 而不是自己跟踪按键状态：钩子可能从中间被安装，
-/// 自维护的状态在安装那一刻是空的，会导致第一次 `Win+E` 漏判。
-fn win_key_down() -> bool {
-    let pressed = |key: i32| unsafe { (GetAsyncKeyState(key) as u16 & 0x8000) != 0 };
-    pressed(i32::from(VK_LWIN.0)) || pressed(i32::from(VK_RWIN.0))
+/// 抽成纯函数是为了能单测——这段判断的正确性直接决定「接管 Win+E 之后，
+/// 别人的键盘还能不能正常用」。它只有一条会返回 [`HookAction::Activate`] 的路径：
+/// **Win 按住 + 单独按 E + 没有别的修饰键 + 不是合成事件**。
+fn decide_key(input: KeyboardInput, win_down: &mut bool) -> HookAction {
+    // 合成事件一律放行，也不据它改状态：否则自动化/屏幕键盘会误触发，
+    // 或者被我们吞掉后让调用方以为按键丢了。
+    if input.injected {
+        return HookAction::Pass;
+    }
+
+    if is_win_key(input.vk) {
+        // 只记状态，不吞：Win 的按下与抬起必须原样交给系统，
+        // 否则系统会认为 Win 一直按着（见 `WIN_DOWN` 的注释）。
+        *win_down = input.is_down;
+        return HookAction::Pass;
+    }
+
+    if input.is_down
+        && input.vk == u32::from(b'E')
+        && *win_down
+        && !input.with_alt
+        && !input.other_modifier_down
+    {
+        return HookAction::Activate;
+    }
+
+    HookAction::Pass
+}
+
+fn is_win_key(vk: u32) -> bool {
+    vk == u32::from(VK_LWIN.0) || vk == u32::from(VK_RWIN.0)
+}
+
+/// 钩子安装那一刻 Win 是否已经按着。
+///
+/// 只在这里读系统状态：钩子还没开始接收事件，自维护的状态是空的。
+/// 装好之后一律不再问系统（原因见 [`WIN_DOWN`]）。
+fn win_key_physically_down() -> bool {
+    let pressed = |key: u16| unsafe { (GetAsyncKeyState(i32::from(key)) as u16 & 0x8000) != 0 };
+    pressed(VK_LWIN.0) || pressed(VK_RWIN.0)
+}
+
+/// Ctrl / Shift / Alt 是否有按下的（Alt 已由 `with_alt` 覆盖，这里查另外两个与 Alt 的系统键）。
+///
+/// 只查不改：这些键我们从没吞过，系统状态是可信的。
+fn modifier_down() -> bool {
+    let pressed = |key: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY| unsafe {
+        (GetAsyncKeyState(i32::from(key.0)) as u16 & 0x8000) != 0
+    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_MENU, VK_SHIFT};
+    pressed(VK_CONTROL) || pressed(VK_SHIFT) || pressed(VK_MENU)
 }
 
 /// 把耗时动作挪到后台线程执行。
@@ -560,5 +663,106 @@ mod tests {
     fn wide_copy_tolerates_an_empty_buffer() {
         let mut buffer: [u16; 0] = [];
         copy_wide("abc", &mut buffer);
+    }
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+
+    const VK_E: u32 = b'E' as u32;
+
+    fn input(is_down: bool, vk: u32) -> KeyboardInput {
+        KeyboardInput {
+            is_down,
+            with_alt: false,
+            vk,
+            injected: false,
+            other_modifier_down: false,
+        }
+    }
+
+    #[test]
+    fn win_plus_e_activates_once_and_only_on_key_down() {
+        let mut win_down = false;
+
+        // Win 按下：放行，但记住状态。
+        assert_eq!(
+            decide_key(input(true, u32::from(VK_LWIN.0)), &mut win_down),
+            HookAction::Pass
+        );
+        assert!(win_down);
+
+        // Win+E：吞掉。
+        assert_eq!(
+            decide_key(input(true, VK_E), &mut win_down),
+            HookAction::Activate
+        );
+        // 同一个 E 的抬起不该再触发一次。
+        assert_eq!(
+            decide_key(input(false, VK_E), &mut win_down),
+            HookAction::Pass
+        );
+    }
+
+    #[test]
+    fn e_alone_and_win_release_are_never_swallowed() {
+        // 没按 Win 时 E 就是普通字母，必须原样放行——否则用户在别的程序里打不出 e。
+        let mut win_down = false;
+        assert_eq!(
+            decide_key(input(true, VK_E), &mut win_down),
+            HookAction::Pass
+        );
+
+        // Win 抬起也放行：吞掉它会让系统认为 Win 一直按着。
+        let mut win_down = true;
+        assert_eq!(
+            decide_key(input(false, u32::from(VK_LWIN.0)), &mut win_down),
+            HookAction::Pass
+        );
+        assert!(!win_down, "Win 抬起必须清掉状态");
+    }
+
+    #[test]
+    fn after_win_is_released_e_works_again() {
+        // 回归测试：旧实现吞掉 Win 抬起之后，系统（以及它自己的 GetAsyncKeyState）
+        // 认为 Win 还按着，于是之后每一次 E 都被当成 Win+E 吞掉——
+        // 用户表现为「e 键失灵，还老是弹出文件管理器」。
+        let mut win_down = false;
+        decide_key(input(true, u32::from(VK_LWIN.0)), &mut win_down);
+        decide_key(input(true, VK_E), &mut win_down);
+        decide_key(input(false, u32::from(VK_LWIN.0)), &mut win_down);
+
+        assert_eq!(
+            decide_key(input(true, VK_E), &mut win_down),
+            HookAction::Pass,
+            "松开 Win 之后 E 必须恢复正常"
+        );
+    }
+
+    #[test]
+    fn injected_and_modified_combos_are_left_alone() {
+        let mut win_down = true;
+
+        // 其它程序用 SendInput 合成的 Win+E：不碰，否则自动化会误触发。
+        let injected = KeyboardInput {
+            injected: true,
+            ..input(true, VK_E)
+        };
+        assert_eq!(decide_key(injected, &mut win_down), HookAction::Pass);
+
+        // Win+Alt+E：`SYS` 变体，交给系统。
+        let with_alt = KeyboardInput {
+            with_alt: true,
+            ..input(true, VK_E)
+        };
+        assert_eq!(decide_key(with_alt, &mut win_down), HookAction::Pass);
+
+        // Win+Ctrl+E 之类：带别的修饰键就不抢。
+        let with_ctrl = KeyboardInput {
+            other_modifier_down: true,
+            ..input(true, VK_E)
+        };
+        assert_eq!(decide_key(with_ctrl, &mut win_down), HookAction::Pass);
     }
 }
