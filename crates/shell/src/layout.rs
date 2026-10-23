@@ -726,10 +726,10 @@ impl ShellView {
                 default_handler: self.folder_integration.default_handler,
             },
             shortcuts: {
-                // 合并默认值 + 用户覆盖，并顺手算一次冲突。
-                // 这些都在视图之外算好：视图只画，不做判断。
-                let items = fm_core::resolve(&self.config.shortcuts);
-                let conflicts = fm_core::conflicts(&items);
+                // 清单与冲突都是**缓存**（配置变化时才重算）：设置页每次滚动都会
+                // 重建整棵树，逐帧 resolve 25 条命令是纯浪费。
+                let items = self.shortcut_items.clone();
+                let conflicts = self.shortcut_conflicts.clone();
 
                 // 全局热键的问题只做**纯规则**判断（语法、Win 组合、与内部命令撞车）。
                 //

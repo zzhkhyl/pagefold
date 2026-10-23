@@ -754,10 +754,15 @@ fn info_line(label: &'static str, value: SharedString, tokens: &Tokens) -> AnyEl
 }
 
 /// 「快捷键」卡片：全局唤醒热键 + 应用内命令。
+/// 「快捷键」卡片：全局唤醒热键 + 应用内命令。
 ///
-/// 两块放同一张卡里是有意的：用户改键位时最需要看到的是**冲突**，
-/// 而冲突可能跨过这两块的边界（内部命令撞上全局热键）。放在一起，
-/// 一眼就能看出「这个组合到底被谁占了」。
+/// 排版与其它设置卡保持一致的三条规则（之前这一张三项都没做到，看起来才「不协调」）：
+///
+/// 1. **左右各留 16px**：与 `setting_row` 相同，否则文字贴着卡片边框，
+///    在宽窗口里会显得左一个贴边、右一个贴边；
+/// 2. **每行之间画分隔线**：25 行文字堆在一起，没有横线就没有「一行一项」的感觉；
+/// 3. **右侧控件成列**：键位胶囊定宽居中、开关与按钮各占固定宽度，
+///    这样从上到下能看出三条竖直的列，而不是忽宽忽窄。
 fn shortcuts_card(
     snapshot: &SettingsSnapshot,
     tokens: &Tokens,
@@ -765,22 +770,15 @@ fn shortcuts_card(
 ) -> AnyElement {
     let shortcuts = &snapshot.shortcuts;
 
-    // —— 全局唤醒热键 ——
     let global_keys = fm_core::KeyCombo::parse(&shortcuts.global_keys)
         .map(|combo| combo.display())
         .unwrap_or_else(|| shortcuts.global_keys.clone());
 
     let edit_global = {
         let handler = Rc::clone(&handlers.edit_global_hotkey);
-        widgets::text_button(
-            "shortcut-edit-global",
-            "修改",
-            None,
-            "按下新的组合（支持 Ctrl / Alt / Shift）",
-            true,
-            tokens,
-            move |_: &ClickEvent, window, cx| handler(window, cx),
-        )
+        edit_link("shortcut-edit-global", tokens, move |window, cx| {
+            handler(window, cx)
+        })
     };
     let toggle_global = {
         let handler = Rc::clone(&handlers.toggle_global_hotkey);
@@ -792,23 +790,27 @@ fn shortcuts_card(
         )
     };
 
-    // —— 应用内命令：按分组排列 ——
+    // —— 应用内命令：按分组排列，组与组之间有一条稍重的分隔 ——
     let mut rows: Vec<AnyElement> = Vec::new();
     let mut current_group: Option<fm_core::Group> = None;
+    let total = shortcuts.items.len();
+    let mut index = 0usize;
+
     for item in &shortcuts.items {
+        index += 1;
         if current_group != Some(item.group) {
             current_group = Some(item.group);
-            rows.push(
-                div()
-                    .pt(px(6.0))
-                    .text_size(px(metrics::FONT_XS))
-                    .text_color(tokens.muted_fg)
-                    .child(item.group.label())
-                    .into_any_element(),
-            );
+            rows.push(group_header(item.group.label(), index > 1, tokens));
         }
-        rows.push(shortcut_row(item, tokens, handlers));
+
+        // 每组最后一行不画底线：组头自带一条上边线，两条叠在一起会变成双线。
+        let last_in_group = shortcuts
+            .items
+            .get(index)
+            .is_none_or(|next| next.group != item.group);
+        rows.push(shortcut_row(item, last_in_group, tokens, handlers));
     }
+    debug_assert_eq!(index, total);
 
     let reset = {
         let handler = Rc::clone(&handlers.reset_shortcuts);
@@ -823,30 +825,20 @@ fn shortcuts_card(
         )
     };
 
-    // 冲突提示：跨行汇总，说明「谁和谁撞了」，而不是只在某一行上标红——
-    // 撞车的两条可能相隔很远，标在一行上会让人找不到另一条。
+    // 冲突提示跨行汇总：撞车的两条可能相隔很远，标在某一行上会让人找不到另一条。
     let mut warnings: Vec<AnyElement> = Vec::new();
     if let Some(problem) = &shortcuts.global_problem {
-        warnings.push(
-            div()
-                .text_size(px(metrics::FONT_XS))
-                .text_color(tokens.danger)
-                .child(format!("全局唤醒：{problem}"))
-                .into_any_element(),
-        );
+        warnings.push(warning_line(format!("全局唤醒：{problem}"), tokens));
     }
     for conflict in &shortcuts.conflicts {
-        warnings.push(
-            div()
-                .text_size(px(metrics::FONT_XS))
-                .text_color(tokens.danger)
-                .child(format!(
-                    "{} 被重复分配：{}",
-                    conflict.keys,
-                    conflict.labels.join("、")
-                ))
-                .into_any_element(),
-        );
+        warnings.push(warning_line(
+            format!(
+                "{} 被重复分配：{}",
+                conflict.keys,
+                conflict.labels.join("、")
+            ),
+            tokens,
+        ));
     }
 
     card(
@@ -868,18 +860,12 @@ fn shortcuts_card(
                 false,
                 tokens,
             ),
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .pt(px(6.0))
-                .children(rows)
-                .into_any_element(),
+            div().flex().flex_col().w_full().children(rows).into_any_element(),
             div()
                 .flex()
                 .flex_col()
                 .gap(px(4.0))
-                .pt(px(6.0))
+                .px(px(16.0))
                 .children(warnings)
                 .into_any_element(),
             setting_row(
@@ -894,22 +880,48 @@ fn shortcuts_card(
     )
 }
 
+/// 分组标题：一条稍重的上边线 + 小号弱化文字。
+///
+/// 用「上边线」而不是「下边线」：组标题永远跟着它下面的第一行，
+/// 画在下边会让人误以为它属于上一组。
+fn group_header(label: &'static str, separated: bool, tokens: &Tokens) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .px(px(16.0))
+        .pt(px(if separated { 10.0 } else { 8.0 }))
+        .pb(px(4.0))
+        .when(separated, |element| {
+            element.border_t_1().border_color(tokens.border)
+        })
+        .child(
+            div()
+                .text_size(px(metrics::FONT_XS))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(tokens.muted_fg)
+                .child(label),
+        )
+        .into_any_element()
+}
+
 /// 一行应用内快捷键：名称 + 当前键位 + 启用开关 + 修改。
+///
+/// 右侧三件套都定宽，形成三列；否则「Ctrl + Shift + T」这类长键位会把开关与按钮
+/// 挤得忽左忽右——那正是这一版之前的观感。
 fn shortcut_row(
     item: &fm_core::ResolvedShortcut,
+    last_in_group: bool,
     tokens: &Tokens,
     handlers: &SettingsHandlers,
 ) -> AnyElement {
     let id_for_edit = item.id.clone();
     let edit_handler = Rc::clone(&handlers.edit_shortcut);
-    let edit = widgets::text_button(
+    let edit = edit_link(
         format!("shortcut-edit-{}", item.id),
-        "修改",
-        None,
-        "按下新的组合",
-        true,
         tokens,
-        move |_: &ClickEvent, window, cx| edit_handler(id_for_edit.clone(), window, cx),
+        move |window, cx| edit_handler(id_for_edit.clone(), window, cx),
     );
 
     let id_for_toggle = item.id.clone();
@@ -932,37 +944,66 @@ fn shortcut_row(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(8.0))
-        .py(px(3.0))
+        .gap(px(10.0))
+        .w_full()
+        .px(px(16.0))
+        .py(px(5.0))
+        .min_h(px(tokens.row_height))
+        .when(!last_in_group, |element| {
+            element.border_b_1().border_color(tokens.border)
+        })
         .child(
             div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
                 .flex_grow(1.0)
                 .min_w(px(0.0))
                 .overflow_hidden()
-                .text_size(px(metrics::FONT_SM))
-                .text_color(label_color)
-                .child(item.label.clone()),
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .text_size(px(metrics::FONT_SM))
+                        .text_color(label_color)
+                        .child(item.label.clone()),
+                )
+                .when(item.danger, |element| {
+                    element.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(metrics::FONT_XS))
+                            .text_color(tokens.danger)
+                            .child("危险"),
+                    )
+                }),
         )
-        .when(item.danger, |element| {
-            element.child(
-                div()
-                    .flex_none()
-                    .text_size(px(metrics::FONT_XS))
-                    .text_color(tokens.danger)
-                    .child("危险"),
-            )
-        })
-        .child(kbd_hint(item.display_keys(), tokens))
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .flex_row()
+                .justify_end()
+                .w(px(KEY_COLUMN_WIDTH))
+                .child(kbd_hint(item.display_keys(), tokens)),
+        )
         .child(toggle)
         .child(edit)
         .into_any_element()
 }
 
+/// 键位列的宽度。
+///
+/// 取「`Ctrl + Shift + Delete` 这类最长组合」的大致像素宽：定宽之后每行的胶囊
+/// 都能对齐，而不是被文字长度推得忽左忽右。
+const KEY_COLUMN_WIDTH: f32 = 148.0;
+
 /// 键位的展示样式：等宽 + 描边，像一枚键帽。
 fn kbd_hint(keys: String, tokens: &Tokens) -> AnyElement {
     div()
         .flex_none()
-        .px(px(6.0))
+        .px(px(8.0))
         .py(px(2.0))
         .rounded(px(4.0))
         .border_1()
@@ -975,6 +1016,50 @@ fn kbd_hint(keys: String, tokens: &Tokens) -> AnyElement {
         .into_any_element()
 }
 
+/// 行尾的「修改」链接。
+///
+/// 刻意不用 `widgets::text_button`：那个带 tooltip，而设置页里 25 行各挂一个
+/// tooltip，鼠标滚过列表时会不断创建/销毁 tooltip 实体——这也是「滚轮很卡」的来源之一。
+/// 这里只保留 hover 变色，够用且便宜。
+fn edit_link<F>(
+    id: impl Into<gpui::ElementId>,
+    tokens: &Tokens,
+    on_click: F,
+) -> AnyElement
+where
+    F: Fn(&mut Window, &mut App) + 'static,
+{
+    let muted = tokens.muted_fg;
+    let foreground = tokens.fg;
+    let hover = tokens.hover;
+
+    div()
+        .id(id)
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .w(px(44.0))
+        .h(px(22.0))
+        .rounded(px(metrics::RADIUS))
+        .text_size(px(metrics::FONT_XS))
+        .text_color(muted)
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover).text_color(foreground))
+        .on_click(move |_: &ClickEvent, window, cx: &mut App| on_click(window, cx))
+        .child("修改")
+        .into_any_element()
+}
+
+/// 一条冲突提示。统一用危险色：它们都意味着「这组键位现在不生效」。
+fn warning_line(text: String, tokens: &Tokens) -> AnyElement {
+    div()
+        .text_size(px(metrics::FONT_XS))
+        .text_color(tokens.danger)
+        .child(text)
+        .into_any_element()
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -217,6 +217,14 @@ pub struct ShellView {
     pub(crate) shortcut_capture: Option<crate::shortcut_handlers::Capture>,
     /// 录制浮层的焦点句柄：它必须能拿到按键，否则录不到任何东西。
     pub(crate) shortcut_focus: FocusHandle,
+    /// 合并后的快捷键清单（默认值 + 用户覆盖）。
+    ///
+    /// **缓存在这里**而不是每帧 `resolve()` 一次：设置页每次滚动都会重建整棵树，
+    /// 25 条命令合起来是「解析 25 个键位 + 25 个字符串 + 一张 BTreeMap」，
+    /// 每帧做一遍纯属浪费。只在配置变化时刷新（见 `refresh_shortcut_cache`）。
+    pub(crate) shortcut_items: Vec<fm_core::ResolvedShortcut>,
+    /// 与 [`Self::shortcut_items`] 同时刷新的冲突列表。
+    pub(crate) shortcut_conflicts: Vec<fm_core::shortcut::Conflict>,
     /// 标签条的横向滚动位置。
     ///
     /// 标签有最小宽度（96px），多到装不下时靠横向滚动而不是无限压缩——
@@ -332,6 +340,10 @@ impl ShellView {
         // 必须在窗口接收按键之前装好，因此放在构造函数里而不是首帧渲染。
         crate::shortcuts::apply(cx, &config);
 
+        // 设置页要展示的清单与冲突，同样只算这一次（之后配置变化时再刷）。
+        let shortcut_items = fm_core::resolve(&config.shortcuts);
+        let shortcut_conflicts = fm_core::conflicts(&shortcut_items);
+
         let tokens = build_tokens(&config, cx);
         let preview_open = config.show_preview;
 
@@ -412,6 +424,8 @@ impl ShellView {
                 .unwrap_or_default(),
             shortcut_capture: None,
             shortcut_focus: cx.focus_handle(),
+            shortcut_items,
+            shortcut_conflicts,
             tab_scroll: ScrollHandle::new(),
             renaming: None,
             area_menu_suppressed: false,
@@ -2964,6 +2978,15 @@ impl ShellView {
     /// 不存在的位置——这也是设置页里那句「移动或卸载前请先恢复」的由来。
     fn exe_path() -> Option<PathBuf> {
         std::env::current_exe().ok()
+    }
+
+    /// 重算设置页用的快捷键清单与冲突。
+    ///
+    /// 只在配置真的变了之后调用（改键 / 启停 / 恢复默认）。设置页每帧都会用到
+    /// 这两个值，逐帧 `resolve` 一遍 25 条命令纯属浪费——滚动时尤其明显。
+    pub(crate) fn refresh_shortcut_cache(&mut self) {
+        self.shortcut_items = fm_core::resolve(&self.config.shortcuts);
+        self.shortcut_conflicts = fm_core::conflicts(&self.shortcut_items);
     }
 
     /// 重读接管状态。写操作之后必须调用，否则开关会停在用户点击前的样子。
