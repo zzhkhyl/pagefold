@@ -32,10 +32,10 @@
 ; CI 打 tag 时传 `/DAppVersion=x.y.z /DAppVersionQuad=x.y.z.0` 覆盖，
 ; 因此必须用 `#ifndef` 包起来：ISPP 对已定义的符号再次 `#define` 会直接报错。
 #ifndef AppVersion
-  #define AppVersion "0.5.3"
+  #define AppVersion "0.6.0"
 #endif
 #ifndef AppVersionQuad
-  #define AppVersionQuad "0.5.3.0"
+  #define AppVersionQuad "0.6.0.0"
 #endif
 
 ; 载荷与图标：路径相对本脚本所在目录解析。
