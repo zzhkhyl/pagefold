@@ -23,7 +23,7 @@ use gpui::{
 use gpui_component::{Icon, Sizable as _};
 use gpui_kit_assets::IconName;
 
-use crate::tokens::{Tokens, metrics, with_alpha};
+use crate::tokens::{Tokens, metrics};
 use crate::widgets;
 
 /// 内容列的最大宽度。
@@ -31,31 +31,6 @@ use crate::widgets;
 /// 设置项是「标签 + 控件」的行，行再宽也只会让两者离得更远；
 /// 720 是设计稿 `.settings-panel` 的量级，也与常见系统设置页一致。
 pub const PAGE_MAX_WIDTH: f32 = 720.0;
-
-/// 快捷键表：**帮助页与设置页共用这份清单**。
-///
-/// 与 `fm-shell::actions` 的键位绑定是两处独立的真相，这一点无法靠类型系统消除
-/// （绑定在 `fm-app` 的 `cx.bind_keys` 里，而视图层不能依赖那两个 crate）。
-/// 因此把「展示用清单」集中在这里，并在文档里注明：改键位时两处一起改。
-pub const SHORTCUTS: &[(&str, &str)] = &[
-    ("Ctrl+T", "新建标签页"),
-    ("Ctrl+W", "关闭标签页"),
-    ("Ctrl+Shift+T", "重新打开关闭的标签页"),
-    ("Ctrl+,", "打开设置"),
-    ("Ctrl+L", "聚焦地址栏"),
-    ("Ctrl+1 / Ctrl+2", "详细信息 / 图标视图"),
-    ("Ctrl+3", "切换深浅主题"),
-    ("Alt+← / Alt+→", "后退 / 前进"),
-    ("Backspace", "上一级"),
-    ("F5", "刷新"),
-    ("Ctrl+A", "全选"),
-    ("Ctrl+C / Ctrl+X / Ctrl+V", "复制 / 剪切 / 粘贴"),
-    ("F2", "重命名"),
-    ("Delete", "移到回收站"),
-    ("↑ / ↓（Shift 扩选）", "移动焦点"),
-    ("Enter", "打开"),
-    ("Esc", "关闭菜单 / 取消输入"),
-];
 
 /// 文件夹接管的当前状态。
 ///
@@ -109,6 +84,10 @@ pub struct ShortcutsSnapshot {
     /// 全局唤醒热键的键位（`Binding` 形式）。
     pub global_keys: String,
     pub global_enabled: bool,
+    /// 每个分组是否展开（下标见 `fm_core::Group::ALL`）。
+    ///
+    /// 默认全部折叠：25 行铺开时页面很长，滚动也重；折叠后只渲染组标题。
+    pub expanded: Vec<bool>,
     /// 全局热键的问题（被占用、与内部命令冲突等），`None` = 正常。
     pub global_problem: Option<String>,
 }
@@ -152,10 +131,17 @@ pub struct SettingsHandlers {
     pub toggle_global_hotkey: Toggle,
     /// 全部恢复默认。
     pub reset_shortcuts: Toggle,
+    /// 展开 / 折叠一组快捷键（参数是 `Group::ALL` 的下标）。
+    pub toggle_shortcut_group: Setter<usize>,
 }
 
 /// 渲染整页。
-pub fn page(snapshot: &SettingsSnapshot, tokens: &Tokens, handlers: SettingsHandlers) -> AnyElement {
+pub fn page(
+    snapshot: &SettingsSnapshot,
+    tokens: &Tokens,
+    handlers: SettingsHandlers,
+    scroll: &gpui::ScrollHandle,
+) -> AnyElement {
     let column = div()
         .flex()
         .flex_col()
@@ -179,6 +165,7 @@ pub fn page(snapshot: &SettingsSnapshot, tokens: &Tokens, handlers: SettingsHand
         .min_h(px(0.0))
         .w_full()
         .overflow_y_scroll()
+        .track_scroll(scroll)
         .bg(tokens.bg)
         // 用「居中行 + 定宽列」实现水平居中，而不是 `mx_auto`：
         // 定宽列在窄窗下需要先被压缩（`max_w` + `w_full`），
@@ -537,9 +524,10 @@ fn about_card(
                 .child(path_row),
         );
 
-    let shortcuts = shortcut_table(tokens);
-
-    let card = div()
+    // 这里**不再列快捷键表**：上面那张「快捷键」卡已经把它们逐条列出来了，
+    // 而且是可改、可关、带冲突提示的版本。同一个页面里出现两份键位清单，
+    // 只会让人怀疑「哪个才是真的」。
+    div()
         .flex()
         .flex_col()
         .w_full()
@@ -549,63 +537,12 @@ fn about_card(
         .bg(tokens.surface)
         .overflow_hidden()
         .child(card_header(
-            "关于与快捷键",
-            "键盘操作速查；设置页本身也可以按 Ctrl+, 打开。",
+            "关于",
+            "版本与配置文件位置；键位清单见上方「快捷键」卡片。",
             tokens,
         ))
-        .child(about);
-
-    card.child(
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .px(px(16.0))
-            .py(px(12.0))
-            .child(widgets::section_label("快捷键", tokens))
-            .child(shortcuts),
-    )
-    .into_any_element()
-}
-
-/// 一行「键位 + 说明」。键位用等宽字体 + 浅底胶囊，说明用正文色。
-fn shortcut_table(tokens: &Tokens) -> AnyElement {
-    let rows = SHORTCUTS.iter().map(|(keys, description)| {
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(12.0))
-            .py(px(3.0))
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(196.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .h(px(22.0))
-                            .px(px(7.0))
-                            .rounded(px(4.0))
-                            .bg(with_alpha(tokens.fg, 0.06))
-                            .font_family(tokens.mono_font.clone())
-                            .text_size(px(metrics::FONT_XS))
-                            .text_color(tokens.fg)
-                            .child(*keys),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_grow(1.0)
-                    .min_w(px(0.0))
-                    .text_size(px(metrics::FONT_SM))
-                    .text_color(tokens.muted_fg)
-                    .child(*description),
-            )
-    });
-
-    div().flex().flex_col().children(rows).into_any_element()
+        .child(about)
+        .into_any_element()
 }
 
 fn theme_segment(
@@ -790,27 +727,39 @@ fn shortcuts_card(
         )
     };
 
-    // —— 应用内命令：按分组排列，组与组之间有一条稍重的分隔 ——
+    // —— 应用内命令：按分组折叠 ——
+    //
+    // 折叠是**性能与可读性**的双重考虑：25 行铺开时页面接近两屏，
+    // 而每一行都要参与布局（滚轮每动一格就要重排整页）。
+    // 默认只画 6 个组标题，用户点开自己关心的那一组。
     let mut rows: Vec<AnyElement> = Vec::new();
-    let mut current_group: Option<fm_core::Group> = None;
-    let total = shortcuts.items.len();
-    let mut index = 0usize;
-
-    for item in &shortcuts.items {
-        index += 1;
-        if current_group != Some(item.group) {
-            current_group = Some(item.group);
-            rows.push(group_header(item.group.label(), index > 1, tokens));
+    for (group_index, group) in fm_core::Group::ALL.iter().enumerate() {
+        let in_group: Vec<&fm_core::ResolvedShortcut> = shortcuts
+            .items
+            .iter()
+            .filter(|item| item.group == *group)
+            .collect();
+        if in_group.is_empty() {
+            continue;
         }
 
-        // 每组最后一行不画底线：组头自带一条上边线，两条叠在一起会变成双线。
-        let last_in_group = shortcuts
-            .items
-            .get(index)
-            .is_none_or(|next| next.group != item.group);
-        rows.push(shortcut_row(item, last_in_group, tokens, handlers));
+        let open = shortcuts.expanded.get(group_index).copied().unwrap_or(false);
+        rows.push(group_header(
+            *group,
+            group_index,
+            open,
+            in_group.len(),
+            tokens,
+            handlers,
+        ));
+
+        if open {
+            let last = in_group.len().saturating_sub(1);
+            for (position, item) in in_group.into_iter().enumerate() {
+                rows.push(shortcut_row(item, position == last, tokens, handlers));
+            }
+        }
     }
-    debug_assert_eq!(index, total);
 
     let reset = {
         let handler = Rc::clone(&handlers.reset_shortcuts);
@@ -843,7 +792,7 @@ fn shortcuts_card(
 
     card(
         "快捷键",
-        "应用内快捷键在窗口有焦点时生效；全局唤醒热键在程序常驻后台时也能把窗口叫出来。改动立即生效。",
+        "应用内快捷键在窗口有焦点时生效；全局唤醒热键在程序常驻后台时也能把窗口叫出来。点分组标题展开，改动立即生效。",
         vec![
             setting_row(
                 "全局唤醒热键",
@@ -884,24 +833,55 @@ fn shortcuts_card(
 ///
 /// 用「上边线」而不是「下边线」：组标题永远跟着它下面的第一行，
 /// 画在下边会让人误以为它属于上一组。
-fn group_header(label: &'static str, separated: bool, tokens: &Tokens) -> AnyElement {
+fn group_header(
+    group: fm_core::Group,
+    index: usize,
+    open: bool,
+    count: usize,
+    tokens: &Tokens,
+    handlers: &SettingsHandlers,
+) -> AnyElement {
+    let handler = Rc::clone(&handlers.toggle_shortcut_group);
+    let chevron = if open {
+        IconName::ChevronDown
+    } else {
+        IconName::ChevronRight
+    };
+    let hover = tokens.hover;
+    let muted = tokens.muted_fg;
+    let foreground = tokens.fg;
+
     div()
+        .id(("shortcut-group", index))
         .flex()
         .flex_row()
         .items_center()
+        .gap(px(6.0))
         .w_full()
         .px(px(16.0))
-        .pt(px(if separated { 10.0 } else { 8.0 }))
-        .pb(px(4.0))
-        .when(separated, |element| {
-            element.border_t_1().border_color(tokens.border)
-        })
+        .py(px(7.0))
+        .border_t_1()
+        .border_color(tokens.border)
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover))
+        .on_click(move |_: &ClickEvent, window, cx: &mut App| handler(index, window, cx))
+        .child(
+            Icon::new(chevron)
+                .with_size(px(12.0))
+                .text_color(muted),
+        )
         .child(
             div()
                 .text_size(px(metrics::FONT_XS))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(tokens.muted_fg)
-                .child(label),
+                .text_color(foreground)
+                .child(group.label()),
+        )
+        .child(
+            div()
+                .text_size(px(metrics::FONT_XS))
+                .text_color(muted)
+                .child(format!("{count} 项")),
         )
         .into_any_element()
 }
@@ -1084,26 +1064,6 @@ mod tests {
         assert!(full.is_fully_installed());
     }
 
-    #[test]
-    fn shortcut_table_covers_every_documented_group() {
-        // 帮助页是用户唯一的键位来源，缺项等于「功能不存在」。
-        // 这里只断言关键项存在，不锁死顺序：顺序调整不应该让测试失败。
-        for keys in [
-            "Ctrl+T",
-            "Ctrl+W",
-            "Ctrl+L",
-            "Ctrl+,",
-            "F2",
-            "Delete",
-            "Enter",
-            "F5",
-        ] {
-            assert!(
-                SHORTCUTS.iter().any(|(key, _)| *key == keys),
-                "快捷键表缺少 {keys}"
-            );
-        }
-    }
 
     #[test]
     fn zoom_hint_only_mentions_the_view_switch_in_details_mode() {
@@ -1151,6 +1111,7 @@ mod tests {
             edit_global_hotkey: Rc::new(|_, _| {}),
             toggle_global_hotkey: Rc::new(|_, _| {}),
             reset_shortcuts: Rc::new(|_, _| {}),
+            toggle_shortcut_group: Rc::new(|_, _, _| {}),
         };
         // 只验证字段类型能被调用，真正调用需要窗口句柄。
         assert!(Rc::strong_count(&handlers.set_dark) == 1);

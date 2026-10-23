@@ -223,6 +223,16 @@ pub struct ShellView {
     /// 25 条命令合起来是「解析 25 个键位 + 25 个字符串 + 一张 BTreeMap」，
     /// 每帧做一遍纯属浪费。只在配置变化时刷新（见 `refresh_shortcut_cache`）。
     pub(crate) shortcut_items: Vec<fm_core::ResolvedShortcut>,
+    /// 哪些分组是展开的（下标见 `fm_core::Group::ALL`）。
+    ///
+    /// 默认全部**折叠**：25 行同时铺开时页面很长，滚动手感也重；
+    /// 折叠后只渲染组标题，用户点开自己关心的那一组即可。
+    pub(crate) shortcut_groups: [bool; fm_core::Group::ALL.len()],
+    /// 设置页的纵向滚动位置。
+    ///
+    /// 由视图层 `track_scroll` 接管：这样进设置页时能确保从顶部开始，
+    /// 也让「滚动到底部」这类操作有据可依（之前用的是容器内部状态，外面看不到）。
+    pub(crate) settings_scroll: ScrollHandle,
     /// 与 [`Self::shortcut_items`] 同时刷新的冲突列表。
     pub(crate) shortcut_conflicts: Vec<fm_core::shortcut::Conflict>,
     /// 标签条的横向滚动位置。
@@ -426,6 +436,8 @@ impl ShellView {
             shortcut_focus: cx.focus_handle(),
             shortcut_items,
             shortcut_conflicts,
+            shortcut_groups: [false; fm_core::Group::ALL.len()],
+            settings_scroll: ScrollHandle::new(),
             tab_scroll: ScrollHandle::new(),
             renaming: None,
             area_menu_suppressed: false,
@@ -2978,6 +2990,14 @@ impl ShellView {
     /// 不存在的位置——这也是设置页里那句「移动或卸载前请先恢复」的由来。
     fn exe_path() -> Option<PathBuf> {
         std::env::current_exe().ok()
+    }
+
+    /// 展开 / 折叠一组快捷键。
+    pub(crate) fn toggle_shortcut_group(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(open) = self.shortcut_groups.get_mut(index) {
+            *open = !*open;
+            cx.notify();
+        }
     }
 
     /// 重算设置页用的快捷键清单与冲突。

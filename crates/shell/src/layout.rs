@@ -754,6 +754,16 @@ impl ShellView {
                 settings_page::ShortcutsSnapshot {
                     items,
                     conflicts,
+                    expanded: {
+                        // 定长数组 → `Vec` 只为穿过快照边界；长度与 `Group::ALL` 一致。
+                        let mut flags = vec![false; fm_core::Group::ALL.len()];
+                        for (index, open) in self.shortcut_groups.iter().enumerate() {
+                            if let Some(slot) = flags.get_mut(index) {
+                                *slot = *open;
+                            }
+                        }
+                        flags
+                    },
                     global_keys,
                     global_enabled: self.config.global_hotkey.enabled,
                     global_problem,
@@ -961,9 +971,20 @@ impl ShellView {
                     }
                 })
             },
+            toggle_shortcut_group: {
+                let view = cx.entity().downgrade();
+                Rc::new(move |index: usize, _window, cx: &mut App| {
+                    if view
+                        .update(cx, |view, cx| view.toggle_shortcut_group(index, cx))
+                        .is_err()
+                    {
+                        tracing::debug!("切换快捷键分组时视图已销毁");
+                    }
+                })
+            },
         };
 
-        settings_page::page(&snapshot, &self.tokens, handlers)
+        settings_page::page(&snapshot, &self.tokens, handlers, &self.settings_scroll)
     }
 
     /// 批量重命名浮层：遮罩 + 居中卡片。

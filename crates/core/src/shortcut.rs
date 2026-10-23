@@ -223,6 +223,27 @@ pub enum Group {
 }
 
 impl Group {
+    /// 全部分组，顺序即界面展示顺序。
+    ///
+    /// 有了它，外壳就能用 `[bool; Group::ALL.len()]` 存「哪些组展开」，
+    /// 不必再自己维护一张与枚举同步的表。
+    pub const ALL: [Group; 6] = [
+        Group::Tabs,
+        Group::Navigation,
+        Group::View,
+        Group::Selection,
+        Group::Edit,
+        Group::List,
+    ];
+
+    /// 在 [`Group::ALL`] 里的下标。
+    pub fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|group| *group == self)
+            .unwrap_or(0)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Group::Tabs => "标签页",
@@ -675,6 +696,23 @@ mod tests {
             Some("tab.close")
         );
         assert!(occupant(&items, "ctrl-alt-shift-k").is_none());
+    }
+
+    #[test]
+    fn group_index_round_trips_through_all() {
+        // 折叠状态用 `[bool; Group::ALL.len()]` 存，下标必须与 `ALL` 一致；
+        // 两者错位会让「展开这一组」变成展开另一组。
+        for (index, group) in Group::ALL.iter().enumerate() {
+            assert_eq!(group.index(), index, "{} 的下标不对", group.label());
+        }
+        // 每条命令的分组必须在 ALL 里（否则它的折叠开关会落到下标 0 上）。
+        for command in COMMANDS {
+            assert!(
+                Group::ALL.contains(&command.group),
+                "{} 的分组不在 ALL 里",
+                command.id
+            );
+        }
     }
 
     #[test]
