@@ -293,6 +293,14 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 let window = HWND(state.window as *mut core::ffi::c_void);
                 let _ = PostMessageW(Some(window), WM_HOST_ACTIVATE, WPARAM(0), LPARAM(0));
             }
+
+            // 我们吞掉了 `E`，于是 shell 只看到「单独按了一下 Win」，松开时会弹开始菜单。
+            // 补一个**无害按键**让它认为这是一次组合即可（详见 `send_neutral_chord_key`）。
+            //
+            // 必须**另起线程**：在低层钩子回调里直接 `SendInput` 会等输入队列处理，
+            // 而输入队列此刻正停在我们这个回调上——两边互等就是死锁。
+            spawn_off_thread(send_neutral_chord_key);
+
             // 返回 1 = 吞掉这一次 `E` 的按下，既不交给资源管理器，也不交给前台程序。
             return LRESULT(1);
         }
@@ -357,6 +365,64 @@ fn decide_key(input: KeyboardInput, win_down: &mut bool) -> HookAction {
 fn is_win_key(vk: u32) -> bool {
     vk == u32::from(VK_LWIN.0) || vk == u32::from(VK_RWIN.0)
 }
+
+/// 让 shell 认为「Win 被用于一次组合」的无害按键：`VK_F24`。
+///
+/// ## 为什么需要它
+///
+/// 我们吞掉了 `E`，shell 那边就只剩「Win 按下 → Win 抬起」，于是按完 `Win+E`
+/// 会顺带弹出开始菜单。要压掉它必须在这中间塞一个键：
+/// shell 判定「Win 是组合键的一部分」靠的是**是否还有别的键在这期间按下**。
+///
+/// ## 为什么选 `VK_F24`
+///
+/// - 它是保留键（`0x87`），标准键盘上不存在，绝大多数程序不会处理它；
+/// - 它没有字符输出，也不改变任何修饰键状态——注入 down+up 之后键盘状态是平衡的。
+///
+/// ## 为什么不能靠「补发一个 Win 抬起」
+///
+/// 实测：注入的 Win 按下/抬起**不会**触发开始菜单，也不会被 shell 当成「用了组合」，
+/// 所以补发 Win 抬起既压不掉开始菜单，还会让按键序列变得奇怪。只有「补一个别的键」
+/// 才是 shell 认的信号。
+///
+/// 代价：前台程序会收到一次 `F24` 的按下与抬起。这是刻意接受的——它比让 Win 卡在
+/// 按下状态（会让后续按键变成 Win+字母）轻得多。
+fn send_neutral_chord_key() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
+    };
+
+    /// 保留键。
+    const NEUTRAL_VK: u16 = 0x87;
+
+    let event = |up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(NEUTRAL_VK),
+                wScan: 0,
+                dwFlags: if up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    Default::default()
+                },
+                time: 0,
+                // 标记来源，便于将来需要时在钩子里认出自己的事件。
+                dwExtraInfo: NEUTRAL_KEY_MARKER,
+            },
+        },
+    };
+
+    let inputs = [event(false), event(true)];
+    let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
+    if sent != inputs.len() as u32 {
+        // 注入失败不致命：只是开始菜单会照常弹出。
+        tracing::debug!(sent, "补发无关键失败，开始菜单可能照常弹出");
+    }
+}
+
+/// 我们用 [`send_neutral_chord_key`] 注入事件时带的标记。
+const NEUTRAL_KEY_MARKER: usize = 0x5046_4B42; // "PFKB"，仅为可读性留的标识
 
 /// 钩子安装那一刻 Win 是否已经按着。
 ///
