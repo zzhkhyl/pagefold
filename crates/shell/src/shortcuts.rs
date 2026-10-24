@@ -90,11 +90,32 @@ pub(crate) fn bindings(config: &Config) -> Vec<KeyBinding> {
 
 /// 重建整张键位表。
 ///
-/// **先清空再绑定**：`bind_keys` 是累加的，直接叠加会让改键之后旧键位仍然生效，
+/// ## 为什么必须先清空
+///
+/// `bind_keys` 是**累加**的，直接叠加会让改键之后旧键位仍然生效，
 /// 表现为「改了这个键，结果两个键都能用」。
-pub(crate) fn apply(cx: &mut App, config: &Config) {
+///
+/// ## 为什么必须再补回 `base`
+///
+/// `clear_key_bindings()` 清的是**整张表**，包括组件库在 `gpui_component::init`
+/// 里注册的那些（输入框的 `backspace` / `enter` / `ctrl-a` / 方向键……）。
+/// 直接清掉而不再补回来，后果是**所有输入框失去退格、回车、全选**——
+/// 只留下「打字」（打字走平台的文本输入通道，不经过键位表），
+/// 于是看起来就是「能输但删不掉」。
+///
+/// 因此调用方要在**第一次应用之前**把库自带的绑定抄一份存起来（见 `ShellView`），
+/// 之后每次重建都：清空 → 补回库绑定 → 绑定我们的。
+pub(crate) fn apply(cx: &mut App, config: &Config, base: &[KeyBinding]) {
     cx.clear_key_bindings();
+    cx.bind_keys(base.to_vec());
     cx.bind_keys(bindings(config));
+}
+
+/// 抄录当前键位表（用于取得组件库自带的绑定）。
+///
+/// 只能在**我们还没有绑定过任何东西**时调用，抄到的才是纯库绑定。
+pub(crate) fn snapshot(cx: &App) -> Vec<KeyBinding> {
+    cx.key_bindings().borrow().bindings().cloned().collect()
 }
 
 /// 把一次真实按键翻译成配置能存的形式。

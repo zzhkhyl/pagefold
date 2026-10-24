@@ -235,6 +235,12 @@ pub struct ShellView {
     pub(crate) settings_scroll: ScrollHandle,
     /// 与 [`Self::shortcut_items`] 同时刷新的冲突列表。
     pub(crate) shortcut_conflicts: Vec<fm_core::shortcut::Conflict>,
+    /// 组件库自带的键位（输入框的 `backspace` / `enter` / `ctrl-a`…）。
+    ///
+    /// 每次改键都要 `clear_key_bindings()`（否则旧键位仍生效），而那会把这些
+    /// 一并清掉，所以必须先抄下来、重建时补回去——否则所有输入框只能打字、
+    /// 删不掉字。见 [`crate::shortcuts::apply`]。
+    pub(crate) base_bindings: Vec<gpui::KeyBinding>,
     /// 标签条的横向滚动位置。
     ///
     /// 标签有最小宽度（96px），多到装不下时靠横向滚动而不是无限压缩——
@@ -348,7 +354,12 @@ impl ShellView {
 
         // 键位表也来自配置：用户改过的组合在这里生效，没改过的用目录默认值。
         // 必须在窗口接收按键之前装好，因此放在构造函数里而不是首帧渲染。
-        crate::shortcuts::apply(cx, &config);
+        //
+        // 先抄一份**组件库自带的绑定**：`apply` 为了覆盖旧键位会 `clear_key_bindings()`，
+        // 而那会把输入框的 `backspace` / `enter` / `ctrl-a` 一起清掉。
+        // 这份快照在之后每次改键时都要补回去（见 `shortcuts::apply`）。
+        let base_bindings = crate::shortcuts::snapshot(cx);
+        crate::shortcuts::apply(cx, &config, &base_bindings);
 
         // 设置页要展示的清单与冲突，同样只算这一次（之后配置变化时再刷）。
         let shortcut_items = fm_core::resolve(&config.shortcuts);
@@ -437,6 +448,7 @@ impl ShellView {
             shortcut_items,
             shortcut_conflicts,
             shortcut_groups: [false; fm_core::Group::ALL.len()],
+            base_bindings,
             settings_scroll: ScrollHandle::new(),
             tab_scroll: ScrollHandle::new(),
             renaming: None,

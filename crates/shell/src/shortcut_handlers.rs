@@ -176,7 +176,7 @@ impl ShellView {
             .insert(id.to_string(), fm_core::ShortcutBinding::new(keys));
         self.config.save();
         // 立刻重建键位表：`apply` 内部会先 clear，因此旧键位不会残留。
-        apply(cx, &self.config);
+        apply(cx, &self.config, &self.base_bindings);
         self.refresh_shortcut_cache();
         Ok(())
     }
@@ -247,7 +247,7 @@ impl ShellView {
             },
         );
         self.config.save();
-        apply(cx, &self.config);
+        apply(cx, &self.config, &self.base_bindings);
         self.refresh_shortcut_cache();
 
         window.push_notification(
@@ -290,7 +290,7 @@ impl ShellView {
         self.config.global_hotkey =
             fm_core::ShortcutBinding::new(fm_core::shortcut::DEFAULT_GLOBAL_HOTKEY);
         self.config.save();
-        apply(cx, &self.config);
+        apply(cx, &self.config, &self.base_bindings);
         self.refresh_shortcut_cache();
 
         match self.sync_global_hotkey() {
