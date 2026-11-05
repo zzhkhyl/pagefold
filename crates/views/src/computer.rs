@@ -14,8 +14,8 @@ use fm_core::format_size;
 use fm_platform::{Drive, DriveKind};
 use gpui::{
     AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
-    prelude::FluentBuilder as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{Icon, Sizable as _};
 use gpui_kit_assets::IconName;
@@ -74,8 +74,8 @@ where
                 .border_b_1()
                 .border_color(border)
                 .bg(surface)
-                .font_family(tokens.mono_font.clone())
-                .text_size(px(metrics::FONT_XS))
+                .font_family(tokens.font_family.clone())
+                .text_size(px(metrics::FONT_SM))
                 .text_color(muted_foreground)
                 .child("设备与驱动器"),
         )
@@ -151,12 +151,12 @@ fn card(
                         .min_w(px(0.0))
                         .overflow_hidden()
                         .truncate()
-                        .text_size(px(12.5))
+                        .text_size(px(metrics::FONT_UI))
                         .text_color(foreground)
                         .child(labels(drive)),
                 )
                 .when(has_capacity, |element| {
-                    element.child(widgets::mono(
+                    element.child(widgets::numeric(
                         format!("{percent:.0}%"),
                         metrics::FONT_XS,
                         tokens.muted_fg,
@@ -179,7 +179,7 @@ fn card(
                 })
                 .child(
                     div()
-                        .font_family(tokens.mono_font.clone())
+                        .font_family(tokens.numeric_font.clone())
                         .text_size(px(metrics::FONT_XS))
                         .text_color(tokens.muted_fg)
                         .child(caption),

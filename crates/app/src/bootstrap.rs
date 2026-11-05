@@ -14,15 +14,13 @@ use fm_services::config::Config;
 use fm_services::directory::DirectoryService;
 use fm_shell::ShellView;
 use fm_views::metrics;
-use gpui::{
-    App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size,
-};
+use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
 
 /// 主窗口的初始尺寸。
 ///
-/// 1280×820 是设计稿三栏布局（侧边栏 238 + 内容区 + 预览面板 306）的下限，
-/// 再窄一点预览面板就会按断点变成浮层。
+/// 1280×820 展示完整三栏布局（侧边栏 236 + 内容区 + 详情面板 304）。
+/// 1180px 起栏宽与列数逐步收敛，720px 及以下详情面板改为浮层。
 const INITIAL_WIDTH: f32 = 1280.0;
 const INITIAL_HEIGHT: f32 = 820.0;
 
@@ -125,11 +123,7 @@ pub fn run() {
             let config = Config::load();
             let initial_location = parse_initial_location();
 
-            let bounds = Bounds::centered(
-                None,
-                size(px(INITIAL_WIDTH), px(INITIAL_HEIGHT)),
-                cx,
-            );
+            let bounds = Bounds::centered(None, size(px(INITIAL_WIDTH), px(INITIAL_HEIGHT)), cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(
@@ -271,7 +265,6 @@ fn run_hotkey_host() {
         tracing::error!(%error, "热键宿主启动失败，Win+E 将继续由系统处理");
     }
 }
-
 
 /// 把当前配置里的全局唤醒热键写进宿主约定文件。
 ///

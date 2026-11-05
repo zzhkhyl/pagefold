@@ -18,10 +18,9 @@ use std::rc::Rc;
 
 use fm_core::{Column, ColumnWidths, Entry, SortDirection, SortKey, format_size};
 use gpui::{
-    AppContext as _,
-    AnyElement, App, ClickEvent, CursorStyle, Entity, Hsla, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, px, prelude::FluentBuilder as _,
+    AnyElement, App, AppContext as _, ClickEvent, CursorStyle, Entity, Hsla,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::input::InputState;
 use gpui_component::{Icon, Sizable as _};
@@ -29,7 +28,9 @@ use gpui_kit_assets::IconName;
 
 use crate::tokens::{Tokens, breakpoints, metrics};
 use crate::widgets;
-use crate::{DragSelectHandler, EntryMenuBuilder, OpenHandler, RightPressHandler, SelectHandler, SelectMode};
+use crate::{
+    DragSelectHandler, EntryMenuBuilder, OpenHandler, RightPressHandler, SelectHandler, SelectMode,
+};
 
 /// 点击列名排序的回调。
 ///
@@ -56,8 +57,8 @@ pub struct Columns {
     pub date: Option<f32>,
     /// 类型列宽；`None` = 不显示。
     pub kind: Option<f32>,
-    /// 大小列宽。
-    pub size: f32,
+    /// 大小列宽；`None` = 不显示。
+    pub size: Option<f32>,
     /// 行高（随界面密度）。
     pub row_height: f32,
 }
@@ -76,47 +77,48 @@ impl Columns {
         content_width: f32,
     ) -> Self {
         let row_height = tokens.row_height;
-        // 先算断点默认值：它决定「这一列在不在」，也决定没拖过时的宽度。
-        let base = if viewport_width <= breakpoints::NARROW {
+        // 新稿按「大小 → 类型 → 日期」退让；≤720 只保留名称。
+        let base = if viewport_width <= breakpoints::COMPACT {
             Self {
                 date: None,
                 kind: None,
-                size: metrics::SIZE_COLUMN_TINY,
+                size: None,
                 row_height,
             }
-        } else if viewport_width <= breakpoints::HIDE_DATE {
-            Self {
-                date: None,
-                kind: None,
-                size: metrics::SIZE_COLUMN_NARROW,
-                row_height,
-            }
-        } else if viewport_width <= breakpoints::HIDE_TYPE {
+        } else if viewport_width <= breakpoints::SIDEBAR_COMPACT {
             Self {
                 date: Some(metrics::DATE_COLUMN_NARROW),
                 kind: None,
-                size: metrics::SIZE_COLUMN,
+                size: None,
+                row_height,
+            }
+        } else if viewport_width <= breakpoints::MEDIUM {
+            Self {
+                date: Some(metrics::DATE_COLUMN_MEDIUM),
+                kind: Some(metrics::TYPE_COLUMN_NARROW),
+                size: None,
                 row_height,
             }
         } else {
             Self {
                 date: Some(metrics::DATE_COLUMN),
                 kind: Some(metrics::TYPE_COLUMN),
-                size: metrics::SIZE_COLUMN,
+                size: Some(metrics::SIZE_COLUMN),
                 row_height,
             }
         };
 
         let fitted = overrides.fitted(content_width);
         Self {
-            // 隐藏列不应用偏好：`None` 保持为「不在」，而不是「宽度为某个值」。
             date: base
                 .date
                 .map(|width| fitted.get(Column::Date).unwrap_or(width)),
             kind: base
                 .kind
                 .map(|width| fitted.get(Column::Kind).unwrap_or(width)),
-            size: fitted.get(Column::Size).unwrap_or(base.size),
+            size: base
+                .size
+                .map(|width| fitted.get(Column::Size).unwrap_or(width)),
             row_height,
         }
     }
@@ -163,9 +165,10 @@ pub fn header(
         .px(px(metrics::ROW_PADDING_X))
         .border_b_1()
         .border_color(tokens.border)
-        .font_family(tokens.mono_font.clone())
-        .text_size(px(metrics::FONT_XS))
-        .text_color(tokens.muted_fg)
+        .bg(tokens.surface)
+        .font_family(tokens.font_family.clone())
+        .text_size(px(metrics::FONT_SM))
+        .text_color(tokens.secondary_fg)
         .child(select_all);
 
     row = row.child(header_cell(
@@ -205,17 +208,19 @@ pub fn header(
             on_resize.as_ref().map(|handler| (Column::Kind, handler)),
         ));
     }
-    row = row.child(header_cell(
-        "大小",
-        SortKey::Size,
-        Some(columns.size),
-        true,
-        sort_key,
-        direction,
-        tokens,
-        on_sort,
-        on_resize.as_ref().map(|handler| (Column::Size, handler)),
-    ));
+    if let Some(width) = columns.size {
+        row = row.child(header_cell(
+            "大小",
+            SortKey::Size,
+            Some(width),
+            true,
+            sort_key,
+            direction,
+            tokens,
+            on_sort,
+            on_resize.as_ref().map(|handler| (Column::Size, handler)),
+        ));
+    }
 
     row.into_any_element()
 }
@@ -310,11 +315,7 @@ pub fn row(
             entry.icon,
             icon,
             16.0,
-            if entry.is_dir() {
-                tokens.accent
-            } else {
-                muted
-            },
+            if entry.is_dir() { tokens.accent } else { muted },
         ))
         // 重命名时**只替换名称文本，图标留着**：与设计稿的标记一致
         // （`<span class="ic">` 在编辑态里保留），也让用户仍能一眼看出
@@ -326,13 +327,13 @@ pub fn row(
                 .min_w(px(0.0))
                 .overflow_hidden()
                 .truncate()
-                .text_size(px(12.5))
+                .text_size(px(metrics::FONT_SM))
                 .text_color(tokens.fg)
                 .child(name.to_string())
                 .into_any_element(),
         });
 
-    let selected_hover = crate::tokens::with_alpha(tokens.fg, 0.1);
+    let selected_hover = tokens.accent_soft_hover;
     let mut row = div()
         .id(("details-row", index))
         .flex()
@@ -342,6 +343,8 @@ pub fn row(
         .w_full()
         .h(px(columns.row_height))
         .px(px(metrics::ROW_PADDING_X))
+        .border_b_1()
+        .border_color(tokens.border_subtle)
         .group(group_name)
         .when(editing.is_none(), |element| element.cursor_pointer())
         // hover 每个元素只能挂**一次**：GPUI 的 `hover()` 带
@@ -393,9 +396,10 @@ pub fn row(
         row = row
             // 预览交给平台画（Windows 自己会画文件名与图标），
             // 因此这里返回一个空视图，不重复造一个「像不像」的浮层。
-            .on_drag(payload, |_payload: &crate::DragOut, _offset, _window, cx| {
-                cx.new(|_| gpui::Empty)
-            })
+            .on_drag(
+                payload,
+                |_payload: &crate::DragOut, _offset, _window, cx| cx.new(|_| gpui::Empty),
+            )
             .external_drag_payload(|payload: &crate::DragOut, _window, _cx| {
                 Some(gpui::ExternalDragPayload::Files(gpui::FileDragPaths::new(
                     payload.0.iter().cloned(),
@@ -407,9 +411,9 @@ pub fn row(
         row = row.child(plain_cell(
             modified.to_string(),
             width,
-            metrics::FONT_XS,
-            muted,
-            &tokens.mono_font,
+            metrics::FONT_SM,
+            tokens.secondary_fg,
+            &tokens.numeric_font,
             false,
         ));
     }
@@ -418,19 +422,21 @@ pub fn row(
             kind_label.to_string(),
             width,
             metrics::FONT_SM,
-            muted,
-            &tokens.mono_font,
+            tokens.secondary_fg,
+            &tokens.font_family,
             false,
         ));
     }
-    row = row.child(plain_cell(
-        size,
-        columns.size,
-        metrics::FONT_XS,
-        muted,
-        &tokens.mono_font,
-        true,
-    ));
+    if let Some(width) = columns.size {
+        row = row.child(plain_cell(
+            size,
+            width,
+            metrics::FONT_SM,
+            tokens.secondary_fg,
+            &tokens.numeric_font,
+            true,
+        ));
+    }
 
     // 包装层的布局必须与原来放在行上的约束一致（`flex_none` + `w_full`）：
     // 它现在才是虚拟列表的直接子项，行高与宽度都由它决定。
@@ -479,7 +485,11 @@ fn header_cell(
         .gap(px(5.0))
         .h_full()
         .cursor_pointer()
-        .text_color(if is_active { foreground } else { tokens.muted_fg })
+        .text_color(if is_active {
+            foreground
+        } else {
+            tokens.muted_fg
+        })
         .hover(move |style| style.text_color(foreground).bg(hover))
         .on_click(move |_event: &ClickEvent, window, cx| {
             (*on_sort)(key, window, cx);
@@ -517,14 +527,11 @@ fn header_cell(
                 .w(px(6.0))
                 .cursor(CursorStyle::ResizeLeftRight)
                 .hover(move |style| style.bg(crate::tokens::with_alpha(accent, 0.45)))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    move |event, window, cx| {
-                        // 阻止冒泡：否则按在分隔线上会顺带触发这一列的排序。
-                        cx.stop_propagation();
-                        handler(column, f32::from(event.position.x), window, cx);
-                    },
-                ),
+                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                    // 阻止冒泡：否则按在分隔线上会顺带触发这一列的排序。
+                    cx.stop_propagation();
+                    handler(column, f32::from(event.position.x), window, cx);
+                }),
         );
     }
 
@@ -539,7 +546,7 @@ fn plain_cell(
     width: f32,
     font_size: f32,
     color: Hsla,
-    mono_font: &SharedString,
+    font_family: &SharedString,
     align_end: bool,
 ) -> AnyElement {
     div()
@@ -551,9 +558,49 @@ fn plain_cell(
         .w(px(width))
         .h_full()
         .overflow_hidden()
-        .font_family(mono_font.clone())
+        .font_family(font_family.clone())
         .text_size(px(font_size))
         .text_color(color)
         .child(div().overflow_hidden().truncate().child(content))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn columns_follow_the_fluent_breakpoints() {
+        let tokens = Tokens::light();
+        let wide = Columns::for_viewport(1280.0, &tokens, ColumnWidths::default(), 700.0);
+        assert_eq!(wide.date, Some(156.0));
+        assert_eq!(wide.kind, Some(140.0));
+        assert_eq!(wide.size, Some(92.0));
+
+        let medium = Columns::for_viewport(1180.0, &tokens, ColumnWidths::default(), 600.0);
+        assert_eq!(medium.date, Some(140.0));
+        assert_eq!(medium.kind, Some(104.0));
+        assert_eq!(medium.size, None);
+
+        let narrow = Columns::for_viewport(920.0, &tokens, ColumnWidths::default(), 500.0);
+        assert_eq!(narrow.date, Some(132.0));
+        assert_eq!(narrow.kind, None);
+        assert_eq!(narrow.size, None);
+
+        let compact = Columns::for_viewport(720.0, &tokens, ColumnWidths::default(), 400.0);
+        assert_eq!(compact.date, None);
+        assert_eq!(compact.kind, None);
+        assert_eq!(compact.size, None);
+    }
+
+    #[test]
+    fn hidden_columns_do_not_reappear_from_user_overrides() {
+        let mut overrides = ColumnWidths::default();
+        overrides.set(Column::Size, 120.0);
+        overrides.set(Column::Kind, 130.0);
+        let columns = Columns::for_viewport(920.0, &Tokens::light(), overrides, 500.0);
+        assert_eq!(columns.size, None);
+        assert_eq!(columns.kind, None);
+        assert_eq!(columns.date, Some(132.0));
+    }
 }

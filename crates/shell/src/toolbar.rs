@@ -7,14 +7,13 @@
 //! 搜索框与地址栏都采用「先静态文本、点一下才创建输入框」的做法：
 //! `InputState` 需要窗口句柄，渲染期无法创建；而且未编辑时也不需要文本编辑状态。
 
-use fm_core::ViewMode;
+use fm_core::{IconZoom, ViewMode};
 use fm_views::breadcrumb;
 use fm_views::metrics;
 use fm_views::widgets;
 use gpui::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
-    prelude::FluentBuilder as _,
 };
 use gpui_component::button::{
     Button, ButtonCustomVariant, ButtonVariant, ButtonVariants as _, DropdownButton,
@@ -44,43 +43,48 @@ impl ShellView {
         let sidebar_active = if viewport.sidebar_overlay {
             self.sidebar_overlay
         } else {
-            !self.config.sidebar_collapsed
+            !(viewport.sidebar_compact || self.config.sidebar_collapsed)
         };
 
-        let navigation = div()
+        let mut navigation = div()
             .flex_none()
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(2.0))
-            .child(widgets::icon_button(
-                "nav-back",
-                IconName::ArrowLeft,
-                16.0,
-                "后退",
-                false,
-                can_back,
-                tokens,
-                cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.go_back(cx);
-                }),
-            ))
-            .child(widgets::icon_button(
-                "nav-forward",
-                IconName::ArrowRight,
-                16.0,
-                "前进",
-                false,
-                can_forward,
-                tokens,
-                cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.go_forward(cx);
-                }),
-            ))
+            .gap(px(2.0));
+        // 721–920px 隐藏后退/前进；≤720px 折行后恢复。
+        if !viewport.sidebar_compact || viewport.compact {
+            navigation = navigation
+                .child(widgets::icon_button(
+                    "nav-back",
+                    IconName::ArrowLeft,
+                    18.0,
+                    "后退",
+                    false,
+                    can_back,
+                    tokens,
+                    cx.listener(|this, _: &ClickEvent, _window, cx| {
+                        this.go_back(cx);
+                    }),
+                ))
+                .child(widgets::icon_button(
+                    "nav-forward",
+                    IconName::ArrowRight,
+                    18.0,
+                    "前进",
+                    false,
+                    can_forward,
+                    tokens,
+                    cx.listener(|this, _: &ClickEvent, _window, cx| {
+                        this.go_forward(cx);
+                    }),
+                ));
+        }
+        let navigation = navigation
             .child(widgets::icon_button(
                 "nav-up",
                 IconName::ArrowUp,
-                16.0,
+                18.0,
                 "上一级",
                 false,
                 can_up,
@@ -92,7 +96,7 @@ impl ShellView {
             .child(widgets::plain_icon_button(
                 "nav-refresh",
                 IconName::RefreshCw,
-                16.0,
+                18.0,
                 "刷新",
                 tokens,
                 cx.listener(|this, _: &ClickEvent, _window, cx| {
@@ -122,37 +126,35 @@ impl ShellView {
 
         let search = self.render_search(viewport, cx);
 
-        let view_switch = widgets::segmented(
-            vec![
-                widgets::icon_button_with_size(
-                    "view-list",
-                    IconName::List,
-                    15.0,
-                    metrics::SEGMENT_CONTROL_SIZE,
-                    "详细信息视图",
-                    !icons_view,
-                    true,
-                    tokens,
-                    cx.listener(|this, _: &ClickEvent, _window, cx| {
-                        this.set_view_mode(ViewMode::Details, cx);
-                    }),
-                ),
-                widgets::icon_button_with_size(
-                    "view-grid",
-                    IconName::LayoutGrid,
-                    15.0,
-                    metrics::SEGMENT_CONTROL_SIZE,
-                    "图标视图",
-                    icons_view,
-                    true,
-                    tokens,
-                    cx.listener(|this, _: &ClickEvent, _window, cx| {
-                        this.set_view_mode(ViewMode::Icons, cx);
-                    }),
-                ),
-            ],
-            tokens,
-        );
+        let view_switch = div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .gap(px(2.0))
+            .child(widgets::icon_button(
+                "view-list",
+                IconName::List,
+                18.0,
+                "详细信息视图",
+                !icons_view,
+                true,
+                tokens,
+                cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.set_view_mode(ViewMode::Details, cx);
+                }),
+            ))
+            .child(widgets::icon_button(
+                "view-grid",
+                IconName::LayoutGrid,
+                18.0,
+                "图标视图",
+                icons_view,
+                true,
+                tokens,
+                cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.set_view_mode(ViewMode::Icons, cx);
+                }),
+            ));
 
         // 排序按钮直接提示当前排序键：本阶段它用「循环切换」代替弹出菜单，
         // 因此提示文案必须是动态的，用户才知道下一次点击会切到哪。
@@ -230,37 +232,83 @@ impl ShellView {
             )
             .dropdown_menu(crate::context_menu::new_menu_builder(cx));
 
+        let zoom_in = widgets::icon_button(
+            "zoom-in",
+            IconName::Plus,
+            18.0,
+            "放大图标",
+            false,
+            self.config.zoom != IconZoom::Large,
+            tokens,
+            cx.listener(|this, _: &ClickEvent, _window, cx| {
+                let next = IconZoom::from_index((this.config.zoom.index() + 1).min(2));
+                this.set_view_mode(ViewMode::Icons, cx);
+                this.set_zoom(next, cx);
+            }),
+        );
+        let zoom_out = widgets::icon_button(
+            "zoom-out",
+            IconName::Minus,
+            18.0,
+            "缩小图标",
+            false,
+            self.config.zoom != IconZoom::Small,
+            tokens,
+            cx.listener(|this, _: &ClickEvent, _window, cx| {
+                let next = IconZoom::from_index(this.config.zoom.index().saturating_sub(1));
+                this.set_view_mode(ViewMode::Icons, cx);
+                this.set_zoom(next, cx);
+            }),
+        );
+
+        let mut tools = div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(2.0));
+        if viewport.compact {
+            tools = tools.w_full().justify_end();
+        }
+        if !on_settings {
+            tools = tools
+                .child(view_switch)
+                .child(nav_divider(tokens))
+                .child(sort)
+                .child(preview_toggle);
+        }
+        tools = tools.child(settings);
+        if !on_settings {
+            tools = tools
+                .child(nav_divider(tokens))
+                .child(zoom_in)
+                .child(zoom_out)
+                .child(new_button);
+        }
+
         let mut bar = div()
             .flex_none()
             .flex()
             .flex_row()
-            .flex_wrap()
             .items_center()
             .gap(px(4.0))
             .gap_y(px(6.0))
+            .min_h(px(metrics::TOOLBAR_HEIGHT))
             .px(px(metrics::TOOLBAR_PADDING_X))
             .py(px(metrics::TOOLBAR_PADDING_Y))
-            .bg(tokens.surface)
+            .bg(tokens.panel)
             .border_b_1()
             .border_color(tokens.border)
             .child(navigation)
             .child(sidebar_toggle)
             .child(address);
-
-        // 设置页不是文件夹：搜索、视图切换、排序、预览与「新建」在那里
-        // 全都是无对象可作用的操作。留着一个点了没反应的按钮，
-        // 比让它消失更像故障，因此整组隐藏。
-        if !on_settings {
-            bar = bar
-                .child(search)
-                .child(view_switch)
-                .child(sort)
-                .child(preview_toggle);
+        if viewport.compact {
+            bar = bar.flex_wrap();
         }
-
-        bar.child(settings)
-            .when(!on_settings, |element| element.child(new_button))
-            .into_any_element()
+        if !on_settings {
+            bar = bar.child(search);
+        }
+        bar.child(tools).into_any_element()
     }
 
     /// 地址区：面包屑（或「此电脑」）+ 复制路径按钮；编辑态下换成输入框。
@@ -296,7 +344,7 @@ impl ShellView {
                 .flex_grow(1.0)
                 .min_w(px(0.0))
                 .px(px(2.0))
-                .text_size(px(12.5))
+                .text_size(px(metrics::FONT_UI))
                 .text_color(tokens.fg)
                 .child(location.title())
                 .into_any_element(),
@@ -312,7 +360,8 @@ impl ShellView {
                 let navigate = {
                     let view = cx.entity().downgrade();
                     move |target: std::path::PathBuf, _window: &mut Window, cx: &mut gpui::App| {
-                        view.update(cx, |view, cx| view.navigate_to(target, cx)).ok();
+                        view.update(cx, |view, cx| view.navigate_to(target, cx))
+                            .ok();
                     }
                 };
                 breadcrumb::render(&crumbs, tokens, navigate)
@@ -361,17 +410,19 @@ impl ShellView {
             .h(px(metrics::ADDRESS_HEIGHT))
             .px(px(8.0))
             .border_1()
-            .border_color(tokens.border)
+            .border_color(tokens.border_strong)
             .rounded(px(metrics::RADIUS))
-            .bg(tokens.bg)
+            .bg(tokens.surface)
             .cursor_text();
 
         // 窄窗下按设计稿收窄，但保留输入能力（设计稿在更窄时会收成图标按钮，
         // 那需要一个额外的小输入弹层，本阶段以「收窄」替代并在 README 记录）。
         box_ = if viewport.compact {
-            box_.flex_shrink(1.0).min_w(px(metrics::SEARCH_MIN_WIDTH))
+            box_.flex_grow(1.0)
+                .flex_shrink(1.0)
+                .min_w(px(metrics::SEARCH_MIN_WIDTH))
         } else {
-            box_.flex_shrink(1.0).w(px(metrics::SEARCH_WIDTH))
+            box_.flex_shrink(1.0).w(px(viewport.search_width()))
         };
 
         if self.search_editing {
@@ -419,7 +470,7 @@ impl ShellView {
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .truncate()
-                    .text_size(px(12.5))
+                    .text_size(px(metrics::FONT_UI))
                     .text_color(text_color)
                     .child(text),
             );
@@ -497,8 +548,18 @@ fn address_box(tokens: &fm_views::Tokens) -> gpui::Stateful<gpui::Div> {
         .pl(px(6.0))
         .pr(px(2.0))
         .border_1()
-        .border_color(tokens.border)
+        .border_color(tokens.border_strong)
         .rounded(px(metrics::RADIUS))
-        .bg(tokens.bg)
+        .bg(tokens.surface)
         .cursor_text()
+}
+
+fn nav_divider(tokens: &fm_views::Tokens) -> AnyElement {
+    div()
+        .flex_none()
+        .w(px(1.0))
+        .h(px(20.0))
+        .mx(px(4.0))
+        .bg(tokens.border)
+        .into_any_element()
 }

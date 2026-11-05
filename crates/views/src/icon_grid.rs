@@ -10,8 +10,8 @@
 
 use gpui::{
     AnyElement, AppContext as _, ClickEvent, Entity, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px,
-    prelude::FluentBuilder as _,
+    MouseButton, ParentElement as _, StatefulInteractiveElement as _, Styled as _, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::input::InputState;
 
@@ -29,8 +29,6 @@ const NAME_HEIGHT: f32 = 33.0;
 const META_HEIGHT: f32 = 15.0;
 /// 缩略图与名称之间的间距。
 const NAME_GAP: f32 = 8.0;
-/// 名称与元信息之间的间距。
-const META_GAP: f32 = 6.0;
 
 /// 根据可用宽度算出每行能放几个图标。
 ///
@@ -67,8 +65,8 @@ pub fn row_count(entry_count: usize, columns: usize) -> usize {
 
 /// 单元格高度（含内边距、缩略图与两行文字）。
 pub fn cell_height(cell_width: f32) -> f32 {
-    let thumb = (cell_width - metrics::CELL_PADDING * 2.0).max(16.0);
-    metrics::CELL_PADDING * 2.0 + thumb + NAME_GAP + NAME_HEIGHT + META_GAP + META_HEIGHT
+    // 设计稿：min-height = grid-size + 40px。
+    cell_width + 40.0
 }
 
 /// 一行的高度。纵向间距折进行高，这样滚动容器不需要额外的 `gap` 支持。
@@ -176,10 +174,12 @@ fn cell(
     drag_out: Option<&crate::DragOutBuilder>,
 ) -> AnyElement {
     let icon = crate::widgets::entry_icon(entry, extension);
-    let thumb_size = (cell_width - metrics::CELL_PADDING * 2.0).max(16.0);
+    // 24px 垂直内衬 + 名称/元信息及间距共 70px，剩余空间用于缩略图。
+    let thumb_size = (cell_width - 48.0).max(48.0);
     let hover = tokens.hover;
     let accent_soft = tokens.accent_soft;
-    let accent_line = tokens.accent_line;
+    let accent_soft_hover = tokens.accent_soft_hover;
+    let selected_border = tokens.accent;
     let border = tokens.border;
 
     let opened = std::rc::Rc::clone(open);
@@ -187,7 +187,7 @@ fn cell(
     let selecting = std::rc::Rc::clone(select);
     let drag_start = std::rc::Rc::clone(drag_start);
     let drag_move = std::rc::Rc::clone(drag_move);
-    let selected_hover = crate::tokens::with_alpha(tokens.fg, 0.1);
+    let selected_hover = accent_soft_hover;
 
     let mut cell = div()
         .id(("icon-cell", index))
@@ -197,25 +197,24 @@ fn cell(
         .flex_none()
         .w(px(cell_width))
         .h(px(height))
-        .p(px(metrics::CELL_PADDING))
-        .rounded(px(metrics::RADIUS_LG))
+        .px(px(metrics::CELL_PADDING))
+        .py(px(12.0))
+        .rounded(px(metrics::RADIUS_MD))
         .border_1()
-        .border_color(tokens.surface)
+        .border_color(border)
         .cursor_pointer()
         // 与详情行同理：`hover()` 每个元素只能设置一次，否则 dev 构建下 panic。
         .hover(move |style| {
             if selected {
-                style.bg(selected_hover).border_color(accent_line)
+                style.bg(selected_hover).border_color(selected_border)
             } else {
                 style.bg(hover).border_color(border)
             }
         })
         .when(selected, |element| {
-            element.bg(accent_soft).border_color(accent_line)
+            element.bg(accent_soft).border_color(selected_border)
         })
-        .when(current, |element| {
-            element.border_color(accent_line)
-        })
+        .when(current, |element| element.border_color(selected_border))
         // 框选：与详情视图同理——左键按下记锚点，滑过每个单元格按区间替换选中。
         .on_mouse_down(MouseButton::Left, move |event, window, cx| {
             (*drag_start)(index, event.position, window, cx);
@@ -292,7 +291,11 @@ fn cell(
                 .w_full()
                 .h(px(META_HEIGHT))
                 .overflow_hidden()
-                .font_family(tokens.mono_font.clone())
+                .font_family(if entry.is_dir() {
+                    tokens.font_family.clone()
+                } else {
+                    tokens.numeric_font.clone()
+                })
                 .text_size(px(metrics::FONT_XS))
                 .text_color(tokens.muted_fg)
                 .child(meta_label(entry)),
@@ -303,13 +306,14 @@ fn cell(
     if let Some(builder) = drag_out.filter(|_| editing.is_none()) {
         let payload = builder(entry);
         cell = cell
-            .on_drag(payload, |_payload: &crate::DragOut, _offset, _window, cx| {
-                cx.new(|_| gpui::Empty)
-            })
+            .on_drag(
+                payload,
+                |_payload: &crate::DragOut, _offset, _window, cx| cx.new(|_| gpui::Empty),
+            )
             .external_drag_payload(|payload: &crate::DragOut, _window, _cx| {
-                Some(gpui::ExternalDragPayload::Files(
-                    gpui::FileDragPaths::new(payload.0.iter().cloned()),
-                ))
+                Some(gpui::ExternalDragPayload::Files(gpui::FileDragPaths::new(
+                    payload.0.iter().cloned(),
+                )))
             });
     }
 
@@ -350,20 +354,20 @@ mod tests {
 
     #[test]
     fn columns_match_the_design_auto_fill_rule() {
-        // 单元格 152、间距 10：宽 152 恰好一列，宽 314 恰好两列。
+        // 单元格 152、间距 8：宽 152 恰好一列，宽 312 恰好两列。
         assert_eq!(columns_for_width(152.0, CELL), 1);
-        assert_eq!(columns_for_width(314.0, CELL), 2);
-        assert_eq!(columns_for_width(313.0, CELL), 1);
+        assert_eq!(columns_for_width(312.0, CELL), 2);
+        assert_eq!(columns_for_width(311.0, CELL), 1);
     }
 
     #[test]
     fn cells_stretch_to_fill_the_row() {
-        // 两列时可用宽度全部被吃掉：152*2 + 10 = 314。
-        let width = cell_width(314.0, 2, CELL);
+        // 两列时可用宽度全部被吃掉：152*2 + 8 = 312。
+        let width = cell_width(312.0, 2, CELL);
         assert!((width - 152.0).abs() < 0.01);
         // 多余宽度按列均分，右侧不会留下空白。
         let width = cell_width(400.0, 2, CELL);
-        assert!((width - 195.0).abs() < 0.01);
+        assert!((width - 196.0).abs() < 0.01);
     }
 
     #[test]

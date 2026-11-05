@@ -12,7 +12,7 @@ use fm_core::{Entry, EntryKind};
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, Entity, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _, Window, div, px, prelude::FluentBuilder as _,
+    StyledImage as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::tooltip::Tooltip;
@@ -97,10 +97,7 @@ where
         .rounded(px(metrics::RADIUS))
         .text_color(if active { foreground } else { muted })
         .when(active, |element| {
-            element
-                .bg(accent_soft)
-                .border_1()
-                .border_color(accent_line)
+            element.bg(accent_soft).border_1().border_color(accent_line)
         })
         .when(enabled, |element| {
             element
@@ -171,8 +168,8 @@ where
         .flex()
         .items_center()
         .justify_center()
-        .h(px(24.0))
-        .px(px(10.0))
+        .h(px(26.0))
+        .px(px(8.0))
         .rounded(px(metrics::RENAME_RADIUS))
         .text_size(px(metrics::FONT_SM))
         .text_color(if active { foreground } else { muted })
@@ -201,13 +198,15 @@ pub fn switch<F>(id: impl Into<ElementId>, on: bool, tokens: &Tokens, on_click: 
 where
     F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 {
-    const TRACK_WIDTH: f32 = 34.0;
-    const TRACK_HEIGHT: f32 = 18.0;
-    const KNOB: f32 = 14.0;
+    const TRACK_WIDTH: f32 = 36.0;
+    const TRACK_HEIGHT: f32 = 20.0;
+    const KNOB: f32 = 12.0;
 
     let accent = tokens.accent;
-    let track_off = crate::tokens::with_alpha(tokens.fg, 0.22);
+    let accent_hover = tokens.accent_hover;
     let surface = tokens.surface;
+    let muted = tokens.muted_fg;
+    let on_accent = tokens.on_accent;
 
     let track = div()
         .id(id)
@@ -219,9 +218,12 @@ where
         .h(px(TRACK_HEIGHT))
         .p(px(2.0))
         .rounded_full()
-        .bg(if on { accent } else { track_off })
+        .border_1()
+        .border_color(if on { accent } else { muted })
+        .bg(if on { accent } else { surface })
         .cursor_pointer()
         .when(on, |element| element.justify_end())
+        .hover(move |style| if on { style.bg(accent_hover) } else { style })
         .on_click(on_click)
         .child(
             div()
@@ -229,7 +231,7 @@ where
                 .w(px(KNOB))
                 .h(px(KNOB))
                 .rounded_full()
-                .bg(surface),
+                .bg(if on { on_accent } else { muted }),
         );
 
     div()
@@ -264,15 +266,15 @@ pub fn checkbox(checked: bool, tokens: &Tokens) -> AnyElement {
         .flex()
         .items_center()
         .justify_center()
-        .w(px(15.0))
-        .h(px(15.0))
+        .w(px(16.0))
+        .h(px(16.0))
         .rounded(px(3.0))
         .border_1()
         .when(checked, |element| {
             element
                 .bg(accent)
                 .border_color(accent)
-                .text_color(tokens.surface)
+                .text_color(tokens.on_accent)
         })
         .when(!checked, |element| {
             element.border_color(border).text_color(foreground)
@@ -283,7 +285,7 @@ pub fn checkbox(checked: bool, tokens: &Tokens) -> AnyElement {
         .into_any_element()
 }
 
-/// 等宽小字。所有数字列与短标签都走这里，保证列对齐。
+/// 等宽小字，用于快捷键、配置路径等代码感文本。
 pub fn mono(text: impl Into<SharedString>, size: f32, color: Hsla, tokens: &Tokens) -> AnyElement {
     div()
         .flex_none()
@@ -294,13 +296,24 @@ pub fn mono(text: impl Into<SharedString>, size: f32, color: Hsla, tokens: &Toke
         .into_any_element()
 }
 
-/// 界面字体文本。
-pub fn text(
+/// 数字文本，使用设计稿独立的 Bahnschrift 字体角色。
+pub fn numeric(
     text: impl Into<SharedString>,
     size: f32,
     color: Hsla,
     tokens: &Tokens,
 ) -> AnyElement {
+    div()
+        .flex_none()
+        .font_family(tokens.numeric_font.clone())
+        .text_size(px(size))
+        .text_color(color)
+        .child(text.into())
+        .into_any_element()
+}
+
+/// 界面字体文本。
+pub fn text(text: impl Into<SharedString>, size: f32, color: Hsla, tokens: &Tokens) -> AnyElement {
     div()
         .flex_none()
         .font_family(tokens.font_family.clone())
@@ -317,8 +330,8 @@ pub fn text(
 pub fn section_label(label: &'static str, tokens: &Tokens) -> AnyElement {
     div()
         .flex_none()
-        .font_family(tokens.mono_font.clone())
-        .text_size(px(metrics::FONT_XS))
+        .font_family(tokens.font_family.clone())
+        .text_size(px(metrics::FONT_SM))
         .text_color(tokens.muted_fg)
         .child(label)
         .into_any_element()
@@ -364,7 +377,11 @@ pub fn capacity_bar(used_ratio: f32, width: f32, height: f32, tokens: &Tokens) -
         .h(px(height))
         .rounded(px(outer_radius))
         .overflow_hidden()
-        .bg(crate::tokens::with_alpha(tokens.fg, 0.3))
+        .bg(if tokens.dark {
+            tokens.bg
+        } else {
+            tokens.selected
+        })
         .child(
             div()
                 .flex_none()
@@ -408,9 +425,9 @@ where
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(6.0))
-        .px(px(10.0))
-        .py(px(5.0))
+        .gap(px(4.0))
+        .px(px(8.0))
+        .min_h(px(32.0))
         .rounded(px(metrics::RADIUS))
         .text_size(px(metrics::FONT_SM))
         .text_color(muted)
@@ -440,7 +457,7 @@ where
 /// 因此它会比一行略矮，看起来是「嵌在行里」而不是「撑破了行」。
 /// 高度对两种视图都成立：网格的名称区固定 33px，而这里最多二十几像素。
 pub fn rename_input(state: &Entity<InputState>, tokens: &Tokens) -> AnyElement {
-    let height = (tokens.row_height - 10.0).max(16.0);
+    let height = 26.0;
 
     div()
         .flex_grow(1.0)

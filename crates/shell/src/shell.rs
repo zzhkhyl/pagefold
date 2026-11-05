@@ -1,6 +1,6 @@
 //! 主窗口外壳视图：状态定义、动作与整体渲染入口。
 //!
-//! 布局与配色规范全部来自 `design/file-manager.html`：
+//! 布局与配色规范全部来自 `design/pagefold-file-manager.html`：
 //! 顶部「标题栏 + 标签条 + 命令条」三行，中部「侧边栏 + 内容区 + 预览面板」，
 //! 底部状态栏。尺寸与色值不写死在这里，而是通过 [`fm_views::Tokens`] 取得，
 //! 换主题或改密度时只有 `tokens.rs` 需要动。
@@ -37,7 +37,7 @@ use gpui_component::button::ButtonVariant;
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{InputEvent, InputState, TextareaState};
 use gpui_component::notification::Notification;
-use gpui_component::{ActiveTheme as _, Edges, Theme, ThemeMode, WindowExt as _};
+use gpui_component::{Edges, Theme, ThemeMode, WindowExt as _};
 
 use crate::layout::Viewport;
 
@@ -343,10 +343,13 @@ impl ShellView {
             tracing::warn!(%error, "驱动器枚举失败，驱动器分区将为空");
             Vec::new()
         });
-        let quick_access = service.file_system().quick_access().unwrap_or_else(|error| {
-            tracing::warn!(%error, "快速访问枚举失败，该分区将为空");
-            Vec::new()
-        });
+        let quick_access = service
+            .file_system()
+            .quick_access()
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "快速访问枚举失败，该分区将为空");
+                Vec::new()
+            });
 
         // 让配置里的主题在启动时就生效，避免先亮一帧浅色再切到深色。
         Theme::change(theme_mode(config.dark), None, cx);
@@ -495,10 +498,7 @@ impl ShellView {
                     .timer(Duration::from_millis(TICK_MS))
                     .await;
                 // 视图已销毁（窗口关闭）时 `update` 失败，循环随之结束。
-                if this
-                    .update(cx, |view, cx| view.ambient_tick(cx))
-                    .is_err()
-                {
+                if this.update(cx, |view, cx| view.ambient_tick(cx)).is_err() {
                     break;
                 }
             }
@@ -521,8 +521,11 @@ fn resolved_targets(
     dest_dir: &Path,
     report: &OpReport,
 ) -> Vec<(PathBuf, PathBuf)> {
-    let failed: std::collections::HashSet<&std::path::Path> =
-        report.failed.iter().map(|(path, _)| path.as_path()).collect();
+    let failed: std::collections::HashSet<&std::path::Path> = report
+        .failed
+        .iter()
+        .map(|(path, _)| path.as_path())
+        .collect();
 
     sources
         .iter()
@@ -543,14 +546,13 @@ fn resolved_targets(
 ///
 /// 字体族取自组件库主题：`Theme::change` 会把 `.SystemUIFont` 解析成实际安装的族名
 /// （本机是 Microsoft YaHei UI），等宽字体同理。令牌层因此不必自己查系统字体。
-pub(crate) fn build_tokens(config: &Config, cx: &App) -> Tokens {
-    let theme = cx.theme();
+pub(crate) fn build_tokens(config: &Config, _cx: &App) -> Tokens {
     Tokens::new(
         config.dark,
         config.density,
         config.zoom,
-        theme.font_family.clone(),
-        theme.mono_font_family.clone(),
+        "Segoe UI",
+        "Consolas",
     )
 }
 
@@ -576,88 +578,48 @@ pub(crate) fn apply_component_theme(config: &Config, cx: &mut App) {
         config.dark,
         config.density,
         config.zoom,
-        cx.theme().font_family.clone(),
-        cx.theme().mono_font_family.clone(),
+        "Segoe UI",
+        "Consolas",
     );
     let theme = Theme::global_mut(cx);
-    theme.background = tokens.bg;
+    theme.font_family = tokens.font_family.clone();
+    theme.mono_font_family = tokens.mono_font.clone();
+    theme.background = tokens.panel;
     theme.foreground = tokens.fg;
     theme.muted = tokens.hover;
     theme.muted_foreground = tokens.muted_fg;
-    theme.border = tokens.border;
-    theme.input = tokens.bg;
-    theme.ring = tokens.accent_line;
-    theme.primary = tokens.accent;
-    theme.primary_hover = mix(tokens.accent, tokens.fg, 0.14);
-    theme.primary_active = mix(tokens.accent, tokens.fg, 0.28);
-    theme.primary_foreground = tokens.surface;
-    theme.accent = tokens.accent;
-    // 这里是**菜单项 / 列表行悬停时的文字色**（背景读 `tokens.accent`，见函数末尾）。
-    // 曾经写成 `tokens.surface`——浅色下近白、深色下近黑，正好与背景撞在一起，
-    // 于是鼠标一移上去文字就消失。它必须与悬停底色成对，用正常前景色。
+    theme.border = tokens.border_strong;
+    theme.input = tokens.surface;
+    theme.ring = tokens.accent;
+    theme.primary = tokens.brand;
+    theme.primary_hover = tokens.brand_hover;
+    theme.primary_active = tokens.brand_pressed;
+    theme.primary_foreground = tokens.on_accent;
+    theme.accent = tokens.accent_soft;
     theme.accent_foreground = tokens.fg;
     theme.danger = tokens.danger;
-    theme.danger_foreground = tokens.surface;
+    theme.danger_foreground = tokens.on_accent;
     theme.popover = tokens.surface;
     theme.popover_foreground = tokens.fg;
     theme.list_hover = tokens.hover;
     theme.list_active = tokens.accent_soft;
     theme.list_active_border = tokens.accent_line;
-    theme.list_head = tokens.panel;
+    theme.list_head = tokens.surface;
     theme.radius = px(fm_views::metrics::RADIUS);
-    // 通知统一落在**底部居中**。组件默认在右上角，而复制/移动的进度卡在底部——
-    // 两个「操作反馈」分处两个对角，用户得来回看。现在它们共享底部这一条带。
-    //
-    // 放在这里而不是 bootstrap：主题切换会重建整个 theme（`Theme::change`），
-    // 只在启动时设一次的话，切一次深浅色就被打回右上角了。
-    theme.notification.placement = gpui::Anchor::BottomCenter;
-
-    // 菜单项与列表行的**悬停配色**读的是 `theme.tokens` 里的这两个字段，
-    // 而不是上面那些 `theme.accent`。`tokens` 是主题构造时按库自带配色算出的
-    // **快照**，改 `theme.*` 不会同步过去——于是悬停一直是库的默认组合：
-    // 浅色下「浅灰底 + 白字」、深色下「深灰底 + 黑字」，鼠标一移上去文字就消失。
-    let (hover_background, hover_foreground) = menu_hover_palette(&tokens);
-    // 背景读 `tokens.accent`，文字读 **`theme.accent_foreground`**（本函数上文已设）——
-    // 二者不是同一个来源，这也是之前只改 tokens 却毫无效果的原因。
-    theme.tokens.accent = hover_background.into();
-    // 一并写上，给那些读 `tokens.accent_foreground` 的地方（输入框补全菜单）兜底。
-    theme.tokens.accent_foreground = hover_foreground.into();
-
-    // 这条日志专门用来排查「悬停文字看不见」：它把组件库真正会读的两个值打出来，
-    // 而不是我们以为它读的值。
-    tracing::debug!(
-        hover_background = ?hover_background,
-        accent_foreground = ?theme.accent_foreground,
-        token_accent = ?theme.tokens.accent.background,
-        "组件库悬停配色已写入"
-    );
     theme.radius_lg = px(fm_views::metrics::RADIUS_LG);
-    // 通知（toast）的落点与设计稿的 `.toasts` 对齐：左下角、左 14px、底 40px
-    // （设计稿是 `left:14px;bottom:40px`，40 是为了避开 26px 高的状态栏）。
-    // 组件库默认在**右上角**，不同步的话提示会跑到与设计稿相反的一侧。
+
+    // 组件库的菜单快照必须同步，否则悬停仍读旧主题色。
+    let (hover_background, hover_foreground) = menu_hover_palette(&tokens);
+    theme.tokens.accent = hover_background.into();
+    theme.tokens.accent_foreground = hover_foreground.into();
     theme.notification.placement = Anchor::BottomLeft;
     theme.notification.margins = Edges {
         top: px(0.0),
         right: px(0.0),
-        bottom: px(40.0),
-        left: px(14.0),
+        bottom: px(44.0),
+        left: px(20.0),
     };
-    // 设计稿给 toast 的上限是 `min(420px, 100vw - 28px)`，组件库默认 382px。
     theme.notification.width = px(420.0);
-}
-
-/// 两个颜色按比例混合（`weight` 是后者的占比）。
-///
-/// 设计稿的 `color-mix(in oklch, X 90%, Y)` 只用于按钮的按下态；在 HSL 空间做线性插值
-/// 足以表达「更沉一点的强调色」，无需为此再实现一遍 OKLCH 往返。
-pub(crate) fn mix(base: gpui::Hsla, other: gpui::Hsla, weight: f32) -> gpui::Hsla {
-    let weight = weight.clamp(0.0, 1.0);
-    gpui::Hsla {
-        h: base.h + (other.h - base.h) * weight,
-        s: base.s + (other.s - base.s) * weight,
-        l: base.l + (other.l - base.l) * weight,
-        a: base.a + (other.a - base.a) * weight,
-    }
 }
 
 /// 布尔值到主题模式的映射，供启动与切换两处共用，避免两处判断逻辑漂移。
@@ -918,8 +880,7 @@ impl ShellView {
             let tab = self.tabs.active();
             SortSpec::new(tab.state().sort_key(), tab.state().sort_direction())
         };
-        self.service
-            .insert_sorted(&mut self.entries, entry, sort);
+        self.service.insert_sorted(&mut self.entries, entry, sort);
 
         // 新建是「这一秒才存在」的东西：撤销它就是永久删除（不必进回收站）。
         // 与随后的重命名分成两步记，因此 `Ctrl+Z` 会先撤名字、再撤创建——
@@ -977,10 +938,7 @@ impl ShellView {
             return;
         }
         let Some(origin) = self.current_dir() else {
-            window.push_notification(
-                Notification::warning("当前位置的项目不支持复制或剪切"),
-                cx,
-            );
+            window.push_notification(Notification::warning("当前位置的项目不支持复制或剪切"), cx);
             return;
         };
 
@@ -1043,10 +1001,7 @@ impl ShellView {
 
         Rc::new(move |entry: &Entry| {
             // 用路径而不是下标比对：视图层给出的条目可能来自上一帧的列表。
-            if selected
-                .iter()
-                .any(|(path, _)| path == entry.path.as_ref())
-            {
+            if selected.iter().any(|(path, _)| path == entry.path.as_ref()) {
                 fm_views::DragOut(Rc::clone(&selected))
             } else {
                 fm_views::DragOut::single(entry)
@@ -1115,8 +1070,7 @@ impl ShellView {
             Err(PasteError::Empty) => match self.system_clipboard_plan(&dir) {
                 Some(plan) => plan,
                 None => {
-                    window
-                        .push_notification(Notification::warning("剪贴板里没有可粘贴的文件"), cx);
+                    window.push_notification(Notification::warning("剪贴板里没有可粘贴的文件"), cx);
                     return;
                 }
             },
@@ -1254,10 +1208,7 @@ impl ShellView {
                 cx.background_executor()
                     .timer(Duration::from_millis(120))
                     .await;
-                let finished = transfer
-                    .lock()
-                    .map(|state| state.finished)
-                    .unwrap_or(true);
+                let finished = transfer.lock().map(|state| state.finished).unwrap_or(true);
                 let _ = this.update_in(cx, |_view, _window, cx| cx.notify());
                 if finished {
                     break;
@@ -1534,9 +1485,7 @@ impl ShellView {
         }
 
         let spec = BatchSpec::default();
-        let prefix = cx.new(|cx| {
-            InputState::new(window, cx).default_value(spec.prefix.clone())
-        });
+        let prefix = cx.new(|cx| InputState::new(window, cx).default_value(spec.prefix.clone()));
         let start = cx.new(|cx| InputState::new(window, cx).default_value(spec.start.to_string()));
 
         // 两个输入框都要订阅：任何一次按键都要让预览重算。
@@ -1651,11 +1600,7 @@ impl ShellView {
                 for (old, new) in names.into_iter().zip(new_names) {
                     let conflict = taken.contains(&new.to_lowercase());
                     conflicts += usize::from(conflict);
-                    rows.push(BatchRow {
-                        old,
-                        new,
-                        conflict,
-                    });
+                    rows.push(BatchRow { old, new, conflict });
                 }
                 BatchPreview {
                     rows,
@@ -1784,12 +1729,7 @@ impl ShellView {
     }
 
     /// 真正发起移入回收站（用户确认之后）。
-    fn start_recycle(
-        &mut self,
-        paths: Vec<PathBuf>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn start_recycle(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let fs = Arc::clone(self.service.file_system());
         // 撤销用的是**原路径**：移入时 shell 不会告诉我们 `$R` 叫什么。
         let recorded = paths.clone();
@@ -1808,9 +1748,7 @@ impl ShellView {
                         view.undo.push(UndoAction::Recycle { paths: recorded });
                     }
                     window.push_notification(
-                        Notification::success(format!(
-                            "已移到回收站 {count} 项（Ctrl+Z 撤销）"
-                        )),
+                        Notification::success(format!("已移到回收站 {count} 项（Ctrl+Z 撤销）")),
                         cx,
                     );
                     view.refresh_after_write(cx);
@@ -1827,11 +1765,7 @@ impl ShellView {
     /// 两个动作的确认文案必须不同：一个是「可以从回收站拿回来」，
     /// 另一个是「没有回头路」。共用一套文案，用户就没有机会在读字的时候
     /// 意识到自己按的是哪一个。
-    pub(crate) fn delete_selection_forever(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn delete_selection_forever(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.refuse_printer_writes(window, cx) {
             return;
         }
@@ -2010,18 +1944,13 @@ impl ShellView {
                     view.refresh_after_write(cx);
                 }
                 Ok(_) => {
-                    window.push_notification(
-                        Notification::success(format!("已撤销：{label}")),
-                        cx,
-                    );
+                    window.push_notification(Notification::success(format!("已撤销：{label}")), cx);
                     view.refresh_after_write(cx);
                 }
                 Err(reason) => {
                     // 撤销失败是**要紧**的：用户以为回到原样了，实际没有。
-                    window.push_notification(
-                        Notification::error(format!("撤销失败：{reason}")),
-                        cx,
-                    );
+                    window
+                        .push_notification(Notification::error(format!("撤销失败：{reason}")), cx);
                     // 列表仍要刷新：可能已经改了一半（例如改名成功、搬回失败）。
                     view.refresh_after_write(cx);
                 }
@@ -2275,7 +2204,11 @@ impl ShellView {
         };
 
         // 已经读过这个路径（无论成功还是「不是文本」）就不再重复读。
-        if self.preview_text.as_ref().is_some_and(|(known, _)| known == &path) {
+        if self
+            .preview_text
+            .as_ref()
+            .is_some_and(|(known, _)| known == &path)
+        {
             return;
         }
 
@@ -2436,12 +2369,7 @@ impl ShellView {
     ///
     /// 真实目录与回收站共用这一个函数：两者的收尾（分批并入、代数校验、错误处理、
     /// 兜底收尾）完全一样，差别只在「从哪儿取条目」。
-    fn begin_load(
-        &mut self,
-        source: LoadSource,
-        sort: SortSpec,
-        cx: &mut Context<Self>,
-    ) -> u64 {
+    fn begin_load(&mut self, source: LoadSource, sort: SortSpec, cx: &mut Context<Self>) -> u64 {
         // 错误文案需要它，而此刻 `source` 还没被移进下面的异步块。
         let error_label = source.error_label();
         let generation = self.service.begin_scan();
@@ -2645,7 +2573,10 @@ impl ShellView {
     /// 扩展名文本（小写、不含点），供图标挑选使用。
     pub(crate) fn extension_label(&self, entry: &Entry) -> Option<String> {
         let id = entry.ext()?;
-        self.service.interner().resolve(id).map(|ext| ext.to_string())
+        self.service
+            .interner()
+            .resolve(id)
+            .map(|ext| ext.to_string())
     }
 
     /// 修改时间的**本地时区**文本。
@@ -2764,7 +2695,9 @@ impl ShellView {
             return false;
         }
         window.push_notification(
-            Notification::warning("共享打印机不是文件，不能复制、重命名或删除；双击可以打开打印队列"),
+            Notification::warning(
+                "共享打印机不是文件，不能复制、重命名或删除；双击可以打开打印队列",
+            ),
             cx,
         );
         true
@@ -2936,12 +2869,7 @@ impl ShellView {
     }
 
     /// 按路径打开（预览面板只有一个路径可用，拿不到 `Entry`）。
-    pub(crate) fn open_path(
-        &mut self,
-        path: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self.in_recycle_bin() {
             window.push_notification(
                 Notification::warning("回收站里的条目不能直接打开，需要先还原"),
@@ -3068,10 +2996,7 @@ impl ShellView {
     /// 切换「在文件夹右键菜单中显示『用 Pagefold 打开』」。
     pub(crate) fn toggle_folder_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(exe) = Self::exe_path() else {
-            window.push_notification(
-                Notification::error("读不到本程序路径，无法修改注册表"),
-                cx,
-            );
+            window.push_notification(Notification::error("读不到本程序路径，无法修改注册表"), cx);
             return;
         };
 
@@ -3099,10 +3024,7 @@ impl ShellView {
     /// 切换「设为文件夹默认打开程序」。
     pub(crate) fn toggle_folder_default(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(exe) = Self::exe_path() else {
-            window.push_notification(
-                Notification::error("读不到本程序路径，无法修改注册表"),
-                cx,
-            );
+            window.push_notification(Notification::error("读不到本程序路径，无法修改注册表"), cx);
             return;
         };
 
@@ -3136,15 +3058,11 @@ impl ShellView {
         match fm_platform::restore_folder_integration() {
             Ok(()) => {
                 self.refresh_folder_integration();
-                window.push_notification(
-                    Notification::success("已恢复资源管理器为默认"),
-                    cx,
-                );
+                window.push_notification(Notification::success("已恢复资源管理器为默认"), cx);
             }
-            Err(error) => window.push_notification(
-                Notification::error(format!("恢复失败：{error}")),
-                cx,
-            ),
+            Err(error) => {
+                window.push_notification(Notification::error(format!("恢复失败：{error}")), cx)
+            }
         }
         cx.notify();
     }
@@ -3191,7 +3109,7 @@ impl ShellView {
 
     /// 折叠 / 展开左侧导航栏。
     ///
-    /// 宽屏切换的是持久化的「显示导航区」；窄屏（≤920px）切换的是浮层开关——
+    /// 宽屏切换的是持久化的「显示导航区」；窄屏（≤720px）切换的是浮层开关——
     /// 浮层是临时状态，不应该覆盖用户在大屏上的偏好，因此分开处理。
     pub(crate) fn toggle_sidebar(&mut self, viewport: Viewport, cx: &mut Context<Self>) {
         if viewport.sidebar_overlay {
@@ -3337,7 +3255,7 @@ impl ShellView {
         let start_width = match column {
             Column::Date => columns.date,
             Column::Kind => columns.kind,
-            Column::Size => Some(columns.size),
+            Column::Size => columns.size,
         };
         // 该列当前不可见（窄屏被断点隐藏）时不起会话：没有可拖的对象。
         let Some(start_width) = start_width else {
@@ -3403,7 +3321,12 @@ impl ShellView {
     }
 
     /// 单击选中：按语义更新选中集，并同步焦点项。
-    pub(crate) fn select(&mut self, index: usize, mode: fm_views::SelectMode, cx: &mut Context<Self>) {
+    pub(crate) fn select(
+        &mut self,
+        index: usize,
+        mode: fm_views::SelectMode,
+        cx: &mut Context<Self>,
+    ) {
         let len = self.visible().len();
         if index >= len {
             return;
@@ -3738,11 +3661,7 @@ impl ShellView {
     }
 
     /// 提交地址栏输入：路径存在则跳转，否则在内容区给出提示。
-    pub(crate) fn commit_address_edit(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn commit_address_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(state) = self.address_input.clone() else {
             self.address_editing = false;
             window.focus(&self.shell_focus, cx);
@@ -4120,7 +4039,7 @@ impl Render for ShellView {
         // 顶部曾经有两栏（品牌栏 + 标签条），品牌栏按反馈整条删掉了：
         // 它剩下的内容只有品牌标志，为一行图标占 38px 不划算。
         // 窗口拖拽区因此移到了标签条那一栏的空白段上（见 `tab_strip`）。
-        let tab_strip = self.render_tab_strip(cx);
+        let tab_strip = self.render_tab_strip(viewport, cx);
         let toolbar = self.render_toolbar(viewport, cx);
         let sidebar = self.render_sidebar(viewport, cx);
         // 内容区外面套一层：列表类快捷键与默认焦点都在这一层上，
@@ -4130,8 +4049,8 @@ impl Render for ShellView {
         let preview = self.render_preview(viewport, cx);
         let status_bar = self.render_status_bar(viewport, cx);
         // 浮层模式下才需要遮罩；宽屏侧边栏是常驻的一栏，点它不该有任何副作用。
-        let scrim = (viewport.sidebar_overlay && self.sidebar_overlay)
-            .then(|| self.render_scrim(cx));
+        let scrim =
+            (viewport.sidebar_overlay && self.sidebar_overlay).then(|| self.render_scrim(cx));
 
         let mut body = div()
             // `relative` 是浮层（预览面板 / 侧边栏 / 遮罩）的定位基准：
@@ -4226,9 +4145,8 @@ impl LoadSource {
 
 #[cfg(test)]
 mod tests {
-    use super::{menu_hover_palette, mix, truncate};
+    use super::{menu_hover_palette, truncate};
     use fm_core::{Density, IconZoom};
-    use gpui::hsla;
 
     #[test]
     fn menu_hover_uses_the_theme_text_color_not_the_background_color() {
@@ -4269,24 +4187,5 @@ mod tests {
     fn multibyte_text_is_not_split_mid_character() {
         // 4 个汉字的字节数是 12，按字节截断会 panic；按字符截断才是安全的。
         assert_eq!(truncate("中文路径测试", 4), "中文路径…");
-    }
-
-    #[test]
-    fn mix_interpolates_each_channel() {
-        // 注意 `Hsla` 的色相是 0..1 而不是 0..360。
-        let base = hsla(0.0, 0.0, 0.0, 1.0);
-        let other = hsla(1.0, 1.0, 1.0, 1.0);
-        let mixed = mix(base, other, 0.5);
-        assert!((mixed.h - 0.5).abs() < f32::EPSILON);
-        assert!((mixed.s - 0.5).abs() < f32::EPSILON);
-        assert!((mixed.l - 0.5).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn mix_clamps_the_weight() {
-        let base = hsla(0.0, 0.0, 0.0, 1.0);
-        let other = hsla(0.0, 0.0, 1.0, 1.0);
-        assert!((mix(base, other, 2.0).l - 1.0).abs() < f32::EPSILON);
-        assert!((mix(base, other, -1.0).l - 0.0).abs() < f32::EPSILON);
     }
 }

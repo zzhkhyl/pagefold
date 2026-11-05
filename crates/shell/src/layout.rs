@@ -1,8 +1,8 @@
 //! 整体布局：响应式断点、内容区（选中条 / 表头 / 虚拟列表 / 空状态）与预览面板的定位。
 //!
 //! 断点数值与设计稿的 `@media` 一一对应（见 [`fm_views::breakpoints`]）：
-//! ≤1240 隐藏「类型」列、≤1100 预览改浮层、≤980 隐藏「修改日期」、
-//! ≤920 侧边栏改浮层、≤720 隐藏同步状态与状态栏的视图控件、≤560 隐藏品牌文字。
+//! ≤1180 收窄栏宽并隐藏大小列、≤920 侧栏自动折叠并隐藏类型列、
+//! ≤720 隐藏侧栏、预览改浮层且只保留名称列。
 //!
 //! 本文件的职责边界：**只决定「放什么、放在哪」**，具体控件形态由 `fm_views` 提供。
 
@@ -17,9 +17,9 @@ use fm_views::{
     settings_page, virtual_rows, widgets,
 };
 use gpui::{
-    AnyElement, App, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
-    Pixels, Point, StatefulInteractiveElement as _, Styled as _, Window, div, px,
-    prelude::FluentBuilder as _,
+    AnyElement, App, Context, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement as _, Pixels, Point, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::WindowExt as _;
 use gpui_component::input::Input;
@@ -51,19 +51,17 @@ type PointerMoveHandler = Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>;
 /// 「哪些控件在当前宽度下存在」是同一个决策，分散判断必然会出现两处不一致。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Viewport {
-    /// 视口宽度。
     pub width: f32,
-    /// 侧边栏以浮层呈现（≤920）。
+    /// ≤1180：栏宽与工具区进入中档。
+    pub medium: bool,
+    /// ≤920：侧栏自动折叠为图标态，不改写用户偏好。
+    pub sidebar_compact: bool,
+    /// ≤720：侧栏隐藏；按钮可临时展开为浮层。
     pub sidebar_overlay: bool,
-    /// 命令条压缩：隐藏同步状态、搜索框收窄（≤720）。
     pub compact: bool,
-    /// 极窄：隐藏品牌文字（≤560）。
-    pub narrow: bool,
-    /// 预览面板以浮层呈现（≤1100）。
+    /// ≤720：详情面板以右侧浮层呈现。
     pub preview_overlay: bool,
-    /// 面包屑只显示首段与末段（≤720）。
     pub compact_crumbs: bool,
-    /// 隐藏状态栏的视图 / 缩放控件（≤720）。
     pub hide_status_extras: bool,
 }
 
@@ -71,39 +69,54 @@ impl Viewport {
     pub fn for_width(width: f32) -> Self {
         Self {
             width,
-            sidebar_overlay: width <= breakpoints::SIDEBAR_OVERLAY,
+            medium: width <= breakpoints::MEDIUM,
+            sidebar_compact: width <= breakpoints::SIDEBAR_COMPACT,
+            sidebar_overlay: width <= breakpoints::COMPACT,
             compact: width <= breakpoints::COMPACT,
-            narrow: width <= breakpoints::NARROW,
-            preview_overlay: width <= breakpoints::PREVIEW_OVERLAY,
+            preview_overlay: width <= breakpoints::COMPACT,
             compact_crumbs: width <= breakpoints::COMPACT,
             hide_status_extras: width <= breakpoints::COMPACT,
         }
     }
 
-    /// 侧边栏当前占用的横向像素。
-    ///
-    /// 浮层模式下侧边栏不占位（它压在内容之上），因此这里返回 0——
-    /// 否则窄屏的内容区会凭空少掉 238px。
     pub fn sidebar_width(&self, collapsed: bool) -> f32 {
         if self.sidebar_overlay {
-            return 0.0;
-        }
-        if collapsed {
+            0.0
+        } else if self.sidebar_compact || collapsed {
             SIDEBAR_COLLAPSED_WIDTH
+        } else if self.medium {
+            metrics::SIDEBAR_MEDIUM_WIDTH
         } else {
             SIDEBAR_WIDTH
         }
     }
 
-    /// 预览面板当前占用的横向像素（浮层模式不占位）。
-    pub fn preview_width(&self, open: bool) -> f32 {
-        if !open {
-            return 0.0;
-        }
-        if self.preview_overlay {
-            0.0
+    pub fn preview_fixed_width(&self) -> f32 {
+        if self.sidebar_compact {
+            metrics::PREVIEW_NARROW_WIDTH
+        } else if self.medium {
+            metrics::PREVIEW_MEDIUM_WIDTH
         } else {
             metrics::PREVIEW_WIDTH
+        }
+    }
+
+    /// 浮层不占横向布局空间。
+    pub fn preview_width(&self, open: bool) -> f32 {
+        if !open || self.preview_overlay {
+            0.0
+        } else {
+            self.preview_fixed_width()
+        }
+    }
+
+    pub fn search_width(&self) -> f32 {
+        if self.sidebar_compact {
+            metrics::SEARCH_WIDTH_NARROW
+        } else if self.medium {
+            metrics::SEARCH_WIDTH_MEDIUM
+        } else {
+            metrics::SEARCH_WIDTH
         }
     }
 }
@@ -158,7 +171,7 @@ impl ShellView {
 
         // 选中条常驻（见 `render_batch_bar` 的说明：它不再随选中状态出现/消失，
         // 否则下面的列表每点一次条目就上下跳一次）。
-        children.push(self.render_batch_bar(cx));
+        children.push(self.render_batch_bar(viewport, cx));
 
         let body = if let Some(error) = self.error.clone() {
             // 错误优先展示：出错时列表本来就是空的，先显示骨架会误导。
@@ -240,7 +253,7 @@ impl ShellView {
     ///
     /// 高度**定死**（与预览面板表头共用 [`metrics::BATCH_BAR_HEIGHT`]）而不是靠内边距
     /// 撑出来：两栏并排，差一两个像素就会被看出来。
-    fn render_batch_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_batch_bar(&self, viewport: Viewport, cx: &mut Context<Self>) -> AnyElement {
         let tokens = &self.tokens;
         let count = self.selection.len();
         let has_selection = count > 0;
@@ -346,6 +359,11 @@ impl ShellView {
                 }),
             ));
 
+        let actions = if viewport.medium {
+            actions.w_full().flex_wrap()
+        } else {
+            actions
+        };
         let mut bar = div()
             .flex_none()
             .flex()
@@ -353,11 +371,14 @@ impl ShellView {
             .items_center()
             .gap(px(8.0))
             .px(px(metrics::ROW_PADDING_X))
-            .h(px(metrics::BATCH_BAR_HEIGHT))
-            .bg(tokens.panel)
+            .min_h(px(metrics::BATCH_BAR_HEIGHT))
+            .bg(tokens.surface)
             .border_b_1()
             .border_color(tokens.border)
-            .text_size(px(12.5))
+            .text_size(px(metrics::FONT_SM))
+            .when(viewport.medium, |element| {
+                element.flex_col().items_start().py(px(4.0))
+            })
             .child(
                 div()
                     .flex_none()
@@ -386,7 +407,7 @@ impl ShellView {
 
         // 合计大小只在有选中项时出现：「0 字节」既没有意义又占位置。
         if has_selection {
-            bar = bar.child(widgets::mono(
+            bar = bar.child(widgets::numeric(
                 size,
                 metrics::FONT_XS,
                 tokens.muted_fg,
@@ -634,7 +655,7 @@ impl ShellView {
 
     /// 右侧预览面板。
     ///
-    /// 宽屏时它是「第三栏」；窄屏（≤1100）时改为压在内容区之上的浮层，
+    /// 宽屏时它是「第三栏」；窄屏（≤720）时改为压在内容区之上的浮层，
     /// 定位依赖 `render` 里挂在 `body` 上的 `relative()`。
     pub(crate) fn render_preview(
         &self,
@@ -694,11 +715,13 @@ impl ShellView {
                 .top_0()
                 .right_0()
                 .bottom_0()
-                .w(px(metrics::PREVIEW_OVERLAY_WIDTH))
+                .w(px(metrics::PREVIEW_OVERLAY_WIDTH.min(viewport.width * 0.86)))
                 .shadow_lg()
                 .into_any_element()
         } else {
-            container.w(px(metrics::PREVIEW_WIDTH)).into_any_element()
+            container
+                .w(px(viewport.preview_fixed_width()))
+                .into_any_element()
         })
     }
 
@@ -797,10 +820,7 @@ impl ShellView {
             set_zoom: {
                 let view = cx.entity().downgrade();
                 Rc::new(move |zoom, _window, cx: &mut App| {
-                    if view
-                        .update(cx, |view, cx| view.set_zoom(zoom, cx))
-                        .is_err()
-                    {
+                    if view.update(cx, |view, cx| view.set_zoom(zoom, cx)).is_err() {
                         tracing::debug!("设置缩放时视图已销毁");
                     }
                 })
@@ -830,10 +850,7 @@ impl ShellView {
             toggle_preview: {
                 let view = cx.entity().downgrade();
                 Rc::new(move |_window, cx: &mut App| {
-                    if view
-                        .update(cx, |view, cx| view.toggle_preview(cx))
-                        .is_err()
-                    {
+                    if view.update(cx, |view, cx| view.toggle_preview(cx)).is_err() {
                         tracing::debug!("切换预览面板时视图已销毁");
                     }
                 })
@@ -1005,7 +1022,11 @@ impl ShellView {
             .iter()
             .take(PREVIEW_ROWS)
             .map(|row| {
-                let color = if row.conflict { tokens.danger } else { tokens.fg };
+                let color = if row.conflict {
+                    tokens.danger
+                } else {
+                    tokens.fg
+                };
                 div()
                     .flex()
                     .flex_row()
@@ -1035,9 +1056,9 @@ impl ShellView {
         // 一行状态：错误优先于撞名提示，两者都用危险色——它们都意味着「不能执行」。
         let status = match (&preview.error, preview.conflicts) {
             (Some(error), _) => Some(error.clone()),
-            (None, conflicts) if conflicts > 0 => {
-                Some(format!("{conflicts} 个目标名称已存在，改一下前缀或起始序号"))
-            }
+            (None, conflicts) if conflicts > 0 => Some(format!(
+                "{conflicts} 个目标名称已存在，改一下前缀或起始序号"
+            )),
             _ => None,
         };
 
@@ -1052,7 +1073,7 @@ impl ShellView {
                 .child(
                     div()
                         .flex_none()
-                        .w(px(72.0))
+                        .w(px(92.0))
                         .text_size(px(metrics::FONT_SM))
                         .text_color(tokens.muted_fg)
                         .child(label),
@@ -1061,12 +1082,12 @@ impl ShellView {
                     div()
                         .flex_grow(1.0)
                         .min_w(px(0.0))
-                        .h(px(28.0))
-                        .px(px(8.0))
+                        .h(px(32.0))
+                        .px(px(12.0))
                         .rounded(px(metrics::RADIUS))
                         .border_1()
-                        .border_color(tokens.border)
-                        .bg(tokens.bg)
+                        .border_color(tokens.border_strong)
+                        .bg(tokens.surface)
                         .flex()
                         .items_center()
                         .child(control),
@@ -1076,11 +1097,15 @@ impl ShellView {
 
         let prefix = field(
             "前缀",
-            Input::new(&batch.prefix).appearance(false).into_any_element(),
+            Input::new(&batch.prefix)
+                .appearance(false)
+                .into_any_element(),
         );
         let start = field(
             "起始序号",
-            Input::new(&batch.start).appearance(false).into_any_element(),
+            Input::new(&batch.start)
+                .appearance(false)
+                .into_any_element(),
         );
         let keep_extension = {
             let view = cx.entity().downgrade();
@@ -1113,30 +1138,36 @@ impl ShellView {
         );
 
         let apply = {
-            let accent = tokens.accent;
-            let surface = tokens.surface;
+            let brand = tokens.brand;
+            let on_accent = tokens.on_accent;
             div()
                 .id("batch-apply")
                 .flex_none()
                 .flex()
                 .items_center()
                 .justify_center()
-                .px(px(14.0))
-                .py(px(5.0))
+                .px(px(12.0))
+                .min_h(px(32.0))
                 .rounded(px(metrics::RADIUS))
-                .text_size(px(metrics::FONT_SM))
+                .text_size(px(metrics::FONT_UI))
                 .bg(if can_apply {
-                    accent
+                    brand
+                } else if tokens.dark {
+                    tokens.bg
                 } else {
-                    fm_views::tokens::with_alpha(tokens.fg, 0.2)
+                    tokens.border_subtle
                 })
-                .text_color(surface)
+                .text_color(if can_apply {
+                    on_accent
+                } else {
+                    tokens.disabled_fg
+                })
                 .when(can_apply, |element| {
-                    element
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                    element.cursor_pointer().on_click(cx.listener(
+                        |this, _: &gpui::ClickEvent, window, cx| {
                             this.apply_batch_rename(window, cx);
-                        }))
+                        },
+                    ))
                 })
                 .child("执行")
         };
@@ -1148,26 +1179,24 @@ impl ShellView {
             .max_w_full()
             .flex()
             .flex_col()
-            .gap(px(12.0))
-            .p(px(18.0))
-            .rounded(px(metrics::RADIUS_LG))
+            .gap(px(16.0))
+            .p(px(24.0))
+            .rounded(px(metrics::RADIUS_XL))
             .border_1()
-            .border_color(tokens.border)
+            .border_color(tokens.border_strong)
             .bg(tokens.surface)
             .text_color(tokens.fg)
             .font_family(tokens.font_family.clone())
             .shadow_lg()
-            .on_key_down(cx.listener(
-                |this, event: &gpui::KeyDownEvent, window, cx| {
-                    if event.keystroke.key == "escape" {
-                        this.cancel_batch_rename(window, cx);
-                    }
-                },
-            ))
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.cancel_batch_rename(window, cx);
+                }
+            }))
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(metrics::FONT_LG))
+                    .text_size(px(metrics::FONT_XL))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(format!("批量重命名 · {} 项", preview.rows.len())),
             )
@@ -1179,9 +1208,11 @@ impl ShellView {
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
-                    .p(px(10.0))
+                    .p(px(12.0))
                     .rounded(px(metrics::RADIUS))
-                    .bg(tokens.bg)
+                    .border_1()
+                    .border_color(tokens.border)
+                    .bg(tokens.surface)
                     .children(rows)
                     .when(remaining > 0, |element| {
                         element.child(
@@ -1191,14 +1222,17 @@ impl ShellView {
                                 .child(format!("……另有 {remaining} 项")),
                         )
                     })
-                    .when(preview.rows.is_empty() && preview.error.is_none(), |element| {
-                        element.child(
-                            div()
-                                .text_size(px(metrics::FONT_XS))
-                                .text_color(tokens.muted_fg)
-                                .child("没有可预览的项目"),
-                        )
-                    }),
+                    .when(
+                        preview.rows.is_empty() && preview.error.is_none(),
+                        |element| {
+                            element.child(
+                                div()
+                                    .text_size(px(metrics::FONT_XS))
+                                    .text_color(tokens.muted_fg)
+                                    .child("没有可预览的项目"),
+                            )
+                        },
+                    ),
             )
             .when_some(status, |element, status| {
                 element.child(
@@ -1227,7 +1261,7 @@ impl ShellView {
                 // 遮罩挡住底下的一切：浮层里的输入框拿不到「点空白处」的事件，
                 // 也就不会误触后面的列表。
                 .occlude()
-                .bg(fm_views::tokens::with_alpha(tokens.fg, 0.35))
+                .bg(tokens.overlay)
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1318,15 +1352,16 @@ impl ShellView {
                 .absolute()
                 // 与通知统一到**底部居中**：通知由 `NotificationSettings::placement`
                 // 设为 BottomCenter，这里用「左右都贴 0 + auto 外边距」把定宽卡片推回中线。
-                .bottom(px(16.0))
+                .bottom(px(44.0))
                 .left_0()
                 .right_0()
                 .mx_auto()
                 .w(px(340.0))
+                .max_w_full()
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
-                .p(px(12.0))
+                .gap(px(8.0))
+                .p(px(16.0))
                 .rounded(px(metrics::RADIUS_LG))
                 .border_1()
                 .border_color(tokens.border)
@@ -1366,7 +1401,7 @@ impl ShellView {
                                     .h_full()
                                     .w(gpui::relative(fraction))
                                     .rounded(px(2.0))
-                                    .bg(tokens.accent),
+                                    .bg(tokens.brand),
                             ),
                     )
                 })
@@ -1376,16 +1411,20 @@ impl ShellView {
                         .flex_row()
                         .items_center()
                         .gap(px(6.0))
-                        .text_size(px(metrics::FONT_XS))
-                        .text_color(tokens.muted_fg)
+                        .font_family(tokens.numeric_font.clone())
+                        .text_size(px(metrics::FONT_SM))
+                        .text_color(tokens.secondary_fg)
                         .child(format!("已处理 {files_done} 个文件 · 共 {total} 项"))
                         .child(div().child("·"))
                         .child(byte_text),
                 )
                 .child(
                     div()
-                        .text_size(px(metrics::FONT_XS))
+                        .font_family(tokens.numeric_font.clone())
+                        .text_size(px(metrics::FONT_SM))
                         .text_color(tokens.muted_fg)
+                        .overflow_hidden()
+                        .truncate()
                         .child(current),
                 )
                 .into_any_element(),
@@ -1400,7 +1439,7 @@ impl ShellView {
             .inset_0()
             // 设计稿的遮罩是 `color-mix(fg 40%, transparent)`：
             // 40% 透明度的前景色，而不是把两个不透明色混合——后者会把底下的内容盖死。
-            .bg(fm_views::tokens::with_alpha(self.tokens.fg, 0.4))
+            .bg(self.tokens.overlay)
             .cursor_pointer()
             .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
                 this.close_sidebar_overlay(cx);
@@ -1519,4 +1558,39 @@ fn content_column(
         .children(children)
         .context_menu(move |popup, window, cx| (*menu)(popup, window, cx))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    use super::Viewport;
+
+    #[test]
+    fn responsive_boundaries_match_the_fluent_design() {
+        let wide = Viewport::for_width(1181.0);
+        assert_eq!(wide.sidebar_width(false), 236.0);
+        assert_eq!(wide.preview_width(true), 304.0);
+        assert!(!wide.preview_overlay);
+
+        let medium = Viewport::for_width(1180.0);
+        assert_eq!(medium.sidebar_width(false), 208.0);
+        assert_eq!(medium.preview_width(true), 272.0);
+        assert!(!medium.sidebar_compact);
+
+        let narrow = Viewport::for_width(920.0);
+        assert_eq!(narrow.sidebar_width(false), 52.0);
+        assert_eq!(narrow.preview_width(true), 260.0);
+        assert!(!narrow.sidebar_overlay);
+
+        let compact = Viewport::for_width(720.0);
+        assert_eq!(compact.sidebar_width(false), 0.0);
+        assert_eq!(compact.preview_width(true), 0.0);
+        assert!(compact.sidebar_overlay && compact.preview_overlay);
+    }
+
+    #[test]
+    fn manual_sidebar_preference_does_not_change_overlay_geometry() {
+        assert_eq!(Viewport::for_width(1000.0).sidebar_width(true), 52.0);
+        assert_eq!(Viewport::for_width(1280.0).sidebar_width(true), 52.0);
+        assert_eq!(Viewport::for_width(1280.0).preview_width(false), 0.0);
+    }
 }

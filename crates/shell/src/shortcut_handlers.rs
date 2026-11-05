@@ -7,8 +7,7 @@
 use fm_core::KeyCombo;
 use gpui::{
     AnyElement, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    Styled as _, Window, div, px,
-    prelude::FluentBuilder as _,
+    Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::WindowExt as _;
 
@@ -65,11 +64,7 @@ impl ShellView {
     }
 
     /// 关闭录制浮层（取消，或确认成功后）。
-    pub(crate) fn cancel_shortcut_capture(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn cancel_shortcut_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.shortcut_capture = None;
         window.focus(&self.shell_focus, cx);
         cx.notify();
@@ -92,7 +87,8 @@ impl ShellView {
 
         // 只按修饰键时 `from_keystroke` 返回 `None`：那是「还没按完」，
         // 不是错误，因此不改提示、不闪烁。
-        if let (Some(combo), Some(capture)) = (from_keystroke(keystroke), self.shortcut_capture.as_mut())
+        if let (Some(combo), Some(capture)) =
+            (from_keystroke(keystroke), self.shortcut_capture.as_mut())
         {
             capture.combo = Some(combo);
             capture.error = None;
@@ -101,11 +97,7 @@ impl ShellView {
     }
 
     /// 确认录制结果并立刻生效。
-    pub(crate) fn confirm_shortcut_capture(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn confirm_shortcut_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(capture) = self.shortcut_capture.clone() else {
             return;
         };
@@ -355,12 +347,13 @@ impl ShellView {
             .id("shortcut-capture-card")
             .flex()
             .flex_col()
-            .gap(px(12.0))
+            .gap(px(16.0))
             .w(px(360.0))
-            .p(px(18.0))
-            .rounded(px(fm_views::metrics::RADIUS_LG))
+            .max_w_full()
+            .p(px(24.0))
+            .rounded(px(fm_views::metrics::RADIUS_XL))
             .border_1()
-            .border_color(tokens.border)
+            .border_color(tokens.border_strong)
             .bg(tokens.surface)
             .text_color(tokens.fg)
             .font_family(tokens.font_family.clone())
@@ -372,7 +365,7 @@ impl ShellView {
             )
             .child(
                 div()
-                    .text_size(px(fm_views::metrics::FONT_LG))
+                    .text_size(px(fm_views::metrics::FONT_XL))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(format!("修改快捷键 · {}", capture.target.label())),
             )
@@ -441,18 +434,16 @@ impl ShellView {
                 .inset_0()
                 // 遮罩挡住底下的一切，避免录制期间误点列表。
                 .occlude()
-                .bg(fm_views::tokens::with_alpha(tokens.fg, 0.35))
+                .bg(tokens.overlay)
                 .flex()
                 .items_center()
                 .justify_center()
                 .track_focus(&self.shortcut_focus)
                 // 按键必须挂在**拿到焦点的这一层**上：焦点事件只沿焦点路径分发，
                 // 挂在子卡片上时（焦点在遮罩）永远收不到 —— 这正是「按什么都没反应」。
-                .on_key_down(cx.listener(
-                    |this, event: &gpui::KeyDownEvent, window, cx| {
-                        this.capture_keystroke(&event.keystroke, window, cx);
-                    },
-                ))
+                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                    this.capture_keystroke(&event.keystroke, window, cx);
+                }))
                 // 点遮罩空白处 = 取消。卡片自己 stop_propagation，所以点卡片不会误关。
                 .on_mouse_down(
                     gpui::MouseButton::Left,

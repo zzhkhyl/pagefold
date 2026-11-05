@@ -34,11 +34,11 @@ use fm_core::{Entry, EntryKind, SortKey, ViewMode};
 use fm_services::clipboard::ClipboardMode;
 use fm_services::ops::NewItem;
 use gpui::{
-    Action, App, ClickEvent, Context, ParentElement as _, Styled as _, WeakEntity, Window, div,
+    Action, App, ClickEvent, Context, ParentElement as _, Styled as _, WeakEntity, Window, div, px,
 };
 use gpui_component::Icon;
-use gpui_component::{ActiveTheme as _, WindowExt as _};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
+use gpui_component::{ActiveTheme as _, WindowExt as _};
 use gpui_kit_assets::IconName;
 
 use crate::ShellView;
@@ -167,7 +167,7 @@ impl MenuItemSpec {
 
 /// 条目右键菜单的节点清单。
 ///
-/// 逐项对齐 `design/file-manager.html` 里 `#files` 的 `oncontextmenu`：
+/// 逐项对齐 `design/pagefold-file-manager.html` 里 `#fileArea` 的 `contextmenu`：
 /// 打开 / 在新标签页中打开 /（分隔）/ 复制 / 剪切 / 重命名 /（分隔）/ 属性 / 移到回收站。
 ///
 /// `selected` 是当前选中项数量，用于多选文案（设计稿的「复制 3 项」）。
@@ -315,11 +315,14 @@ pub(crate) fn area_menu_spec(
 ) -> Vec<MenuNode> {
     let view_node = |label: &str, icon: IconName, mode: ViewMode| {
         MenuNode::Item(
-            MenuItemSpec::new(label, icon, MenuAction::SetViewMode(mode)).checked(view_mode == mode),
+            MenuItemSpec::new(label, icon, MenuAction::SetViewMode(mode))
+                .checked(view_mode == mode),
         )
     };
     let sort_node = |label: &str, icon: IconName, key: SortKey| {
-        MenuNode::Item(MenuItemSpec::new(label, icon, MenuAction::SetSort(key)).checked(sort_key == key))
+        MenuNode::Item(
+            MenuItemSpec::new(label, icon, MenuAction::SetSort(key)).checked(sort_key == key),
+        )
     };
 
     let mut nodes = Vec::new();
@@ -415,7 +418,7 @@ fn build_menu(
             MenuNode::Item(spec) if spec.disabled => {
                 let muted = shell
                     .upgrade()
-                    .map(|view| view.read(cx).tokens.muted_fg)
+                    .map(|view| view.read(cx).tokens.disabled_fg)
                     .unwrap_or_else(|| cx.theme().muted_foreground);
                 let label: gpui::SharedString = spec.label.clone().into();
                 let hint = format!("「{}」当前不可用", spec.label);
@@ -424,16 +427,22 @@ fn build_menu(
                     PopupMenuItem::element(move |_window, _cx| {
                         div()
                             .w_full()
+                            .h(px(32.0))
+                            .px(px(8.0))
+                            .flex()
+                            .items_center()
                             .text_color(muted)
                             .child(label.clone())
                     })
                     .icon(Icon::new(spec.icon))
-                    .on_click(move |_event: &ClickEvent, window, cx: &mut App| {
-                        window.push_notification(
-                            gpui_component::notification::Notification::warning(hint.clone()),
-                            cx,
-                        );
-                    }),
+                    .on_click(
+                        move |_event: &ClickEvent, window, cx: &mut App| {
+                            window.push_notification(
+                                gpui_component::notification::Notification::warning(hint.clone()),
+                                cx,
+                            );
+                        },
+                    ),
                 )
             }
             MenuNode::Item(spec) => {
@@ -601,8 +610,8 @@ pub(crate) fn area_menu_builder(cx: &Context<ShellView>) -> fm_views::AreaMenuBu
             return menu;
         }
 
-        let Ok((view_mode, sort_key, writable, can_paste, undo_label, in_recycle_bin)) =
-            shell.read_with(&**cx, |view: &ShellView, _| {
+        let Ok((view_mode, sort_key, writable, can_paste, undo_label, in_recycle_bin)) = shell
+            .read_with(&**cx, |view: &ShellView, _| {
                 let tab = view.tabs.active_state();
                 (
                     tab.view_mode(),
@@ -885,13 +894,19 @@ mod tests {
     fn multi_selection_changes_the_wording() {
         let dir = directory("子目录");
         let single = entry_menu_spec(&dir, 1, None);
-        assert_eq!(find(&single, "复制").map(|s| s.label.clone()), Some(String::from("复制")));
+        assert_eq!(
+            find(&single, "复制").map(|s| s.label.clone()),
+            Some(String::from("复制"))
+        );
         assert!(find(&single, "重命名").is_some());
 
         let many = entry_menu_spec(&dir, 3, None);
         let copy = find(&many, "复制 3 项").expect("多选时文案要带上数量");
         let cut = find(&many, "剪切 3 项").expect("剪切同理");
-        assert!(!copy.disabled && !cut.disabled, "多选不影响复制/剪切的可用性");
+        assert!(
+            !copy.disabled && !cut.disabled,
+            "多选不影响复制/剪切的可用性"
+        );
         assert_eq!(copy.action, MenuAction::Clip(ClipboardMode::Copy));
         assert_eq!(cut.action, MenuAction::Clip(ClipboardMode::Cut));
 
@@ -928,7 +943,10 @@ mod tests {
 
         // 明确不该出现的几项：它们对回收站里的条目没有意义。
         for label in ["打开", "在新标签页中打开", "重命名", "移到回收站"] {
-            assert!(find(&nodes, label).is_none(), "{label} 不该出现在回收站菜单里");
+            assert!(
+                find(&nodes, label).is_none(),
+                "{label} 不该出现在回收站菜单里"
+            );
         }
     }
 
@@ -943,7 +961,10 @@ mod tests {
         let bin = area_menu_spec(ViewMode::Details, SortKey::Name, false, false, None, true);
         let item = find(&bin, "清空回收站…").expect("回收站里应当有这一项");
         assert_eq!(item.action, MenuAction::EmptyRecycleBin);
-        assert!(!item.disabled, "回收站为空时也允许点，它会提示没有可清空的内容");
+        assert!(
+            !item.disabled,
+            "回收站为空时也允许点，它会提示没有可清空的内容"
+        );
     }
 
     #[test]
@@ -1044,12 +1065,7 @@ mod tests {
             .collect();
         assert_eq!(
             labels,
-            vec![
-                "新建文件夹",
-                "新建文本文档",
-                "新建 Markdown 文档",
-                "粘贴"
-            ],
+            vec!["新建文件夹", "新建文本文档", "新建 Markdown 文档", "粘贴"],
             "顺序与设计稿 `$('#btnNew').onclick` 的清单一致"
         );
 

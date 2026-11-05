@@ -19,3 +19,11 @@ design/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Windows 保留设备名。在 Git Bash 里写 `> NUL` 这类重定向会**真的**建出一个
+# 名为 NUL 的文件（bash 不认识设备名），而 git 拒绝把它写进索引
+# （`error: invalid path 'NUL'`），整个 `git add -A` 都会被它挡住。
+/NUL
+/CON
+/PRN
+/AUX

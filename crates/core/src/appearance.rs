@@ -4,7 +4,7 @@
 //! 只依赖 core），而具体像素值又只对视图层有意义。折中做法是把「档位 → 像素」的
 //! 换算放在这里——它是纯函数，不依赖任何 UI 框架，正好符合 core 的约束。
 //!
-//! 像素取值直接来自设计稿 `design/file-manager.html`：
+//! 像素取值直接来自设计稿 `design/pagefold-file-manager.html`：
 //! `html[data-density=compact]{--row-h:27px}` / `[data-zoom="0"]{--cell:122px}`。
 
 use serde::{Deserialize, Serialize};
@@ -249,7 +249,10 @@ mod tests {
     fn untouched_columns_stay_none() {
         let mut widths = ColumnWidths::default();
         widths.set(Column::Size, 90.0);
-        assert_eq!(widths.date, None, "没拖过的列必须保持 None，才能回落到断点默认值");
+        assert_eq!(
+            widths.date, None,
+            "没拖过的列必须保持 None，才能回落到断点默认值"
+        );
         assert_eq!(widths.kind, None);
         assert_eq!(widths.size, Some(90.0));
     }

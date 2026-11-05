@@ -9,8 +9,8 @@ use fm_core::{Entry, IconZoom, Location, ViewMode, format_size};
 use fm_views::metrics;
 use gpui::{
     AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
-    prelude::FluentBuilder as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::tooltip::Tooltip;
 
@@ -22,7 +22,11 @@ type ZoomHandler = Rc<dyn Fn(IconZoom, &mut Window, &mut App)>;
 
 impl ShellView {
     /// 渲染底部状态栏。
-    pub(crate) fn render_status_bar(&self, viewport: Viewport, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_status_bar(
+        &self,
+        viewport: Viewport,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let tokens = &self.tokens;
         let icons_view = self.tabs.active_state().view_mode() == ViewMode::Icons;
 
@@ -64,7 +68,7 @@ impl ShellView {
             .bg(tokens.panel)
             .border_t_1()
             .border_color(tokens.border)
-            .font_family(tokens.mono_font.clone())
+            .font_family(tokens.font_family.clone())
             .text_size(px(metrics::FONT_XS))
             .text_color(tokens.muted_fg)
             .child(
@@ -98,12 +102,7 @@ impl ShellView {
                             "详细信息视图"
                         }),
                 )
-                .child(zoom_control(
-                    self.config.zoom,
-                    tokens,
-                    icons_view,
-                    on_zoom,
-                ));
+                .child(zoom_control(self.config.zoom, tokens, icons_view, on_zoom));
         }
 
         bar.into_any_element()
@@ -127,7 +126,6 @@ fn zoom_control(
     on_pick: ZoomHandler,
 ) -> AnyElement {
     let hover = tokens.hover;
-    let accent = tokens.accent;
     let border = tokens.border;
     let hint: SharedString = if enabled {
         "缩略图大小：小 / 中 / 大".into()
@@ -148,15 +146,13 @@ fn zoom_control(
             .h(px(14.0))
             .rounded(px(3.0))
             .border_1()
-            .border_color(if active { accent } else { border })
-            .when(active, |element| element.bg(accent))
+            .border_color(if active { tokens.accent_line } else { border })
+            .when(active, |element| element.bg(tokens.accent_soft))
             .when(enabled, |element| {
                 element
                     .cursor_pointer()
                     .hover(move |style| style.bg(hover))
-                    .on_click(move |_event: &ClickEvent, window, cx| {
-                        pick(zoom, window, cx)
-                    })
+                    .on_click(move |_event: &ClickEvent, window, cx| pick(zoom, window, cx))
             })
             // 置灰用整体透明度：三档各自的「选中态」仍然可见——
             // 用户需要知道当前设的是哪一档，哪怕此刻改不了。

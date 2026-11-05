@@ -170,7 +170,7 @@ where
                     .rounded(px(metrics::CRUMB_RADIUS))
                     .overflow_hidden()
                     .cursor_pointer()
-                    .text_size(px(12.5))
+                    .text_size(px(metrics::FONT_UI))
                     .text_color(if is_current {
                         foreground
                     } else {

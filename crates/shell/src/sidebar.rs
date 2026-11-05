@@ -16,7 +16,7 @@ use fm_views::widgets;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, ClickEvent, Context, ElementId, Hsla,
     InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
-    Styled as _, Window, div, ease_in_out, px, prelude::FluentBuilder as _,
+    Styled as _, Window, div, ease_in_out, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{Icon, Sizable as _};
 use gpui_kit_assets::IconName;
@@ -34,14 +34,14 @@ const DISK_METER_WIDTH: f32 = 150.0;
 impl ShellView {
     /// 渲染左侧导航栏。
     ///
-    /// 浮层模式（≤920px）下侧边栏压在内容之上，只在 `sidebar_overlay` 为真时出现；
+    /// 浮层模式（≤720px）下侧边栏压在内容之上，只在 `sidebar_overlay` 为真时出现；
     /// 此时它不参与横向布局，宽度由 [`Viewport::sidebar_width`] 返回 0 与之对应。
     pub(crate) fn render_sidebar(&self, viewport: Viewport, cx: &mut Context<Self>) -> AnyElement {
         let tokens = &self.tokens;
         let overlay = viewport.sidebar_overlay;
         // 浮层模式不使用「折叠成 48px」这一形态：浮层是临时抽屉，
         // 它要么完整出现、要么完全消失，没有中间态。
-        let collapsed = !overlay && self.config.sidebar_collapsed;
+        let collapsed = !overlay && (viewport.sidebar_compact || self.config.sidebar_collapsed);
 
         // 浮层未展开时整条侧边栏不存在——不是「宽度为 0」，
         // 否则它会挡住下面的内容而用户看不出来。
@@ -51,12 +51,17 @@ impl ShellView {
 
         // 折叠动画从「另一个状态」的宽度出发，因此需要显式记住起点。
         // 浮层模式两端同宽，动画自然退化为无过渡。
+        let expanded_width = if viewport.medium {
+            metrics::SIDEBAR_MEDIUM_WIDTH
+        } else {
+            SIDEBAR_WIDTH
+        };
         let (start_width, target_width) = if overlay {
             (SIDEBAR_WIDTH, SIDEBAR_WIDTH)
         } else if collapsed {
-            (SIDEBAR_WIDTH, SIDEBAR_COLLAPSED_WIDTH)
+            (expanded_width, SIDEBAR_COLLAPSED_WIDTH)
         } else {
-            (SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_WIDTH)
+            (SIDEBAR_COLLAPSED_WIDTH, expanded_width)
         };
         let location = self.tabs.active_state().location().clone();
 
@@ -124,23 +129,18 @@ impl ShellView {
                     .flex_row()
                     .items_center()
                     .gap(px(2.0))
-                    .child(
-                        div()
-                            .flex_grow(1.0)
-                            .min_w(px(0.0))
-                            .child(nav_row(
-                                "computer",
-                                String::from("此电脑"),
-                                IconName::PcCase,
-                                false,
-                                false,
-                                computer_selected,
-                                tokens,
-                                cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                    this.go_to_computer(cx);
-                                }),
-                            )),
-                    )
+                    .child(div().flex_grow(1.0).min_w(px(0.0)).child(nav_row(
+                        "computer",
+                        String::from("此电脑"),
+                        IconName::PcCase,
+                        false,
+                        false,
+                        computer_selected,
+                        tokens,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.go_to_computer(cx);
+                        }),
+                    )))
                     .child(caret_button(
                         ("computer-caret", u32::from(self.drives_expanded)),
                         self.drives_expanded,
@@ -196,9 +196,7 @@ impl ShellView {
             .child(navigation);
 
         // 容量档位只在展开态出现：它需要一整行文字，折叠态塞不下。
-        if !collapsed
-            && let Some(meters) = self.render_disk_meters()
-        {
+        if !collapsed && let Some(meters) = self.render_disk_meters() {
             sidebar = sidebar.child(meters);
         }
 
@@ -206,12 +204,7 @@ impl ShellView {
         // 定位必须在 `with_animation` 之前设置：动画元素只负责宽度，
         // 它不转发定位类的样式方法。
         if overlay {
-            sidebar = sidebar
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .left_0()
-                .shadow_lg();
+            sidebar = sidebar.absolute().top_0().bottom_0().left_0().shadow_lg();
         }
 
         let sidebar = sidebar.with_animation(
@@ -258,7 +251,7 @@ impl ShellView {
                         .flex_row()
                         .items_center()
                         .justify_between()
-                        .font_family(tokens.mono_font.clone())
+                        .font_family(tokens.numeric_font.clone())
                         .text_size(px(metrics::FONT_XS))
                         .text_color(tokens.muted_fg)
                         .child(
@@ -281,7 +274,7 @@ impl ShellView {
                         .flex_row()
                         .items_center()
                         .justify_between()
-                        .font_family(tokens.mono_font.clone())
+                        .font_family(tokens.numeric_font.clone())
                         .text_size(px(metrics::FONT_XS))
                         .text_color(tokens.muted_fg)
                         .child(format!("{used} / {total}"))
@@ -380,11 +373,10 @@ where
 {
     let hover = tokens.hover;
     let accent_soft = tokens.accent_soft;
-    let accent = tokens.accent;
     let foreground = tokens.fg;
     let muted = tokens.muted_fg;
 
-    let icon_color: Hsla = if selected { accent } else { muted };
+    let icon_color: Hsla = if selected { foreground } else { muted };
 
     let mut row = div()
         .id(id)
@@ -395,7 +387,13 @@ where
         .h(px(metrics::NAV_ITEM_HEIGHT))
         .rounded(px(metrics::RADIUS))
         .cursor_pointer()
-        .hover(move |style| style.bg(hover))
+        .hover(move |style| {
+            if selected {
+                style.bg(accent_soft)
+            } else {
+                style.bg(hover)
+            }
+        })
         .when(selected, |element| element.bg(accent_soft))
         .on_click(on_click);
 
@@ -407,7 +405,7 @@ where
     }
 
     row = row
-        .gap(px(9.0))
+        .gap(px(12.0))
         .px(px(8.0))
         .when(is_sub, |element| element.pl(px(metrics::NAV_SUB_INDENT)))
         .child(Icon::new(icon).with_size(px(15.0)).text_color(icon_color))
@@ -417,7 +415,7 @@ where
                 .min_w(px(0.0))
                 .overflow_hidden()
                 .truncate()
-                .text_size(px(12.5))
+                .text_size(px(metrics::FONT_UI))
                 .text_color(foreground)
                 .when(selected, |element| {
                     element.font_weight(gpui::FontWeight::MEDIUM)

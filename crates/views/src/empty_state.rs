@@ -1,12 +1,12 @@
 //! 空状态与加载态。
 //!
-//! 设计约定（`design/file-manager.html` 的 `.empty` 与 `.lhead`）：
+//! 设计约定（`design/pagefold-file-manager.html` 的 `.empty-state` 与 `.file-header`）：
 //! 空目录显示带图标框的空状态而不是一片空白；加载中显示**骨架行**而不是整屏转圈——
 //! 转圈会掩盖「首批已经到达」这一事实，让大目录显得比实际更慢。
 
 use gpui::{
-    AnyElement, IntoElement, ParentElement as _, SharedString, Styled as _, div, px,
-    prelude::FluentBuilder as _,
+    AnyElement, IntoElement, ParentElement as _, SharedString, Styled as _, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{Icon, Sizable as _};
 use gpui_kit_assets::IconName;
@@ -58,11 +58,7 @@ pub fn no_results(query: &str, tokens: &Tokens) -> AnyElement {
 ///
 /// 供「没有可展示的内容、但也不算错误」的场景使用，例如「此电脑」下未检测到驱动器。
 /// 用 [`empty_folder`] 会给出「此文件夹为空」这种与场景不符的文案。
-pub fn notice(
-    icon: IconName,
-    message: impl Into<SharedString>,
-    tokens: &Tokens,
-) -> AnyElement {
+pub fn notice(icon: IconName, message: impl Into<SharedString>, tokens: &Tokens) -> AnyElement {
     centered(icon, message.into(), None, tokens)
 }
 
@@ -129,17 +125,18 @@ fn centered(
                 .flex()
                 .items_center()
                 .justify_center()
-                .w(px(44.0))
-                .h(px(44.0))
-                .rounded(px(12.0))
+                .w(px(64.0))
+                .h(px(64.0))
+                .rounded(px(metrics::RADIUS_XL))
                 .border_1()
                 .border_color(tokens.border)
+                .bg(tokens.panel)
                 .text_color(tokens.muted_fg)
-                .child(Icon::new(icon).with_size(px(20.0))),
+                .child(Icon::new(icon).with_size(px(32.0))),
         )
         .child(
             div()
-                .mt(px(14.0))
+                .mt(px(16.0))
                 .text_size(px(metrics::FONT_LG))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(tokens.fg)
@@ -147,8 +144,8 @@ fn centered(
         )
         .when_some(description, |element, description| {
             element
-                .mt(px(6.0))
-                .text_size(px(12.5))
+                .mt(px(8.0))
+                .text_size(px(metrics::FONT_UI))
                 .child(description)
         })
         .into_any_element()

@@ -174,7 +174,7 @@ fn empty(tokens: &Tokens) -> AnyElement {
                 )
                 .child(
                     div()
-                        .text_size(px(12.5))
+                        .text_size(px(metrics::FONT_UI))
                         .text_color(tokens.muted_fg)
                         .child("选择文件或文件夹后可在此查看详细信息"),
                 ),
@@ -215,7 +215,7 @@ fn multiple(names: &[SharedString], total_size: &str, tokens: &Tokens) -> AnyEle
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(metrics::FONT_LG))
+                        .text_size(px(metrics::FONT_UI))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(tokens.fg)
                         .child(format!("已选择 {} 项", names.len())),
@@ -223,8 +223,8 @@ fn multiple(names: &[SharedString], total_size: &str, tokens: &Tokens) -> AnyEle
                 .child(
                     div()
                         .flex_none()
-                        .font_family(tokens.mono_font.clone())
-                        .text_size(px(metrics::FONT_XS))
+                        .font_family(tokens.numeric_font.clone())
+                        .text_size(px(metrics::FONT_SM))
                         .text_color(tokens.muted_fg)
                         .child(format!("合计 {total_size}")),
                 )
@@ -270,10 +270,10 @@ fn single(
             .justify_center()
             .h(px(132.0))
             .mb(px(12.0))
-            .rounded(px(metrics::RADIUS))
+            .rounded(px(metrics::RADIUS_MD))
             .border_1()
             .border_color(tokens.border)
-            .bg(tokens.bg)
+            .bg(tokens.surface)
             .child(crate::widgets::glyph(
                 summary.icon_id,
                 summary.icon,
@@ -339,26 +339,31 @@ fn single(
     rows.push(("位置", summary.location.to_string()));
 
     let meta = rows.into_iter().map(move |(label, value)| {
+        let numeric = matches!(label, "大小" | "修改时间");
         div()
             .flex()
             .flex_col()
-            .gap(px(2.0))
+            .gap(px(4.0))
             .child(
                 div()
-                    .font_family(tokens.mono_font.clone())
-                    .text_size(px(metrics::FONT_XS))
+                    .text_size(px(metrics::FONT_SM))
                     .text_color(tokens.muted_fg)
                     .child(label),
             )
             .child(
                 div()
-                    .text_size(px(metrics::FONT_SM))
+                    .font_family(if numeric {
+                        tokens.numeric_font.clone()
+                    } else {
+                        tokens.font_family.clone()
+                    })
+                    .text_size(px(metrics::FONT_UI))
                     .text_color(tokens.fg)
                     .child(value),
             )
     });
 
-    body = body.child(div().flex().flex_col().gap(px(10.0)).children(meta));
+    body = body.child(div().flex().flex_col().gap(px(12.0)).children(meta));
 
     let mut panel = div()
         .flex()
@@ -373,7 +378,7 @@ fn single(
                 .min_w(px(0.0))
                 .overflow_hidden()
                 .truncate()
-                .text_size(px(metrics::FONT_LG))
+                .text_size(px(metrics::FONT_UI))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(tokens.fg)
                 .child(summary.name.clone())
@@ -397,6 +402,7 @@ fn single(
         } else {
             (IconName::ExternalLink, "用默认程序打开")
         };
+        let brand_hover = tokens.brand_hover;
         actions.push(
             div()
                 .id("preview-open")
@@ -405,12 +411,16 @@ fn single(
                 .justify_center()
                 .gap(px(6.0))
                 .w_full()
-                .h(px(30.0))
+                .h(px(32.0))
                 .rounded(px(metrics::RADIUS))
-                .bg(crate::tokens::with_alpha(tokens.accent, 0.9))
-                .text_color(tokens.surface)
-                .text_size(px(12.5))
+                .border_1()
+                .border_color(tokens.brand)
+                .bg(tokens.brand)
+                .text_color(tokens.on_accent)
+                .text_size(px(metrics::FONT_UI))
+                .font_weight(gpui::FontWeight::MEDIUM)
                 .cursor_pointer()
+                .hover(move |style| style.bg(brand_hover).border_color(brand_hover))
                 .on_click(move |_event: &ClickEvent, window, cx| {
                     (*handler)(target.clone(), window, cx);
                 })
@@ -432,12 +442,13 @@ fn single(
                 .justify_center()
                 .gap(px(6.0))
                 .w_full()
-                .h(px(28.0))
+                .h(px(32.0))
                 .rounded(px(metrics::RADIUS))
                 .border_1()
-                .border_color(tokens.border)
-                .text_color(tokens.muted_fg)
-                .text_size(px(12.5))
+                .border_color(tokens.border_strong)
+                .bg(tokens.surface)
+                .text_color(tokens.fg)
+                .text_size(px(metrics::FONT_UI))
                 .cursor_pointer()
                 .hover(move |style| style.bg(hover).text_color(foreground))
                 .on_click(move |_event: &ClickEvent, window, cx| {
@@ -455,8 +466,8 @@ fn single(
                 .flex_none()
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
-                .p(px(10.0))
+                .gap(px(8.0))
+                .p(px(12.0))
                 .border_t_1()
                 .border_color(tokens.border)
                 .children(actions),

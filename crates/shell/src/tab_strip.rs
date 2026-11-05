@@ -18,7 +18,7 @@ use gpui::{
     AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, ScrollWheelEvent,
     SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window,
-    WindowControlArea, div, point, px, prelude::FluentBuilder as _,
+    WindowControlArea, div, point, prelude::FluentBuilder as _, px,
 };
 use gpui_component::button::{
     Button, ButtonCustomVariant, ButtonVariant, ButtonVariants as _, DropdownButton,
@@ -30,11 +30,15 @@ use gpui_kit_assets::IconName;
 use fm_core::TabId;
 use fm_views::metrics;
 
-use crate::shell::ShellView;
+use crate::{layout::Viewport, shell::ShellView};
 
 impl ShellView {
     /// 渲染标签条。
-    pub(crate) fn render_tab_strip(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_tab_strip(
+        &self,
+        viewport: Viewport,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let tokens = &self.tokens;
         // 悬停样式会被存进元素里，因此先把用到的色值拷出来（`Tokens` 不是 `Copy`）。
         let hover_fill = tokens.hover;
@@ -43,143 +47,159 @@ impl ShellView {
 
         // 收集成 `Vec` 而不是留着惰性迭代器：下面的 `render_window_actions` 需要
         // 可变借用 `cx`，而迭代器里的 `cx.listener(..)` 会一直持有 `cx` 的不可变借用。
-        let tabs: Vec<AnyElement> = self.tabs.tabs().iter().map(|tab| {
-            let id = tab.id();
-            let is_active = id == active_id;
-            let title: SharedString = tab.state().title().into();
-            // 图标按位置区分：设置页与「此电脑」用非文件夹图标，
-            // 否则一排标签看起来全是文件夹，分不清哪个是设置。
-            let icon = match tab.state().location() {
-                fm_core::Location::Settings => IconName::Settings,
-                fm_core::Location::Computer => IconName::HardDrive,
-                fm_core::Location::RecycleBin => IconName::Trash,
-                fm_core::Location::Directory(_) => {
-                    if is_active {
-                        IconName::FolderOpen
-                    } else {
-                        IconName::FolderClosed
-                    }
-                }
-            };
-
-            let close = div()
-                .id(("tab-close", id.0 as usize))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(18.0))
-                .h(px(18.0))
-                .mr(px(4.0))
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .opacity(if is_active { 1.0 } else { 0.55 })
-                .text_color(tokens.muted_fg)
-                .hover(move |style| style.bg(hover_fill).text_color(foreground))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                    // 阻止冒泡到父级标签：否则会在标签已被关闭之后又对它做一次选中。
-                    cx.stop_propagation();
-                    this.close_tab(id, cx);
-                }))
-                .child(Icon::new(IconName::X).with_size(px(11.0)));
-
-            div()
-                .id(("tab", id.0 as usize))
-                .flex()
-                .flex_col()
-                .flex_shrink(1.0)
-                .min_w(px(96.0))
-                .max_w(px(metrics::TAB_MAX_WIDTH))
-                .h(px(metrics::TAB_HEIGHT))
-                .rounded_t(px(8.0))
-                .overflow_hidden()
-                .cursor_pointer()
-                .text_color(if is_active { tokens.fg } else { tokens.muted_fg })
-                .border_l_2()
-                .border_r_2()
-                .border_color(if is_active {
-                    tokens.border
-                } else {
-                    tokens.surface
-                })
-                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                    this.select_tab(id, cx);
-                }))
-                // 中键关闭标签（与浏览器一致）。阻止冒泡，否则会顺带触发左键点击的选中。
-                .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
-                    cx.stop_propagation();
-                    this.close_tab(id, cx);
-                }))
-                // 拖拽排序：左键按下记起始，滑过其它标签时把被拖的标签移到它的位置。
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, _cx| {
-                    this.begin_tab_drag(id, event.position);
-                }))
-                .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
-                    this.drag_tab_over(id, event.position, cx);
-                }))
-                .when(!is_active, |element| {
-                    element.hover(move |style| style.bg(hover_fill).text_color(foreground))
-                })
-                .when(is_active, |element| element.bg(tokens.surface))
-                // 激活标签的顶边画成强调色；未激活时同高透明，
-                // 保证两种状态的内容高度完全一致，文字不会上下跳。
-                .child(
-                    div()
-                        .flex_none()
-                        .w_full()
-                        .h(px(2.0))
-                        .bg(if is_active {
-                            tokens.accent
+        let tabs: Vec<AnyElement> = self
+            .tabs
+            .tabs()
+            .iter()
+            .map(|tab| {
+                let id = tab.id();
+                let is_active = id == active_id;
+                let title: SharedString = tab.state().title().into();
+                // 图标按位置区分：设置页与「此电脑」用非文件夹图标，
+                // 否则一排标签看起来全是文件夹，分不清哪个是设置。
+                let icon = match tab.state().location() {
+                    fm_core::Location::Settings => IconName::Settings,
+                    fm_core::Location::Computer => IconName::HardDrive,
+                    fm_core::Location::RecycleBin => IconName::Trash,
+                    fm_core::Location::Directory(_) => {
+                        if is_active {
+                            IconName::FolderOpen
                         } else {
-                            tokens.surface
+                            IconName::FolderClosed
+                        }
+                    }
+                };
+
+                let close = div()
+                    .id(("tab-close", id.0 as usize))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(24.0))
+                    .h(px(24.0))
+                    .mr(px(4.0))
+                    .rounded(px(metrics::RADIUS))
+                    .cursor_pointer()
+                    .opacity(if is_active { 1.0 } else { 0.55 })
+                    .text_color(tokens.muted_fg)
+                    .hover(move |style| style.bg(hover_fill).text_color(foreground))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        // 阻止冒泡到父级标签：否则会在标签已被关闭之后又对它做一次选中。
+                        cx.stop_propagation();
+                        this.close_tab(id, cx);
+                    }))
+                    .child(Icon::new(IconName::X).with_size(px(11.0)));
+
+                div()
+                    .id(("tab", id.0 as usize))
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .flex_shrink(1.0)
+                    .min_w(px(if viewport.compact {
+                        metrics::TAB_MIN_WIDTH_COMPACT
+                    } else {
+                        metrics::TAB_MIN_WIDTH
+                    }))
+                    .max_w(px(metrics::TAB_MAX_WIDTH))
+                    .h(px(metrics::TAB_HEIGHT))
+                    .rounded_t(px(metrics::RADIUS_MD))
+                    .overflow_hidden()
+                    .cursor_pointer()
+                    .text_color(if is_active {
+                        tokens.fg
+                    } else {
+                        tokens.secondary_fg
+                    })
+                    .border_1()
+                    .border_color(if is_active {
+                        tokens.border
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.select_tab(id, cx);
+                    }))
+                    // 中键关闭标签（与浏览器一致）。阻止冒泡，否则会顺带触发左键点击的选中。
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
+                            cx.stop_propagation();
+                            this.close_tab(id, cx);
                         }),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .flex_grow(1.0)
-                        .min_w(px(0.0))
-                        .child(
+                    )
+                    // 拖拽排序：左键按下记起始，滑过其它标签时把被拖的标签移到它的位置。
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _window, _cx| {
+                            this.begin_tab_drag(id, event.position);
+                        }),
+                    )
+                    .on_mouse_move(
+                        cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                            this.drag_tab_over(id, event.position, cx);
+                        }),
+                    )
+                    .when(!is_active, |element| {
+                        element.hover(move |style| style.bg(hover_fill).text_color(foreground))
+                    })
+                    .when(is_active, |element| {
+                        element.bg(tokens.surface).child(
                             div()
-                                .flex_grow(1.0)
-                                .min_w(px(0.0))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .pl(px(10.0))
-                                .overflow_hidden()
-                                .child(
-                                    Icon::new(icon)
-                                        .with_size(px(14.0))
-                                        .text_color(if is_active {
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                .h(px(1.0))
+                                .bg(tokens.surface),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .flex_grow(1.0)
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .flex_grow(1.0)
+                                    .min_w(px(0.0))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .pl(px(10.0))
+                                    .overflow_hidden()
+                                    .child(Icon::new(icon).with_size(px(14.0)).text_color(
+                                        if is_active {
                                             tokens.accent
                                         } else {
                                             tokens.muted_fg
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .flex_grow(1.0)
-                                        .min_w(px(0.0))
-                                        .overflow_hidden()
-                                        .truncate()
-                                        .text_size(px(12.5))
-                                        .child(title),
-                                ),
-                        )
-                        .child(close),
-                )
-                // 右键菜单：与「更多」按钮同一份，但「关闭其它/右侧」以本标签为参照。
-                .context_menu(tab_menu_builder(cx, Some(id)))
-                .into_any_element()
-        }).collect();
+                                        },
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex_grow(1.0)
+                                            .min_w(px(0.0))
+                                            .overflow_hidden()
+                                            .truncate()
+                                            .text_size(px(metrics::FONT_UI))
+                                            .child(title),
+                                    ),
+                            )
+                            .child(close),
+                    )
+                    // 右键菜单：与「更多」按钮同一份，但「关闭其它/右侧」以本标签为参照。
+                    .context_menu(tab_menu_builder(cx, Some(id)))
+                    .into_any_element()
+            })
+            .collect();
 
         // 右端动作组：主题切换 + 三个窗口按钮。它们原先在标题栏（第一栏），
         // 随第一栏精简为「只剩品牌标志」一起下移到本栏——这也是本次唯一一处布局性调整。
-        let window_actions = self.render_window_actions(cx);
+        let window_actions = self.render_window_actions(viewport.compact, cx);
 
         div()
             .relative()
@@ -187,12 +207,10 @@ impl ShellView {
             .flex()
             .flex_row()
             .items_end()
-            .gap(px(8.0))
+            .gap(px(4.0))
             .h(px(metrics::TABSTRIP_HEIGHT))
-            // 只留左边距：右端是关闭按钮，要贴到窗口右边缘（Windows 惯例），
-            // 所以这一栏不再有右内边距。
-            .pl(px(8.0))
-            .bg(tokens.panel)
+            .pl(px(4.0))
+            .bg(tokens.bg)
             // 底部分隔线做成「绝对定位的第一个子元素」，而不是父级的 border：
             // 设计稿把它画在 `.tabstrip::after`（z-index 0）上，激活标签（z-index 2）
             // 会盖住它，从而与下方的命令条连成一片。若写成 border，
@@ -251,10 +269,8 @@ impl ShellView {
                                     let max = this.tab_scroll.max_offset();
                                     // 偏移是负值：往下滚 = 更负。夹在 [max, 0] 之间，
                                     // 否则会把标签条滚到一片空白上。
-                                    let shifted =
-                                        (current.x - delta.y).clamp(max.x, px(0.0));
-                                    this.tab_scroll
-                                        .set_offset(point(shifted, current.y));
+                                    let shifted = (current.x - delta.y).clamp(max.x, px(0.0));
+                                    this.tab_scroll.set_offset(point(shifted, current.y));
                                     cx.stop_propagation();
                                 },
                             ))
@@ -288,12 +304,18 @@ impl ShellView {
             )
             .child(window_actions)
             // 左键抬起（含在标签条外抬起）结束拖拽排序。
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _window, _cx| {
-                this.end_tab_drag();
-            }))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _window, _cx| {
-                this.end_tab_drag();
-            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _window, _cx| {
+                    this.end_tab_drag();
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _window, _cx| {
+                    this.end_tab_drag();
+                }),
+            )
             .into_any_element()
     }
 }
@@ -328,8 +350,8 @@ fn tab_more_button(tokens: &fm_views::Tokens, cx: &mut Context<ShellView>) -> im
                 .icon(Icon::new(IconName::Ellipsis).with_size(px(16.0)))
                 .tooltip("标签页操作")
                 // 与「＋」按钮同高，视觉上并排一组。
-                .w(px(30.0))
-                .h(px(32.0)),
+                .w(px(metrics::CONTROL_SIZE))
+                .h(px(metrics::CONTROL_SIZE)),
         )
         .dropdown_menu(tab_menu_builder(cx, None))
 }

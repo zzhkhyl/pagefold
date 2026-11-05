@@ -17,8 +17,8 @@ use std::rc::Rc;
 use fm_core::{Density, IconZoom, ViewMode};
 use gpui::{
     AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
-    prelude::FluentBuilder as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{Icon, Sizable as _};
 use gpui_kit_assets::IconName;
@@ -147,7 +147,7 @@ pub fn page(
         .flex_col()
         .w_full()
         .max_w(px(PAGE_MAX_WIDTH))
-        .gap(px(12.0))
+        .gap(px(16.0))
         .child(page_header(tokens))
         .child(appearance_card(snapshot, tokens, &handlers))
         .child(view_card(snapshot, tokens, &handlers))
@@ -166,7 +166,7 @@ pub fn page(
         .w_full()
         .overflow_y_scroll()
         .track_scroll(scroll)
-        .bg(tokens.bg)
+        .bg(tokens.panel)
         // 用「居中行 + 定宽列」实现水平居中，而不是 `mx_auto`：
         // 定宽列在窄窗下需要先被压缩（`max_w` + `w_full`），
         // 居中容器对这条约束的表达最直接。
@@ -175,7 +175,7 @@ pub fn page(
                 .flex()
                 .flex_row()
                 .justify_center()
-                .p(px(20.0))
+                .p(px(24.0))
                 .child(column),
         )
         .into_any_element()
@@ -278,7 +278,13 @@ fn appearance_card(
         "外观",
         "影响整个界面的配色与密度，改动立即生效。",
         vec![
-            setting_row("主题", "浅色 / 深色，跟随系统之外的手动选择", theme, false, tokens),
+            setting_row(
+                "主题",
+                "浅色 / 深色，跟随系统之外的手动选择",
+                theme,
+                false,
+                tokens,
+            ),
             setting_row(
                 "界面密度",
                 "列表行高：紧凑 27px / 标准 32px / 宽松 38px",
@@ -353,7 +359,7 @@ fn view_card(
         vec![
             setting_row(
                 "显示预览面板",
-                "宽屏为右侧第三栏，窄于 1100px 时改为浮层",
+                "宽屏为右侧第三栏，720px 及以下改为浮层",
                 preview,
                 false,
                 tokens,
@@ -593,14 +599,14 @@ fn card_header(title: &'static str, description: &'static str, tokens: &Tokens) 
         .border_color(tokens.border)
         .child(
             div()
-                .text_size(px(metrics::FONT_UI))
+                .text_size(px(metrics::FONT_LG))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(tokens.fg)
                 .child(title),
         )
         .child(
             div()
-                .text_size(px(metrics::FONT_XS))
+                .text_size(px(metrics::FONT_SM))
                 .text_color(tokens.muted_fg)
                 .child(description),
         )
@@ -637,11 +643,12 @@ fn setting_row(
     div()
         .flex()
         .flex_row()
+        .flex_wrap()
         .items_center()
         .gap(px(16.0))
         .px(px(16.0))
-        .py(px(8.0))
-        .min_h(px(tokens.row_height + 12.0))
+        .py(px(12.0))
+        .min_h(px(56.0))
         .when(!last, |element| {
             element.border_b_1().border_color(tokens.border)
         })
@@ -660,7 +667,7 @@ fn setting_row(
                 )
                 .child(
                     div()
-                        .text_size(px(metrics::FONT_XS))
+                        .text_size(px(metrics::FONT_SM))
                         .text_color(tokens.muted_fg)
                         .child(hint),
                 ),
@@ -676,8 +683,8 @@ fn info_line(label: &'static str, value: SharedString, tokens: &Tokens) -> AnyEl
         .gap(px(2.0))
         .child(
             div()
-                .font_family(tokens.mono_font.clone())
-                .text_size(px(metrics::FONT_XS))
+                .font_family(tokens.font_family.clone())
+                .text_size(px(metrics::FONT_SM))
                 .text_color(tokens.muted_fg)
                 .child(label),
         )
@@ -743,7 +750,11 @@ fn shortcuts_card(
             continue;
         }
 
-        let open = shortcuts.expanded.get(group_index).copied().unwrap_or(false);
+        let open = shortcuts
+            .expanded
+            .get(group_index)
+            .copied()
+            .unwrap_or(false);
         rows.push(group_header(
             *group,
             group_index,
@@ -809,7 +820,12 @@ fn shortcuts_card(
                 false,
                 tokens,
             ),
-            div().flex().flex_col().w_full().children(rows).into_any_element(),
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .children(rows)
+                .into_any_element(),
             div()
                 .flex()
                 .flex_col()
@@ -865,11 +881,7 @@ fn group_header(
         .cursor_pointer()
         .hover(move |style| style.bg(hover))
         .on_click(move |_: &ClickEvent, window, cx: &mut App| handler(index, window, cx))
-        .child(
-            Icon::new(chevron)
-                .with_size(px(12.0))
-                .text_color(muted),
-        )
+        .child(Icon::new(chevron).with_size(px(12.0)).text_color(muted))
         .child(
             div()
                 .text_size(px(metrics::FONT_XS))
@@ -988,9 +1000,9 @@ fn kbd_hint(keys: String, tokens: &Tokens) -> AnyElement {
         .rounded(px(4.0))
         .border_1()
         .border_color(tokens.border)
-        .bg(tokens.bg)
+        .bg(tokens.panel)
         .font_family(tokens.mono_font.clone())
-        .text_size(px(metrics::FONT_XS))
+        .text_size(px(metrics::FONT_SM))
         .text_color(tokens.muted_fg)
         .child(keys)
         .into_any_element()
@@ -1001,11 +1013,7 @@ fn kbd_hint(keys: String, tokens: &Tokens) -> AnyElement {
 /// 刻意不用 `widgets::text_button`：那个带 tooltip，而设置页里 25 行各挂一个
 /// tooltip，鼠标滚过列表时会不断创建/销毁 tooltip 实体——这也是「滚轮很卡」的来源之一。
 /// 这里只保留 hover 变色，够用且便宜。
-fn edit_link<F>(
-    id: impl Into<gpui::ElementId>,
-    tokens: &Tokens,
-    on_click: F,
-) -> AnyElement
+fn edit_link<F>(id: impl Into<gpui::ElementId>, tokens: &Tokens, on_click: F) -> AnyElement
 where
     F: Fn(&mut Window, &mut App) + 'static,
 {
@@ -1063,7 +1071,6 @@ mod tests {
         };
         assert!(full.is_fully_installed());
     }
-
 
     #[test]
     fn zoom_hint_only_mentions_the_view_switch_in_details_mode() {
