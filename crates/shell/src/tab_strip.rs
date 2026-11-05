@@ -206,7 +206,7 @@ impl ShellView {
             .flex_none()
             .flex()
             .flex_row()
-            .items_end()
+            .items_center()
             .gap(px(4.0))
             .h(px(metrics::TABSTRIP_HEIGHT))
             .pl(px(4.0))
@@ -234,11 +234,11 @@ impl ShellView {
                 div()
                     .flex()
                     .flex_row()
-                    .items_end()
+                    .items_center()
                     .gap(px(6.0))
                     .flex_shrink(1.0)
                     .min_w(px(0.0))
-                    .pt(px(metrics::TABSTRIP_PADDING_TOP))
+                    .h(px(metrics::TABSTRIP_HEIGHT))
                     .child(
                         // 标签很多时**横向滚动**，而不是把每个都压到只剩一两个字。
                         //
@@ -253,7 +253,7 @@ impl ShellView {
                             .gap(px(2.0))
                             .flex_shrink(1.0)
                             .min_w(px(0.0))
-                            .h(px(metrics::TAB_HEIGHT))
+                            .h_full()
                             .overflow_x_scroll()
                             .track_scroll(&self.tab_scroll)
                             // 鼠标滚轮直接横向滚：标签条只有横向可滚，
