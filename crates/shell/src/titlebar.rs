@@ -59,9 +59,11 @@ impl ShellView {
                         false,
                         tokens,
                     ))
+                    // 最大化之后同一个按钮的含义变成「还原」，图标必须跟着换——
+                    // 一直画一个方块会让人以为按钮失效了（Windows 的惯例是两个叠放的方框）。
                     .child(window_control(
                         "window-max",
-                        IconName::Square,
+                        maximize_icon(self.window_maximized),
                         WindowControlArea::Max,
                         false,
                         tokens,
@@ -110,4 +112,31 @@ fn window_control(
         .window_control_area(area)
         .child(Icon::new(icon).with_size(px(16.0)))
         .into_any_element()
+}
+/// 最大化按钮该画哪个图标。
+///
+/// 抽成函数是为了能单测：这不是配色问题，而是**语义**问题——窗口已经最大化时
+/// 按钮做的是「还原」，继续画一个方块会让人以为点了没反应。
+fn maximize_icon(maximized: bool) -> IconName {
+    if maximized {
+        IconName::WindowRestore
+    } else {
+        IconName::Square
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_maximize_button_switches_to_restore_when_maximized() {
+        assert_eq!(maximize_icon(false), IconName::Square);
+        assert_eq!(maximize_icon(true), IconName::WindowRestore);
+        assert_ne!(
+            maximize_icon(true),
+            maximize_icon(false),
+            "两种状态必须是两个不同的图标，否则等于没切换"
+        );
+    }
 }

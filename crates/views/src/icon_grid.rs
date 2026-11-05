@@ -219,8 +219,15 @@ fn cell(
         .on_mouse_down(MouseButton::Left, move |event, window, cx| {
             (*drag_start)(index, event.position, window, cx);
         })
+        // 只有**按住左键**时才是框选。鼠标只是经过（pressed_button 为 None）时
+        // 绝不能动选中集——否则会出现「没点任何东西，滑过谁就选中谁」。
+        //
+        // 这一条曾经缺失：判断只剩「有没有框选会话」，而会话在某些路径下
+        // （抬起事件被别处消费）没被清掉，于是纯悬停也会像拖选一样改选中。
         .on_mouse_move(move |event, window, cx| {
-            (*drag_move)(index, event.position, window, cx);
+            if crate::extends_rubber_band(event.pressed_button) {
+                (*drag_move)(index, event.position, window, cx);
+            }
         })
         .when(editing.is_none(), |element| element.cursor_pointer())
         // 编辑态下单元格不再响应点击：点击会**冒泡**到单元格上，

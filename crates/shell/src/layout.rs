@@ -1556,6 +1556,16 @@ fn content_column(
             (*end_out)(window, cx);
         })
         .children(children)
+        // 底部留一条**始终存在**的空白带。
+        //
+        // 这一条是为了「文件占满整屏」的情况：那时列表里一点空隙都没有，
+        // 而空白处的右键菜单（粘贴 / 新建 / 排序…）只挂在**容器**上，
+        // 于是用户根本没有地方可点。留出 28px 之后，最后一行下面永远有一条
+        // 属于容器的空白，右键它就等于右键「空白处」。
+        //
+        // 为什么不做成「列表内边距」：列表是虚拟化的，它的滚动内容由
+        // `uniform_list` 自己管，外面加不进去；放在容器这一层才稳。
+        .child(div().flex_none().h(px(28.0)).w_full())
         .context_menu(move |popup, window, cx| (*menu)(popup, window, cx))
         .into_any_element()
 }

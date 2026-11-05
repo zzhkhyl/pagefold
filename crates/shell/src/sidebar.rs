@@ -18,6 +18,7 @@ use gpui::{
     InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
     Styled as _, Window, div, ease_in_out, prelude::FluentBuilder as _, px,
 };
+use gpui_component::menu::ContextMenuExt as _;
 use gpui_component::{Icon, Sizable as _};
 use gpui_kit_assets::IconName;
 
@@ -92,18 +93,28 @@ impl ShellView {
         //
         // 放在「访问位置」列表的最下面。它是虚拟位置而不是真实目录，
         // 因此不走 `quick_access`（那份数据来自系统的已知文件夹枚举），单独一行。
-        rows.push(nav_row(
-            "recycle-bin",
-            String::from("回收站"),
-            IconName::Trash,
-            collapsed,
-            false,
-            matches!(location, Location::RecycleBin),
-            tokens,
-            cx.listener(|this, _: &ClickEvent, _window, cx| {
-                this.go_to_recycle_bin(cx);
-            }),
-        ));
+        rows.push(
+            div()
+                .id("recycle-bin-row")
+                .flex_none()
+                // 右键这里可以「清空回收站」——不必先导航进回收站。
+                // 菜单挂在**外层**：`nav_row` 自己已经用掉了 id 与 on_click，
+                // 再往里塞交互会让「点一下进入回收站」和右键菜单互相干扰。
+                .context_menu(crate::context_menu::recycle_bin_menu_builder(cx))
+                .child(nav_row(
+                    "recycle-bin",
+                    String::from("回收站"),
+                    IconName::Trash,
+                    collapsed,
+                    false,
+                    matches!(location, Location::RecycleBin),
+                    tokens,
+                    cx.listener(|this, _: &ClickEvent, _window, cx| {
+                        this.go_to_recycle_bin(cx);
+                    }),
+                ))
+                .into_any_element(),
+        );
 
         // —— 此电脑（含驱动器子项）——
         //

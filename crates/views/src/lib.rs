@@ -85,6 +85,18 @@ pub type SelectHandler = Rc<dyn Fn(usize, SelectMode, &mut Window, &mut App)>;
 /// 逐行命中测试让每一行**自己**报出下标，彻底绕开坐标换算。
 pub type DragSelectHandler = Rc<dyn Fn(usize, Point<Pixels>, &mut Window, &mut App)>;
 
+/// 这次 `mouse_move` 是否应该延伸框选。
+///
+/// 判据只有一条：**左键是否正按着**。曾经这里只看「有没有框选会话」，
+/// 而会话在某些路径下（抬起事件被别处消费）不会被清掉，于是鼠标只是经过
+/// 也会像拖选一样改选中集——用户看到的就是「没点任何东西，滑过谁就选中谁」。
+///
+/// 抽成函数是为了把这条规则写在一处：详情表与图标网格都调它，
+/// 将来再加第三个视图也不会各写一份、错一个。
+pub fn extends_rubber_band(pressed_button: Option<gpui::MouseButton>) -> bool {
+    pressed_button == Some(gpui::MouseButton::Left)
+}
+
 /// 用 `uniform_list` 做虚拟化的通用封装。
 ///
 /// `row` 只在**视口可见范围内**被调用，因此可以放心在其中做格式化等有成本的运算。
@@ -126,4 +138,26 @@ where
         .flex_grow(1.0)
         .min_h(px(0.0))
         .w_full()
+}
+
+#[cfg(test)]
+mod rubber_band_tests {
+    use super::*;
+    use gpui::MouseButton;
+
+    #[test]
+    fn only_a_held_left_button_extends_the_rubber_band() {
+        // 回归测试：鼠标只是经过（没有按键按下）时绝不能改选中集。
+        // 这一条曾经缺失，表现是「选中一个文件后上下移动鼠标，
+        // 经过的其它文件跟着被选中」。
+        assert!(extends_rubber_band(Some(MouseButton::Left)));
+        assert!(
+            !extends_rubber_band(None),
+            "没有按键按下的移动不是框选"
+        );
+        assert!(
+            !extends_rubber_band(Some(MouseButton::Right)),
+            "右键拖动不该改选中集"
+        );
+    }
 }

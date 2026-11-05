@@ -691,6 +691,37 @@ pub(crate) fn new_menu_builder(
     }
 }
 
+/// 侧边栏「回收站」那一行的右键菜单。
+///
+/// 只有一项「清空回收站…」。放在侧边栏而不是只放在回收站页面里，
+/// 是因为「清空」这件事的动机通常出现在**别处**（例如刚删完一批东西，
+/// 想顺手清掉，而不是先导航进回收站）。
+///
+/// 与回收站页面里的同名项共用 [`MenuAction::EmptyRecycleBin`]，
+/// 因此确认框文案与危险色不会在两个入口之间分叉。
+pub(crate) fn recycle_bin_menu_builder(
+    cx: &Context<ShellView>,
+) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+    let shell = cx.entity().downgrade();
+    move |menu, window, cx| {
+        let nodes = sidebar_recycle_bin_menu_spec();
+        build_menu(menu, &nodes, None, &shell, window, cx)
+    }
+}
+
+/// 侧边栏「回收站」右键菜单的节点清单。
+///
+/// 抽成函数是为了能单测：菜单项与动作的对应关系一旦错位，
+/// 表现是「点了没反应」或者「点了别的东西」，很难从界面上看出来。
+fn sidebar_recycle_bin_menu_spec() -> Vec<MenuNode> {
+    vec![MenuNode::Item(MenuItemSpec::new(
+        // 省略号表示「还会再问一次」，与回收站页面里的写法一致。
+        "清空回收站…",
+        IconName::Trash,
+        MenuAction::EmptyRecycleBin,
+    ))]
+}
+
 /// 右键按下时的处理器。
 ///
 /// 与设计稿一致：右键落在**未选中**的项上时先把它选中。否则多选状态会被破坏——
@@ -948,6 +979,21 @@ mod tests {
                 "{label} 不该出现在回收站菜单里"
             );
         }
+    }
+
+    #[test]
+    fn sidebar_recycle_bin_menu_has_exactly_the_empty_action() {
+        // 侧边栏那一行的右键菜单：只有「清空回收站…」一项，且映射到正确的动作。
+        // 多一项 / 少一项都意味着某个入口在别处不存在了。
+        let nodes = sidebar_recycle_bin_menu_spec();
+        assert_eq!(nodes.len(), 1, "侧边栏回收站菜单只应有一项");
+
+        let MenuNode::Item(item) = &nodes[0] else {
+            panic!("唯一一项必须是可点条目");
+        };
+        assert_eq!(item.label, "清空回收站…");
+        assert_eq!(item.action, MenuAction::EmptyRecycleBin);
+        assert!(!item.disabled, "菜单永远可点——空回收站由动作自己提示");
     }
 
     #[test]

@@ -369,8 +369,12 @@ pub fn row(
         .on_mouse_down(MouseButton::Left, move |event, window, cx| {
             (*drag_start)(index, event.position, window, cx);
         })
+        // 只有**按住左键**时才是框选。鼠标只是经过时（`pressed_button` 为 `None`）
+        // 绝不能改选中集——否则会出现「没点任何东西，滑过谁就选中谁」。
         .on_mouse_move(move |event, window, cx| {
-            (*drag_move)(index, event.position, window, cx);
+            if crate::extends_rubber_band(event.pressed_button) {
+                (*drag_move)(index, event.position, window, cx);
+            }
         })
         // 编辑态下整行不再响应点击：输入框就在行内，而点击会**冒泡**到行上，
         // 那会顺带改变选中集（把用户正在改的那一项取消选中），

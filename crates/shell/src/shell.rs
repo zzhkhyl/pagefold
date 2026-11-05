@@ -241,6 +241,12 @@ pub struct ShellView {
     /// 一并清掉，所以必须先抄下来、重建时补回去——否则所有输入框只能打字、
     /// 删不掉字。见 [`crate::shortcuts::apply`]。
     pub(crate) base_bindings: Vec<gpui::KeyBinding>,
+    /// 窗口当前是否最大化。
+    ///
+    /// 每帧从 `window.is_maximized()` 刷新一次，供标题栏选择「最大化 / 还原」图标。
+    /// 存成字段而不是让标题栏直接读 `Window`：`render_window_actions` 只拿到 `cx`，
+    /// 把 `&Window` 一路传下去会牵动它所有的调用点。
+    pub(crate) window_maximized: bool,
     /// 标签条的横向滚动位置。
     ///
     /// 标签有最小宽度（96px），多到装不下时靠横向滚动而不是无限压缩——
@@ -452,6 +458,7 @@ impl ShellView {
             shortcut_conflicts,
             shortcut_groups: [false; fm_core::Group::ALL.len()],
             base_bindings,
+            window_maximized: false,
             settings_scroll: ScrollHandle::new(),
             tab_scroll: ScrollHandle::new(),
             renaming: None,
@@ -1844,20 +1851,21 @@ impl ShellView {
 
     /// 清空回收站（先弹危险确认框）。
     pub(crate) fn empty_recycle_bin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.in_recycle_bin() {
-            window.push_notification(Notification::warning("请先进入回收站"), cx);
-            return;
-        }
-        let count = self.visible().len();
+        // 两个入口共用：回收站里的空白处右键，以及侧边栏「回收站」这一行的右键。
+        // 后者并不要求先进入回收站——那正是它存在的意义（在别处也能直接清空）。
+        // 此时拿不到条目数，确认框就不写具体数量。
+        let count = self.in_recycle_bin().then(|| self.visible().len());
 
         let view = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |alert, _window, _cx| {
             let view = view.clone();
+            let description = match count {
+                Some(count) => format!("清空回收站里的全部 {count} 个项目？\n此操作无法撤销。"),
+                None => String::from("清空回收站里的全部项目？\n此操作无法撤销。"),
+            };
             alert
                 .title("清空回收站")
-                .description(format!(
-                    "清空回收站里的全部 {count} 个项目？\n此操作无法撤销。"
-                ))
+                .description(description)
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("清空")
@@ -1885,7 +1893,11 @@ impl ShellView {
             let _ = this.update_in(cx, move |view, window, cx| match result {
                 Ok(()) => {
                     window.push_notification(Notification::success("回收站已清空"), cx);
-                    view.reload(cx);
+                    // 只有正看着回收站时才需要重扫；从侧边栏发起的清空不该
+                    // 顺手把当前目录重新扫一遍。
+                    if view.in_recycle_bin() {
+                        view.reload(cx);
+                    }
                 }
                 Err(reason) => window.push_notification(Notification::error(reason), cx),
             });
@@ -3996,6 +4008,10 @@ impl Render for ShellView {
         // 令牌每帧刷新一次：主题、密度、缩放三者的变化都会在这里被吸收，
         // 子渲染函数因此只需要读 `self.tokens`，不必各自判断主题。
         self.refresh_tokens(cx);
+
+        // 最大化状态每帧同步一次：标题栏据此在「最大化」与「还原」两个图标之间切换。
+        // 最大化 / 还原会触发窗口尺寸变化，因此下一次渲染一定能拿到新值。
+        self.window_maximized = window.is_maximized();
 
         // 没有任何焦点时，把焦点落到内容根上。这是全局快捷键能生效的前提：
         // 按键分发从焦点节点开始向上冒泡，没有焦点时起点是窗口根节点，
